@@ -112,7 +112,9 @@ def run(module_file, manifest_file, config, output):
     size = int(config.get("size", 64))
     device = config.get("device", "cpu")
     mod = load_candidate(module_file)
+    training_started = time.perf_counter()
     checkpoint_meta = mod.train(config, manifest_file, output / "checkpoint")
+    training_duration_seconds = time.perf_counter() - training_started
     predictor = mod.load(output / "checkpoint" / "checkpoint_manifest.json", device=device)
     valid_paths = [p for p, entry in zip(paths, manifest["images"]) if entry["split"] == "validation/good"]
     # A disjoint good subset calibrates scores; remaining good images assess FPR.
@@ -131,6 +133,7 @@ def run(module_file, manifest_file, config, output):
     all_pred_normal = np.stack(all_pred_normal)
     all_pred_synth = np.stack(all_pred_synth)
     metrics = evaluate_dev(all_pred_normal, all_pred_synth, np.stack(masks), calibration_maps=all_pred_cal)
+    metrics['training/duration_seconds'] = float(training_duration_seconds)
     metrics["dev_synthetic/preview_anomaly_score"] = float(np.max(all_pred_synth[0]))
     alternate, alternate_masks = zip(*(alternate_corruption(im, i + 7000) for i, im in enumerate(normal)))
     alternate_maps = []
