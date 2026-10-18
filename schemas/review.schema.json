@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "run_id": {"type": "string"},
+    "objective_measured_results": {"type": "string"},
+    "critic_concerns": {"type": "array", "items": {"type": "string"}},
+    "suggested_falsification": {"type": "string"},
+    "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+    "recommended_next_action": {"type": "string", "enum": ["reject", "replicate", "ablate", "investigate", "promote_for_review"]}
+  },
+  "required": ["schema_version", "run_id", "objective_measured_results", "critic_concerns", "suggested_falsification", "confidence", "recommended_next_action"]
+}

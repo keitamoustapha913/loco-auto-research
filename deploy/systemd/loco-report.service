@@ -1,0 +1,10 @@
+[Unit]
+Description=LOCO daily research report generation
+[Service]
+Type=oneshot
+User=loco-operator
+WorkingDirectory=/opt/loco-autoresearch
+EnvironmentFile=/etc/loco-autoresearch.env
+ExecStart=/opt/loco-autoresearch/.venv/bin/python -m scripts.daily_report
+NoNewPrivileges=true
+UMask=0077

@@ -1,0 +1,8 @@
+[Unit]
+Description=Check LOCO GPU experiment queue periodically
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=1min
+Unit=loco-worker.service
+[Install]
+WantedBy=timers.target

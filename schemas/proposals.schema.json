@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "properties": {"schema_version": {"const": "1.0"}, "proposals": {"type": "array", "minItems": 3, "maxItems": 5, "items": {"$ref": "#/$defs/proposal"}}},
+  "required": ["schema_version", "proposals"],
+  "$defs": {"proposal": {"type": "object", "additionalProperties": false,
+    "properties": {
+      "schema_version": {"const": "1.0"},
+      "hypothesis_id": {"type": "string", "pattern": "^[a-zA-Z0-9_-]{3,64}$"},
+      "research_question": {"type": "string", "minLength": 10},
+      "claim": {"type": "string", "minLength": 15},
+      "references": {"type": "array", "items": {"type": "string"}},
+      "baseline": {"type": "string"},
+      "expected_observation": {"type": "string"},
+      "controlled_change": {"type": "string"},
+      "evaluation_plan": {"type": "string"},
+      "estimated_gpu_minutes": {"type": "number", "minimum": 0, "maximum": 240},
+      "risk_and_shortcuts": {"type": "string"},
+      "new_dependencies": {"type": "array", "items": {"type": "string"}},
+      "candidate_family": {"type": "string", "minLength": 3}
+    },
+    "required": ["schema_version", "hypothesis_id", "research_question", "claim", "references", "baseline", "expected_observation", "controlled_change", "evaluation_plan", "estimated_gpu_minutes", "risk_and_shortcuts", "new_dependencies", "candidate_family"]
+  }}
+}

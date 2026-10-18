@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "sources": [
+    {"key":"mvtec_loco","title":"MVTec LOCO AD","url":"https://www.mvtec.com/research-teaching/datasets/mvtec-loco-ad","type":"dataset","status":"reference_only","notes":"Follow official license and evaluation; sealed test remains outside development"},
+    {"key":"autoresearch","title":"autoresearch","url":"https://github.com/karpathy/autoresearch","type":"engineering_reference","status":"reference_only","notes":"Fixed-budget iterative research inspiration, not benchmark evidence"},
+    {"key":"efficientad","title":"EfficientAD","url":"https://arxiv.org/abs/2303.14535","type":"paper","status":"not_reproduced"},
+    {"key":"csad","title":"CSAD","url":"https://arxiv.org/abs/2408.15628","type":"paper","status":"not_reproduced"},
+    {"key":"mudenet","title":"MuDeNet","url":"https://doi.org/10.1016/j.inffus.2026.104214","type":"paper","status":"not_reproduced"},
+    {"key":"gcad","title":"MVTec LOCO AD / GCAD","url":"https://link.springer.com/article/10.1007/s11263-022-01578-9","type":"paper","status":"not_reproduced"}
+  ]
+}

@@ -1,0 +1,52 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.env
+.env.*
+!.env.example
+*.log
+*.lock
+# NEVER commit datasets / generated anomalies
+/data/
+data/
+/synthetic_dev/
+/runs/
+/checkpoints/
+/sealed/
+# Private state; placeholders and Markdown remain trackable
+research_memory/*.sqlite
+research_memory/*.sqlite-*
+*.db
+*.db-*
+# Generated measurements and images
+results/metrics/*
+!results/metrics/.gitkeep
+results/heatmaps/*
+!results/heatmaps/.gitkeep
+results/reports/*
+!results/reports/.gitkeep
+mlruns/
+mlartifacts/
+/candidates/worktrees/
+/candidates/*/output/
+/candidates/*/checkpoints/
+*.pt
+*.pth
+*.onnx
+*.engine
+*.safetensors
+*.ckpt
+*.png
+*.jpg
+*.jpeg
+*.tiff
+*.tif
+*.npy
+*.npz
+*.parquet
+# Preserve tracked docs under literature only, but no redistributed PDFs
+literature/papers/*.pdf
+.DS_Store
+
+.runtime/

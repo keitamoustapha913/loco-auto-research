@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "run_id": {"type": "string"}, "hypothesis_id": {"type": "string"},
+    "candidate_id": {"type": "string"},
+    "category": {"type": "string"}, "stage": {"type": "string"},
+    "status": {"type": "string"}, "git_sha": {"type": "string"},
+    "manifest_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "metrics": {"type": "object", "additionalProperties": {"type": "number"}},
+    "mlflow_run_id": {"type": "string"}
+  },
+  "required": ["schema_version", "run_id", "hypothesis_id", "candidate_id", "category", "stage", "status", "manifest_sha256", "metrics"]
+}

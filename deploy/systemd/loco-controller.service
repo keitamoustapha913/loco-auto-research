@@ -1,0 +1,11 @@
+[Unit]
+Description=LOCO research controller initialization/reconciliation
+After=network.target
+[Service]
+Type=oneshot
+User=loco-operator
+WorkingDirectory=/opt/loco-autoresearch
+EnvironmentFile=/etc/loco-autoresearch.env
+ExecStart=/opt/loco-autoresearch/.venv/bin/python -m orchestrator.controller reconcile
+NoNewPrivileges=true
+UMask=0077

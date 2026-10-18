@@ -1,0 +1,25 @@
+schema_version: '1.0'
+mission: accurate MVTec LOCO AD logical-anomaly heatmaps
+categories:
+  - breakfast_box
+  - juice_bottle
+  - pushpins
+  - screw_bag
+  - splicing_connectors
+training:
+  permitted_splits: [train/good]
+  calibration_splits: [validation/good]
+  synthetic_anomalies_from_good: true
+  official_test_available_to_agents: false
+deployment:
+  no_reference_image_memory_bank: true
+  max_parameters_screening: 10000000
+  max_latency_ms_p95_screening: 20.0
+  gpu_count: 1
+research:
+  autonomous_candidate_families_min: 3
+  gpu_smoke_seconds: 300
+  pilot_seconds: 1800
+  full_experiment_requires_operator_approval: true
+  official_test_feedback_to_agent: false
+  require_shortcut_controls: true
