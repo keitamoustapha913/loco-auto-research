@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -20,13 +21,24 @@ from orchestrator.state_store import StateStore
 REPO = Path(__file__).resolve().parents[1]
 
 
-def run_worker_once(store, manifest_path, runtime):
+def run_worker_once(store, manifest_path, runtime, personal_mode_authorized=False, cancel=None,
+                    expected_run_id=None):
     with gpu_lock(runtime):
-        job = claim_next(store, max_duration=max_job_seconds())
+        duration = max_job_seconds()
+        if expected_run_id:
+            expected = store.get_run(expected_run_id)
+            if not expected or expected['status'] != 'QUEUED':
+                raise ValueError('expected campaign job is not queued')
+            duration = min(duration, int(json.loads(expected['config_json']).get('timeout_seconds', duration)))
+        job = claim_next(store, max_duration=duration, expected_run_id=expected_run_id)
         if not job:
             return {"status": "IDLE"}
         try:
-            outcome = execute_run(job, store, REPO, Path(manifest_path), Path(runtime))
+            if personal_mode_authorized or cancel:
+                outcome = execute_run(job, store, REPO, Path(manifest_path), Path(runtime),
+                                      personal_mode_authorized=personal_mode_authorized, cancel=cancel)
+            else:
+                outcome = execute_run(job, store, REPO, Path(manifest_path), Path(runtime))
         except Exception as exc:
             current = store.get_run(job["run_id"])
             if current["status"] == "RUNNING":
@@ -35,14 +47,33 @@ def run_worker_once(store, manifest_path, runtime):
         return {"run_id": job["run_id"], "status": outcome}
 
 
-def budgeted_invoke(store, role, repo_root, schema, prompt, **kwargs):
+def budgeted_invoke(store, role, repo_root, schema, prompt, campaign=None, **kwargs):
+    if campaign:
+        campaigns, campaign_id = campaign
+        row = campaigns.get(campaign_id)
+        limits = json.loads(row['config_json'])['limits']
+        remaining = int(row['created_at'] + limits['max_wall_hours'] * 3600 - __import__('time').time())
+        if remaining < 10:
+            raise RuntimeError('campaign wall-time budget exhausted before Codex call')
+        kwargs['timeout'] = min(int(kwargs.get('timeout', 180)), remaining)
+        campaigns.reserve_codex_call(campaign_id)
+        campaigns.event(campaign_id, 'AGENT_STARTED', role=role)
     store.reserve_codex_call(role)
-    return invoke(role, repo_root, schema, prompt, **kwargs)
+    try:
+        result = invoke(role, repo_root, schema, prompt, **kwargs)
+    except Exception as exc:
+        if campaign:
+            campaigns.event(campaign_id, 'AGENT_FAILED', role=role, error=str(exc))
+        raise
+    if campaign:
+        campaigns.event(campaign_id, 'AGENT_COMPLETED', role=role)
+    return result
 
 
-def add_research_proposals(store, prompt, count=3):
+def add_research_proposals(store, prompt, count=3, campaign=None, personal_mode=False):
     schema = REPO / "schemas" / "proposals.schema.json"
-    output = budgeted_invoke(store, "researcher", REPO, schema, prompt, timeout=240)["response"]
+    output = budgeted_invoke(store, "researcher", REPO, schema, prompt, timeout=240,
+                             campaign=campaign, personal_mode=personal_mode)["response"]
     proposals = output["proposals"]
     if len(proposals) < count:
         raise ValueError(f"researcher returned {len(proposals)}; need at least {count}")
@@ -56,6 +87,9 @@ def add_research_proposals(store, prompt, count=3):
     def signature(item):
         return ' '.join((item.get('claim', '') + ' ' + item.get('controlled_change', '')).lower().split())
     for proposal in proposals:
+        if any(not isinstance(dep, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+(?:[<>=!~]+[0-9][A-Za-z0-9_.-]*)?', dep)
+               for dep in proposal.get('new_dependencies', [])):
+            raise ValueError('new_dependencies must contain package names only; use [] for none')
         if any(proposal['hypothesis_id'] == old['hypothesis_id'] or
                SequenceMatcher(None, signature(proposal), signature(old)).ratio() > 0.92
                for old in prior):
@@ -71,14 +105,16 @@ def add_research_proposals(store, prompt, count=3):
     return proposals
 
 
-def scout_literature(store):
+def scout_literature(store, campaign=None, personal_mode=False):
     """Untrusted citation leads, not independently verified paper findings."""
     response = budgeted_invoke(
         store, "scout", REPO, REPO / "schemas" / "literature.schema.json",
         "Investigate current logical anomaly localization research for MVTec LOCO AD. "
         "Look beyond CSAD, MuDeNet and EfficientAD; describe likely failure modes "
         "and inference memory requirements. Cite sources; if you cannot verify a "
-        "reference, explicitly mark it unverified. Do not access any local test data.", timeout=240
+        "reference, explicitly mark it unverified. Do not access any local test data. "
+        "Do not call MCP tools; use a source URL only when you can verify it within the time limit.", timeout=120,
+        campaign=campaign, personal_mode=personal_mode
     )["response"]
     filename = REPO / "literature" / "scout_notes.json"
     filename.write_text(json.dumps({"generated_by": "Codex literature scout; UNVERIFIED", "result": response}, indent=2))
@@ -91,7 +127,7 @@ def list_proposals(store):
     return [dict(row) for row in rows]
 
 
-def implement_proposal(store, hypothesis_id):
+def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False):
     with store.connect() as con:
         row = con.execute("SELECT proposal_json FROM hypotheses WHERE hypothesis_id=?", (hypothesis_id,)).fetchone()
     if not row:
@@ -101,33 +137,68 @@ def implement_proposal(store, hypothesis_id):
     allowed_file = tree / "candidates" / hypothesis_id / "model.py"
     schema = REPO / "schemas" / "implementation.schema.json"
     instruction = (
-        f"Implement hypothesis {hypothesis_id} as the module candidates/{hypothesis_id}/model.py "
-        "inside your assigned worktree. Conform to the train/load/predict contract. "
-        "Create model code and candidate README only; do not change other directories. "
+        f"Write a minimal, falsifiable pilot implementation of hypothesis {hypothesis_id} "
+        f"NOW as the module candidates/{hypothesis_id}/model.py "
+        "inside your assigned worktree. The fixed trusted runner calls "
+        "train(config: dict, allowed_train_manifest: Path, output_dir: Path), then "
+        "load(output_dir / 'checkpoint_manifest.json', device=config['device']), then "
+        "predict(images) where images are RGB float32 [B,3,H,W]. Return finite "
+        "anomaly_maps [B,1,H,W] and image_scores [B]. Save "
+        "output_dir/checkpoint_manifest.json and output_dir/model.pt; the trusted "
+        "runner measures the latter artifact. Read-only scripts/run_candidate.py "
+        "shows the precise protocol. Do not alter its calling convention. "
+        "Actually create model.py, a short README, and optionally test_model.py and candidate_manifest.json; "
+        "a proposal or plan alone fails verification. "
+        "If you write tests, use the system temporary directory for fixtures because candidate source is mounted read-only during tests. "
+        "Do not change other directories. "
         f"Proposal: {json.dumps(proposal, sort_keys=True)}"
     )
-    response = budgeted_invoke(store, "implementer", REPO, schema, instruction, timeout=600, worktree=tree)
     import subprocess
-    changed = subprocess.run(["git", "-C", str(tree), "status", "--porcelain", "--untracked-files=all"], check=True, capture_output=True, text=True).stdout.splitlines()
-    approved_prefix = f"candidates/{hypothesis_id}/"
-    for line in changed:
-        filename = line[3:].replace('"', '')
-        if not filename.startswith(approved_prefix) or ".." in Path(filename).parts:
-            raise ValueError(f"Agent attempted to modify out-of-scope path: {filename}")
-    if not allowed_file.is_file():
-        raise ValueError("implementation missing model.py")
-    if response["response"].get("new_dependencies") or response['response'].get('external_weights'):
-        raise PermissionError("Agent requested dependencies or external weights; provenance and operator approval required")
     from orchestrator.experiment_runner import verify_candidate_source
-    verify_candidate_source(allowed_file)
+    feedback = ''
+    for attempt in range(2):
+        response = budgeted_invoke(store, "implementer", REPO, schema, instruction + feedback,
+                                   timeout=600, worktree=tree, campaign=campaign, personal_mode=personal_mode)
+        with store.connect() as con:
+            con.execute("INSERT INTO events(run_id,time,kind,payload_json) VALUES(NULL,?,?,?)",
+                        (__import__('time').time(), 'IMPLEMENTER_RESPONSE', json.dumps({
+                            'hypothesis_id': hypothesis_id, 'attempt': attempt + 1,
+                            'response': response['response']})))
+        changed = subprocess.run(["git", "-C", str(tree), "status", "--porcelain", "--untracked-files=all"],
+                                 check=True, capture_output=True, text=True).stdout.splitlines()
+        approved_prefix = f"candidates/{hypothesis_id}/"
+        approved_names = {'model.py', 'README.md', 'test_model.py', 'candidate_manifest.json'}
+        approved_files = {approved_prefix + name for name in approved_names}
+        for line in changed:
+            filename = line[3:].replace('"', '')
+            if filename not in approved_files or ".." in Path(filename).parts or (tree / filename).is_symlink():
+                raise PermissionError(f"Agent attempted to modify out-of-scope path: {filename}")
+        for item in allowed_file.parent.rglob('*'):
+            if item.is_symlink() or (item.is_file() and item.name not in approved_names):
+                raise PermissionError(f"Agent wrote an unapproved candidate file: {item.name}")
+        if response["response"].get("new_dependencies") or response['response'].get('external_weights'):
+            raise PermissionError("Agent requested dependencies or external weights; provenance and operator approval required")
+        try:
+            if response['response'].get('candidate_id') != hypothesis_id or not all(
+                    response['response'].get(k) is True for k in ('train_contract', 'load_contract', 'predict_contract')):
+                raise ValueError('implementer did not attest the assigned candidate contract')
+            if not allowed_file.is_file():
+                raise ValueError('implementation missing model.py')
+            verify_candidate_source(allowed_file)
+            break
+        except ValueError as exc:
+            if attempt == 1:
+                raise
+            feedback = f"\nYour first attempt failed the trusted static check: {exc}. Repair only the assigned candidate files and return accurate contract claims."
     store.set_hypothesis_status(hypothesis_id, "IMPLEMENTED")
     return {"worktree": str(tree), "candidate_module": str(allowed_file), "agent": response["response"]}
 
 
-def queue_candidate(store, hypothesis_id, candidate_id, category, stage, device, manifest_path, seconds=300):
+def queue_candidate(store, hypothesis_id, candidate_id, category, stage, device, manifest_path, seconds=300,
+                    personal_mode_authorized=False, campaign_id=None, campaign_name=None):
     from benchmark.data_guard import load_manifest, manifest_fingerprint
     from orchestrator.experiment_runner import candidate_file, sha256
-    if candidate_id != "toy_normal_ae" and os.getenv("LOCO_SANDBOX_VERIFIED") != "1":
+    if candidate_id != "toy_normal_ae" and not personal_mode_authorized and os.getenv("LOCO_SANDBOX_VERIFIED") != "1":
         raise PermissionError("Operator must verify OS isolation before queueing untrusted candidates")
     module = candidate_file(REPO, candidate_id)
     manifest, paths = load_manifest(manifest_path)
@@ -136,6 +207,11 @@ def queue_candidate(store, hypothesis_id, candidate_id, category, stage, device,
     enforce(store, next_gpu_seconds=seconds if device == "cuda" else 0)
     timeout = min(int(seconds), max_job_seconds())
     cfg = {"device": device, "size": 128, "epochs": 1, "seed": 7, "timeout_seconds": timeout, "category": category, "model_sha256": sha256(module)}
+    if campaign_id:
+        cfg["campaign_id"] = campaign_id
+        if campaign_name:
+            cfg["campaign_name"] = campaign_name
+        cfg["execution_mode"] = "personal_bwrap" if personal_mode_authorized else "isolated"
     candidate_tree = REPO / "candidates" / "worktrees" / candidate_id
     if candidate_tree.is_dir():
         git_sha = subprocess.run(["git", "-C", str(candidate_tree), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()

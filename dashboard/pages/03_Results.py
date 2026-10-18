@@ -33,7 +33,7 @@ with models_tab:
             st.info("No runs match this search.")
     else:
         table = experiment_rows(filtered)
-        visible = [{k: row[k] for k in ("Model", "Type", "Status", "Synthetic localization AUROC", "Latency (p95)", "GPU time", "Date")} for row in table]
+        visible = [{k: row[k] for k in ("Model", "Type", "Status", "Synthetic localization AUROC", "Latency (p95)", "GPU slot time", "Date")} for row in table]
         st.dataframe(visible, hide_index=True, width="stretch", height=min(360, 38 * (len(visible) + 1)),
                      column_config={"Synthetic localization AUROC": st.column_config.TextColumn(help=METRICS["dev_synthetic/pixel_auroc"][1]),
                                     "Latency (p95)": st.column_config.TextColumn(help=METRICS["inference/e2e_ms_p95"][1])})

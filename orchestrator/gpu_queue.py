@@ -27,7 +27,7 @@ def gpu_lock(runtime=None):
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def claim_next(store: StateStore, max_duration=1800):
+def claim_next(store: StateStore, max_duration=1800, expected_run_id=None):
     enforce(store, next_gpu_seconds=max_duration)
     with store.connect() as con:
         con.execute("BEGIN IMMEDIATE")
@@ -38,6 +38,8 @@ def claim_next(store: StateStore, max_duration=1800):
         if not row:
             return None
         run_id = row["run_id"]
+        if expected_run_id is not None and run_id != expected_run_id:
+            raise GpuBusy("another queued experiment precedes this campaign job")
     # Called while holding an OS-level flock. Transition uses a new transaction.
     store.transition(run_id, "RUNNING", expect="QUEUED")
     return store.get_run(run_id)

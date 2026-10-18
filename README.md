@@ -20,6 +20,27 @@ uv run --extra all loco-lab stop
 
 The CLI reads `../loco-research.env` (or `LOCO_ENV_FILE`) as literal `export NAME=value` assignments with simple variable references. It does not execute shell statements. Explicit environment variables take precedence. The existing runtime, ledger, good-data path, budget, and MLflow URI are preserved. The good-only manifest must already exist at `$LOCO_RUNTIME/good_manifest.json`. Keep the official anomalous LOCO test data and masks outside this account and runtime.
 
+## Autonomous campaign
+
+The persistent research controller uses the same `loco-lab` entry point:
+
+```bash
+uv run --extra all loco-lab research start
+uv run --extra all loco-lab research status
+uv run --extra all loco-lab research pause
+uv run --extra all loco-lab research resume
+uv run --extra all loco-lab research report
+uv run --extra all loco-lab research stop
+```
+
+The human-owned `configs/autonomy.yaml` sets the campaign and per-campaign ceilings. It defaults to **not authorized** for unattended personal-server execution. Starting it requires an operator to review the shared-UID risk in `deploy/SECURITY.md` and explicitly set `security.operator_accepts_shared_uid_risk: true` in that file. This authorizes only the limits in that configuration; increasing global limits still requires operator action. The application startup command never starts a campaign. A stopped campaign cannot resume; a crashed worker resumes the same campaign ledger state, marks any interrupted GPU job as interrupted, and never replays that job. Pause prevents new work; stop cancels the active job and queued campaign work. The dashboard remains read-only and shows actual campaign state from SQLite.
+
+Agent calls run in a Bubblewrap mount namespace with only the charter, agent instructions, selected benchmark contract files, and the assigned candidate directory visible. Codex API access requires a shared network namespace; the candidate GPU process runs in the existing separate, no-network Bubblewrap sandbox and never receives Codex authentication. This is a **personal-server shared-host-UID mode**, not verified multi-user OS isolation. The approved four-hour campaign is not started by installation or service startup. Official LOCO anomalies, masks, and final evaluation remain outside the campaign.
+
+The trusted controller charges Codex calls before invocation and GPU time on success, failure, timeout, interruption, and cancellation. It stops at wall, GPU, experiment, call, or consecutive-failure limits. Agent output is schema-checked and used only as research proposals, implementation files in the assigned workspace, and critique; it cannot supply shell commands to the scheduler. Candidate dependencies and external weights require separate review. Development scores remain synthetic proxies.
+
+The ledger's `gpu_seconds` is **exclusive GPU slot wall time**, charged even if a candidate uses CPU internally. Peak VRAM and CUDA allocation measurements are separate evidence of actual device use. A zero peak VRAM value must not be described as GPU computation.
+
 On your laptop, open one SSH tunnel:
 
 ```bash
@@ -37,6 +58,6 @@ The dashboard has **Home** for laboratory and research status, **Research** for 
 
 The research roles remain Literature Scout, Hypothesis Researcher, Implementation Agent, Research Critic, Deterministic Experiment Runner, and Decision Engine. The operator must verify actual OS-level isolation before allowing unattended candidate execution. `LOCO_SANDBOX_VERIFIED=1` and `LOCO_ALLOW_UNATTENDED=1` are operator assertions, not a sandbox. The browser is read-only; queue changes and smoke tests require the trusted CLI. Normal-only images and synthetic corruptions are used for development. No inference-time training-image memory bank is permitted. The sealed official test set remains inaccessible.
 
-Untrusted candidate execution now uses a Bubblewrap mount and network namespace with read-only good data and trusted inputs, a candidate-only code mount, and a writable run output mount. The included toy candidate can be tested through this path with `LOCO_FORCE_SANDBOX_TOY=1 loco-lab smoke --dataset juice_bottle --device cuda`. Unattended Codex implementation remains blocked pending a separately verified Linux identity, ACLs, and resource ceilings; see `deploy/SECURITY.md`.
+Untrusted candidate execution uses a Bubblewrap mount and network namespace with read-only good data and trusted inputs, a candidate-only code mount, and a writable run output mount. The included toy candidate can be tested through this path with `LOCO_FORCE_SANDBOX_TOY=1 loco-lab smoke --dataset juice_bottle --device cuda`. The separate-identity design and residual personal-server risks are documented in `deploy/SECURITY.md`.
 
 MLflow synchronization is automatic and retryable. A terminal run state and its tracking event are committed together in SQLite. If MLflow is down, events remain pending with retry errors; after recovery the worker retries. Run UUIDs are mapped to MLflow run IDs, including crash recovery by run tag. See `deploy/OPERATIONS.md` and `deploy/SECURITY.md` for operational details.

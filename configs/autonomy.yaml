@@ -1,0 +1,29 @@
+campaign:
+  name: juice-bottle-autoresearch
+  dataset: juice_bottle
+  mode: autonomous
+  gpu_device: cuda
+limits:
+  max_gpu_hours: 4
+  max_wall_hours: 12
+  max_experiments: 8
+  max_codex_calls: 30
+  max_job_seconds: 1800
+  max_consecutive_failures: 3
+  max_parallel_gpu_jobs: 1
+research:
+  literature_scout: true
+  hypothesis_generation: true
+  candidate_implementation: true
+  experimental_evaluation: true
+  research_critique: true
+  adaptive_next_experiment: true
+  synthetic_anomalies_allowed: true
+  official_test_access: false
+tracking:
+  sqlite: true
+  mlflow: true
+  dashboard: true
+security:
+  execution_mode: personal_bwrap
+  operator_accepts_shared_uid_risk: false

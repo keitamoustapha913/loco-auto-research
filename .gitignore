@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+*.egg-info/
 .env
 .env.*
 !.env.example
@@ -47,6 +48,7 @@ mlartifacts/
 *.parquet
 # Preserve tracked docs under literature only, but no redistributed PDFs
 literature/papers/*.pdf
+literature/scout_notes.json
 .DS_Store
 
 .runtime/

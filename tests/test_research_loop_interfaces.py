@@ -40,6 +40,16 @@ def test_ranked_distinct_proposals_and_duplicate_guard(tmp_path, monkeypatch):
     assert len(controller.list_proposals(store)) == 3
 
 
+def test_dependency_field_rejects_narrative_instead_of_package_names(tmp_path, monkeypatch):
+    store = StateStore(tmp_path / 'db.sqlite')
+    batch = [proposal(i) for i in (1, 2, 3)]
+    batch[0]['new_dependencies'] = ['None requested; use existing PyTorch.']
+    monkeypatch.setattr(controller, 'budgeted_invoke', lambda *args, **kwargs: {'response': {'proposals': batch}})
+    with pytest.raises(ValueError, match='package names'):
+        controller.add_research_proposals(store, 'test')
+    assert controller.list_proposals(store) == []
+
+
 def test_nonexecuting_candidate_protocol_check(tmp_path):
     toy = Path(__file__).parents[1] / 'candidates/toy_normal_ae/model.py'
     assert 'source_sha256' in verify_candidate_source(toy)

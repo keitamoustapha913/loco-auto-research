@@ -13,6 +13,14 @@ PILOT = "Research pilot"
 FULL = "Full research evaluation"
 OFFICIAL = "Official benchmark evaluation"
 UNCLASSIFIED = "Unclassified run"
+
+
+def direction_label(value: str) -> str:
+    if value.startswith('evidence-followup:'):
+        parts = value.split(':', 2)
+        if len(parts) == 3:
+            return f"{parts[2].replace('_', ' ').title()} {parts[1].replace('_', ' ')} using the latest experiment evidence"
+    return value.replace('_', ' ') if value else 'No next direction recorded'
 METRICS = {
     "dev_synthetic/pixel_auroc": ("Synthetic localization AUROC", "Area under the pixel ROC curve on synthetic development changes; not official LOCO performance.", "score"),
     "dev_synthetic/region_pro_proxy_NOT_OFFICIAL": ("Synthetic region overlap proxy", "Region overlap on synthetic development masks; not official LOCO sPRO.", "score"),
@@ -126,7 +134,7 @@ def experiment_rows(runs: Iterable[dict]) -> list[dict]:
             "Normal image false positive rate": format_metric(metric_value(run, "normal/image_fpr_at_threshold"), "percent"),
             "Latency (p95)": format_metric(metric_value(run, "inference/e2e_ms_p95"), "ms"),
             "Model size": format_metric(metric_value(run, "inference/checkpoint_mib"), "MiB"),
-            "GPU time": format_duration(run.get("gpu_seconds")),
+            "GPU slot time": format_duration(run.get("gpu_seconds")),
             "Date": format_date(run.get("created_at")),
         })
     return result

@@ -1,4 +1,5 @@
 """At-a-glance state: service health and research authorization are different facts."""
+import json
 import os
 import time
 
@@ -6,11 +7,11 @@ import streamlit as st
 
 from dashboard.components import page_intro
 from dashboard.data_access import (
-    dataset_summary, get_events, get_proposals, gpu_status, ledger_summary,
+    campaign_summary, dataset_summary, get_events, get_proposals, gpu_status, ledger_summary,
     list_runs, pending_outbox, queue_paused, service_status, tracking_health,
 )
 from dashboard.presentation import (
-    autonomy_state, classify_run, format_date, format_duration, parse_event,
+    autonomy_state, classify_run, direction_label, format_date, format_duration, parse_event,
     research_summary, run_label,
 )
 
@@ -32,6 +33,14 @@ def live_home():
     dataset = cached_dataset_summary()
     summary = research_summary(runs)
     state, reason = autonomy_state(os.environ, queue_paused())
+    autonomous = campaign_summary()
+    latest_agent = next((e for e in (autonomous or {}).get('events', [])
+                         if e['kind'] in {'AGENT_STARTED', 'AGENT_COMPLETED', 'AGENT_FAILED'}), None)
+    agent_role = json.loads(latest_agent['payload_json']).get('role') if latest_agent and latest_agent['kind'] == 'AGENT_STARTED' else None
+    if autonomous:
+        state = ('Interrupted' if autonomous['status'] == 'RUNNING' and not autonomous['worker_running']
+                 else autonomous['status'].replace('_', ' ').title())
+        reason = autonomous.get('reason') or ('Campaign worker active' if autonomous['worker_running'] else 'Campaign worker is not running')
     lab_ok = all(services.values()) and tracking_health() == "Connected"
     active = next((run for run in runs if run.get("status") == "RUNNING"), None)
     queued = next((run for run in reversed(runs) if run.get("status") == "QUEUED"), None)
@@ -47,6 +56,15 @@ def live_home():
 
     if state == "Authorized":
         st.page_link("pages/02_Research.py", label="Review current research →", icon="🔬")
+    if autonomous:
+        limits = autonomous.get('config', {}).get('limits', {})
+        used = autonomous['usage']
+        st.caption(f"Campaign: {autonomous['name']} · {used['experiments']} / {limits.get('max_experiments', '—')} experiments · "
+                   f"{autonomous['codex_calls']} / {limits.get('max_codex_calls', '—')} Codex calls · "
+                   f"{used['gpu_seconds_live']/3600:.2f} / {limits.get('max_gpu_hours', 0):.2f} campaign GPU slot hours")
+        if autonomous.get('current_hypothesis'):
+            label = 'Current hypothesis' if autonomous['status'] in {'RUNNING', 'PAUSED', 'STOPPING'} else 'Last hypothesis'
+            st.write(f"**{label}:** {autonomous['current_hypothesis'].replace('_', ' ')}")
 
     campaign = os.getenv("LOCO_CAMPAIGN", "Unspecified campaign")
     categories = ", ".join(dataset["categories"]) or "Dataset unavailable"
@@ -58,7 +76,7 @@ def live_home():
              help=f"{gpu.get('memory_used_mib', 0):,} / {gpu.get('memory_total_mib', 0):,} MiB in use" if gpu.get("available") else None)
     consumed = ledger_summary()["gpu_seconds"] / 3600
     budget = float(os.getenv("LOCO_GPU_BUDGET_HOURS", "4"))
-    d.metric("GPU budget remaining", f"{max(0, budget - consumed):.2f} h", help=f"{consumed:.2f} of {budget:.2f} approved GPU hours used across all runs.")
+    d.metric("GPU budget remaining", f"{max(0, budget - consumed):.2f} h", help=f"{consumed:.2f} of {budget:.2f} approved exclusive GPU slot hours charged across all runs.")
 
     current, direction = st.columns(2, gap="large")
     with current:
@@ -69,9 +87,12 @@ def live_home():
             st.caption(f"Experiment running for {elapsed}. Codex activity is not separately tracked live.")
         else:
             st.write("**No experiment running**")
-            st.caption("No active Codex task is reported by the controller.")
+            st.caption(f"Codex {agent_role.title()} is working." if agent_role and autonomous.get('worker_running')
+                       else "No active Codex task is reported by the controller.")
         if queued:
             st.caption(f"Next queued: {run_label(queued)} · {classify_run(queued)}")
+        elif autonomous and autonomous.get('next_hypothesis'):
+            st.caption(f"Next direction: {direction_label(autonomous['next_hypothesis'])}")
         elif next_proposal:
             st.caption(f"Next proposed: {next_proposal['proposal'].get('claim', next_proposal['hypothesis_id'])}")
         else:
@@ -87,8 +108,13 @@ def live_home():
         else:
             st.write("**No experiments recorded**")
             st.caption("Research results will appear here after an approved run completes.")
+        campaign_decision = next((e for e in (autonomous or {}).get('events', [])
+                                  if e['kind'] in {'NEXT_DECISION', 'NEXT_DECISION_CORRECTION'}), None)
         decisions = [e for e in events if e["kind"] in {"CRITIC_REVIEW", "HYPOTHESIS_RANKING"}]
-        if decisions:
+        if campaign_decision:
+            payload = json.loads(campaign_decision['payload_json'])
+            st.caption(f"Latest research decision: {payload.get('reason') or payload.get('action', 'Recorded')}")
+        elif decisions:
             payload = parse_event(decisions[0])
             decision = payload.get("priority_rationale") or payload.get("recommended_next_action") or "A research decision was recorded."
             st.caption(f"Latest research decision: {decision}")

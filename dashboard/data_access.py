@@ -7,6 +7,7 @@ from pathlib import Path
 import sqlite3
 import shutil
 import subprocess
+import time
 from urllib.request import urlopen
 from urllib.parse import quote
 from PIL import Image, UnidentifiedImageError
@@ -67,6 +68,34 @@ def get_proposals():
     return result
 
 
+def campaign_summary():
+    """Latest durable campaign, with no inferred or simulated agent activity."""
+    records = rows("SELECT * FROM campaigns ORDER BY created_at DESC LIMIT 1")
+    if not records:
+        return None
+    campaign = records[0]
+    try:
+        campaign["config"] = json.loads(campaign["config_json"])
+    except ValueError:
+        campaign["config"] = {}
+    counts = rows("SELECT COUNT(*) AS experiments, COALESCE(SUM(r.gpu_seconds),0) AS gpu_seconds "
+                  "FROM campaign_runs cr JOIN runs r ON r.run_id=cr.run_id WHERE cr.campaign_id=?", (campaign["id"],))
+    campaign["usage"] = counts[0] if counts else {"experiments": 0, "gpu_seconds": 0}
+    campaign['usage']['gpu_seconds_live'] = campaign['usage']['gpu_seconds']
+    if campaign.get('active_run_id'):
+        active = rows('SELECT status,started_at FROM runs WHERE run_id=?', (campaign['active_run_id'],))
+        if active and active[0]['status'] == 'RUNNING' and active[0]['started_at']:
+            campaign['usage']['gpu_seconds_live'] += max(0, time.time() - active[0]['started_at'])
+    campaign["events"] = rows("SELECT * FROM campaign_events WHERE campaign_id=? ORDER BY id DESC LIMIT 12", (campaign["id"],))
+    from orchestrator.lab_cli import owned_process
+    campaign["worker_running"] = bool(owned_process(runtime_root(), 'research'))
+    return campaign
+
+
+def campaign_timeline(limit=200):
+    return rows("SELECT * FROM campaign_events ORDER BY id DESC LIMIT ?", (max(1, min(int(limit), 500)),))
+
+
 def pending_outbox():
     row = rows("SELECT COUNT(*) AS count FROM tracking_outbox WHERE delivered_at IS NULL")
     return row[0]["count"] if row else 0
@@ -118,7 +147,7 @@ def service_status():
 
 
 def log_tail(name, lines=50):
-    if name not in {'mlflow', 'dashboard', 'tracking'}:
+    if name not in {'mlflow', 'dashboard', 'tracking', 'research'}:
         return ''
     path = runtime_root() / 'logs' / f'{name}.jsonl'
     if not path.is_file():

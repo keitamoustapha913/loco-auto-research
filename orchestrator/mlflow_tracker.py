@@ -11,7 +11,7 @@ class TrackingUnavailable(RuntimeError):
     pass
 
 
-def enqueue_run_tracking(store: StateStore, run_id: str, artifact_dir=None):
+def enqueue_run_tracking(store: StateStore, run_id: str, artifact_dir=None, event_key_suffix=None):
     row = store.get_run(run_id)
     if not row:
         raise KeyError(run_id)
@@ -24,7 +24,7 @@ def enqueue_run_tracking(store: StateStore, run_id: str, artifact_dir=None):
         "created_at": row["created_at"], "started_at": row["started_at"],
         "finished_at": row["finished_at"], "gpu_seconds": row["gpu_seconds"], "error": row["error"],
     }
-    store.enqueue_tracking(f"{run_id}:{row['status']}", run_id, payload)
+    store.enqueue_tracking(f"{run_id}:{event_key_suffix or row['status']}", run_id, payload)
 
 
 def sync_outbox(store: StateStore, tracking_uri=None, max_events=100):
@@ -68,6 +68,10 @@ def _sync_locked(store: StateStore, tracking_uri=None, max_events=100):
                     "dataset.manifest_sha256": data["manifest_sha256"],
                     "protocol.version": "1.0", "metric.kind": "synthetic_proxy_not_official_loco",
                 }
+                if data.get('params', {}).get('campaign_id'):
+                    tags['research.campaign_id'] = str(data['params']['campaign_id'])
+                if data.get('params', {}).get('campaign_name'):
+                    tags['research.campaign_name'] = str(data['params']['campaign_name'])
                 # Recover a remote run created just before a local crash.
                 existing = client.search_runs([experiment_id], filter_string=f"tags.`research.run_id` = '{run_id}'", max_results=2) if hasattr(client, 'search_runs') else []
                 if len(existing) > 1:
@@ -81,6 +85,15 @@ def _sync_locked(store: StateStore, tracking_uri=None, max_events=100):
                         run = client.create_run(experiment_id, tags=tags)
                     mlflow_run_id = run.info.run_id
                 store.set_mlflow_id(run_id, mlflow_run_id)
+            # Reapply mutable campaign tags on retries and later review events;
+            # older MLflow runs created before these tags were added are repaired.
+            if data.get('params', {}).get('campaign_id'):
+                client.set_tag(mlflow_run_id, 'research.campaign_id', str(data['params']['campaign_id']))
+            if data.get('params', {}).get('campaign_name'):
+                client.set_tag(mlflow_run_id, 'research.campaign_name', str(data['params']['campaign_name']))
+            if data.get('git_sha'):
+                client.set_tag(mlflow_run_id, 'git.commit', str(data['git_sha']))
+            client.set_tag(mlflow_run_id, 'execution.gpu_seconds_semantics', 'exclusive_gpu_slot_wall_seconds')
             artifact_dir = Path(data.get("artifact_dir") or "/nonexistent").resolve()
             allowed_root = (Path(os.getenv('LOCO_RUNTIME', '.runtime')).resolve() / 'jobs' / run_id).resolve()
             if artifact_dir != allowed_root:

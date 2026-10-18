@@ -6,7 +6,7 @@ import streamlit as st
 
 from dashboard.components import page_intro
 from dashboard.data_access import (
-    get_connection, gpu_status, list_runs, log_tail, pending_outbox,
+    campaign_summary, get_connection, gpu_status, list_runs, log_tail, pending_outbox,
     queue_paused, service_status, tracking_errors, tracking_health,
 )
 from dashboard.presentation import INFRASTRUCTURE, autonomy_state, classify_run, format_date, run_label
@@ -33,6 +33,7 @@ def live_system():
     if conn:
         conn.close()
     state, reason = autonomy_state(os.environ, queue_paused())
+    campaign = campaign_summary()
 
     a, b, c, d = st.columns(4)
     a.metric("GPU", "RTX 4090" if gpu.get("available") else "Unavailable")
@@ -49,6 +50,11 @@ def live_system():
 
     st.subheader("Research authorization")
     st.write(f"**{state}** · {reason}")
+    if campaign:
+        limits = campaign.get('config', {}).get('limits', {})
+        st.write(f"**Campaign:** {campaign['status'].replace('_', ' ').title()} · "
+                 f"{campaign['usage']['gpu_seconds_live']/3600:.2f} / {limits.get('max_gpu_hours', 0):.2f} GPU h · "
+                 f"{campaign['codex_calls']} / {limits.get('max_codex_calls', '—')} calls")
     if queue_paused():
         st.caption("The research queue is paused by the trusted controller.")
 
@@ -70,7 +76,7 @@ def live_system():
             st.write(f"Tracking retry ({error['attempts']} attempts): {error['last_error']}")
 
     with st.expander("Service logs"):
-        name = st.selectbox("Service", ["tracking", "mlflow", "dashboard"])
+        name = st.selectbox("Service", ["tracking", "mlflow", "dashboard", "research"])
         st.code(log_tail(name, lines=40) or "No log entries yet.", language="text")
 
 

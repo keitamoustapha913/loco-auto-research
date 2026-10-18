@@ -227,6 +227,18 @@ def start(runtime, ledger):
         for name in reversed(started):
             stop_service(runtime, name)
         raise
+    # Resume only a previously authorized RUNNING campaign after a controller crash.
+    # Explicitly STOPPED and PAUSED campaigns never start work here.
+    try:
+        from orchestrator.campaign_state import CampaignState
+        active_campaigns = CampaignState(store)
+        row = active_campaigns.latest()
+        if row and row['status'] == 'RUNNING' and not owned_process(runtime, 'research'):
+            from orchestrator.autonomy import preflight
+            preflight(json.loads(row['config_json']), runtime)
+            spawn_research(runtime, active_campaigns, row['id'])
+    except Exception as exc:
+        audit(runtime, 'research_recovery_failed', error=str(exc))
     return status(runtime, ledger)
 
 
@@ -247,6 +259,15 @@ def status(runtime, ledger):
                           gpu_hours=store.total_gpu_seconds()/3600)
             if any(r['status'] == 'RUNNING' for r in store.list_runs(5000)):
                 result['gpu_worker'] = 'Running or interrupted; inspect ledger'
+            with store.connect() as con:
+                try:
+                    campaign_row = con.execute("SELECT id,name,status,reason,active_run_id FROM campaigns ORDER BY created_at DESC LIMIT 1").fetchone()
+                except Exception:
+                    campaign_row = None
+            if campaign_row:
+                result['research_campaign'] = dict(campaign_row)
+                result['research_worker_running'] = bool(owned_process(runtime, 'research'))
+                result['autonomy'] = campaign_row['status'] == 'RUNNING' and result['research_worker_running']
         except Exception as exc:
             result['ledger_error'] = str(exc)
     try:
@@ -278,8 +299,13 @@ def print_status(result):
         print(f"{label}: {'Running' if item['healthy'] else 'Stopped or unhealthy'}" + (f" (PID {item['pid']})" if item['pid'] else ''))
     print(f"GPU worker: {result['gpu_worker']}")
     print(f"Research autonomy: {'Enabled' if result['autonomy'] else 'Disabled'}")
+    if result.get('research_campaign'):
+        research = result['research_campaign']
+        print(f"Campaign: {research['name']} ({research['status']}); worker {'running' if result.get('research_worker_running') else 'stopped'}")
+        if result['autonomy']:
+            print('Isolation mode: personal Bubblewrap; Codex and candidate host processes share the operator UID')
     if not result['autonomy']:
-        print('Reason: OS isolation and unattended authorization are not both verified')
+        print('Reason: ' + (result.get('research_campaign', {}).get('reason') or 'No authorized campaign worker is running'))
     print('Dashboard: http://127.0.0.1:8501')
     print('MLflow: http://127.0.0.1:56000')
     print(f"Pending tracking events: {result.get('pending_tracking', 'unknown')}")
@@ -331,6 +357,99 @@ def smoke(runtime, ledger, dataset, device):
             'gpu_seconds': store.get_run(run_id)['gpu_seconds'], 'tracking': tracking}
 
 
+def research_command(action, runtime, ledger, config_path=None):
+    from orchestrator.campaign_state import CampaignState, TERMINAL
+    from orchestrator.autonomy import load_campaign_config, preflight
+    if action in {'status', 'report'} and not ledger.is_file():
+        return {'campaign': None, 'worker_running': False, 'message': 'No experiment ledger initialized'}
+    if action == 'start':
+        config = load_campaign_config(config_path)
+        preflight(config, runtime)
+    store = StateStore(ledger, read_only=action in {'status', 'report'} and ledger.is_file())
+    campaigns = CampaignState(store)
+    if action in {'status', 'report'}:
+        return research_summary(campaigns, campaigns.latest(), owned_process(runtime, 'research'),
+                                report=action == 'report')
+    with lifecycle_lock(runtime):
+        row = campaigns.latest()
+        process = owned_process(runtime, 'research')
+        if action == 'start':
+            if row and row['status'] in {'RUNNING', 'PAUSED', 'STOPPING'}:
+                if process:
+                    return research_summary(campaigns, row, process)
+                if row['status'] == 'STOPPING':
+                    campaigns.set_status(row['id'], 'STOPPED', 'worker absent after stop')
+                else:
+                    # Resume the same ledger campaign; the worker reconciles any interrupted run.
+                    return spawn_research(runtime, campaigns, row['id'])
+            campaign_id = campaigns.create(config)
+            return spawn_research(runtime, campaigns, campaign_id)
+        if not row or row['status'] in TERMINAL:
+            raise RuntimeError('no active research campaign')
+        if action == 'pause':
+            if row['status'] == 'RUNNING':
+                campaigns.set_status(row['id'], 'PAUSED', 'operator pause')
+        elif action == 'resume':
+            if row['status'] == 'PAUSED':
+                campaigns.set_status(row['id'], 'RUNNING', 'operator resume')
+                if not process:
+                    return spawn_research(runtime, campaigns, row['id'])
+        elif action == 'stop':
+            campaigns.set_status(row['id'], 'STOPPING', 'operator stop requested')
+            if not process:
+                campaigns.set_status(row['id'], 'STOPPED', 'worker absent; queued work will not run')
+            else:
+                deadline = time.monotonic() + 15
+                while owned_process(runtime, 'research') and time.monotonic() < deadline:
+                    time.sleep(0.2)
+                if owned_process(runtime, 'research'):
+                    stop_service(runtime, 'research')
+                    campaigns.set_status(row['id'], 'STOPPED', 'operator cancelled active worker')
+            from orchestrator.autonomy import reconcile_unfinished_runs
+            reconcile_unfinished_runs(store, campaigns, row['id'], 'operator stopped campaign')
+        return research_summary(campaigns, campaigns.get(row['id']), owned_process(runtime, 'research'))
+
+
+def spawn_research(runtime, campaigns, campaign_id):
+    if owned_process(runtime, 'research'):
+        raise RuntimeError('research worker already active')
+    command = [sys.executable, '-m', 'orchestrator.autonomy_worker', '--campaign-id', campaign_id]
+    log_path = runtime / 'logs' / 'research.jsonl'
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open('ab') as log:
+        process = subprocess.Popen(command, cwd=REPO, env=os.environ.copy(), stdin=subprocess.DEVNULL,
+                                   stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    state_path(runtime, 'research').write_text(json.dumps({'pid': process.pid,
+        'created': psutil.Process(process.pid).create_time(),
+        'signature': 'orchestrator.autonomy_worker', 'command': command,
+        'started_at': time.time()}))
+    audit(runtime, 'research_spawn', campaign_id=campaign_id, pid=process.pid)
+    time.sleep(0.5)
+    if process.poll() is not None:
+        campaigns.set_status(campaign_id, 'FAILED', 'campaign worker exited during startup')
+        raise RuntimeError(f'research worker exited; inspect {log_path}')
+    return research_summary(campaigns, campaigns.get(campaign_id), owned_process(runtime, 'research'))
+
+
+def research_summary(campaigns, row, process, report=False):
+    if not row:
+        return {'campaign': None, 'worker_running': False, 'message': 'No autonomous campaign recorded'}
+    usage = campaigns.usage(row['id'])
+    result = {'campaign_id': row['id'], 'name': row['name'], 'status': row['status'],
+              'worker_running': bool(process), 'usage': usage,
+              'current_hypothesis': row['current_hypothesis'],
+              'next_hypothesis': row['next_hypothesis'], 'active_run_id': row['active_run_id'],
+              'reason': row['reason'], 'consecutive_failures': row['consecutive_failures']}
+    if report:
+        result['limits'] = json.loads(row['config_json'])['limits']
+        result['runs'] = [{**{k: r[k] for k in ('run_id', 'hypothesis_id', 'candidate_id', 'status',
+                                               'gpu_seconds', 'error', 'mlflow_run_id')},
+                           'development_metrics': json.loads(r['metrics_json'])}
+                          for r in campaigns.runs(row['id'])]
+        result['events'] = campaigns.events(row['id'], 30)
+    return result
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog='loco-lab')
     commands = parser.add_subparsers(dest='command', required=True)
@@ -339,6 +458,12 @@ def main(argv=None):
     smoke_parser = commands.add_parser('smoke')
     smoke_parser.add_argument('--dataset', required=True)
     smoke_parser.add_argument('--device', choices=['cuda'], required=True)
+    research_parser = commands.add_parser('research')
+    research_sub = research_parser.add_subparsers(dest='research_action', required=True)
+    for name in ('start', 'status', 'pause', 'resume', 'stop', 'report'):
+        sub = research_sub.add_parser(name)
+        if name == 'start':
+            sub.add_argument('--config', help='operator-owned bounded autonomy YAML')
     args = parser.parse_args(argv)
     try:
         runtime, ledger = load_settings()
@@ -361,7 +486,15 @@ def main(argv=None):
             outcome = smoke(runtime, ledger, args.dataset, args.device)
             print(json.dumps(outcome, indent=2))
             return 0 if outcome['status'] == 'COMPLETED' else 1
+        elif args.command == 'research':
+            print(json.dumps(research_command(args.research_action, runtime, ledger,
+                                              getattr(args, 'config', None)), indent=2, default=str))
         else:
+            if args.command == 'stop' and ledger.is_file():
+                from orchestrator.campaign_state import CampaignState
+                latest = CampaignState(StateStore(ledger)).latest()
+                if latest and latest['status'] in {'RUNNING', 'PAUSED', 'STOPPING'}:
+                    research_command('stop', runtime, ledger)
             with lifecycle_lock(runtime):
                 if args.command in ('stop', 'restart'):
                     for name in reversed(SERVICES):

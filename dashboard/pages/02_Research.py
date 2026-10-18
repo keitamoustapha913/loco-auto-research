@@ -5,13 +5,29 @@ from pathlib import Path
 import streamlit as st
 
 from dashboard.components import page_intro
-from dashboard.data_access import get_events, get_proposals, list_runs
-from dashboard.presentation import format_date, parse_event, research_runs, run_label
+from dashboard.data_access import campaign_summary, campaign_timeline, get_events, get_proposals, list_runs
+from dashboard.presentation import direction_label, format_date, parse_event, research_runs, run_label
 
 REPO = Path(__file__).resolve().parents[2]
 page_intro("Research", "What Codex investigated, why it matters, and what evidence supports the next step.")
 st.subheader("Objective")
 st.write("Find a compact, fast, good-only method that produces meaningful logical anomaly maps. Development uses normal images and clearly labeled synthetic proxies.")
+campaign = campaign_summary()
+campaign_history = campaign_timeline()
+agent_event = next((e for e in (campaign or {}).get('events', [])
+                    if e['kind'] in {'AGENT_STARTED', 'AGENT_COMPLETED', 'AGENT_FAILED'}), None)
+active_role = json.loads(agent_event['payload_json']).get('role') if agent_event and agent_event['kind'] == 'AGENT_STARTED' else None
+if campaign:
+    st.caption(f"Campaign {campaign['name']} · {campaign['status'].replace('_', ' ').title()} · "
+               f"{campaign['codex_calls']} Codex calls")
+    if campaign.get('current_hypothesis'):
+        label = 'Current hypothesis' if campaign['status'] in {'RUNNING', 'PAUSED', 'STOPPING'} else 'Last hypothesis'
+        st.write(f"**{label}:** {campaign['current_hypothesis'].replace('_', ' ')}")
+    for item in campaign.get('events', [])[:5]:
+        if item['kind'] in {'NEXT_DECISION', 'NEXT_DECISION_CORRECTION', 'ATTEMPT_FAILED', 'HYPOTHESIS_SELECTED'}:
+            payload = json.loads(item['payload_json'])
+            st.caption(f"{item['kind'].replace('_', ' ').title()}: "
+                       f"{payload.get('reason') or payload.get('rationale') or payload.get('error') or payload.get('next_hypothesis', '')}")
 
 proposals = get_proposals()
 runs = research_runs(list_runs(500))
@@ -26,7 +42,8 @@ evidence = [
     ("Implementation", any(p["status"] in {"IMPLEMENTED", "QUEUED", "COMPLETED", "FAILED"} for p in proposals)),
     ("Experiment", bool(runs)),
     ("Critique", bool(reviews)),
-    ("Next decision", any(e["kind"] == "HYPOTHESIS_RANKING" for e in events)),
+    ("Next decision", any(e["kind"] == "HYPOTHESIS_RANKING" for e in events) or
+     any(e['kind'] in {'NEXT_DECISION', 'NEXT_DECISION_CORRECTION'} for e in campaign_history)),
 ]
 st.write("  →  ".join(f"{'✓' if done else '○'} {label}" for label, done in evidence))
 
@@ -34,10 +51,14 @@ if not proposals and not runs:
     st.info("No live research cycle has been recorded. The completed toy runs are infrastructure checks and do not count as evaluated research models.")
 else:
     active = next((r for r in runs if r["status"] == "RUNNING"), None)
-    st.write("**Current task:**", f"Training {run_label(active)}" if active else "No research experiment running")
+    st.write("**Current task:**", f"Training {run_label(active)}" if active else
+             f"Codex {active_role.title()} is working" if active_role and campaign and campaign.get('worker_running')
+             else "No research experiment running")
     proposed = [p for p in proposals if p["status"] == "PROPOSED"]
     proposed.sort(key=lambda item: item["proposal"].get("priority_rank", 999))
-    if proposed:
+    if campaign and campaign.get('next_hypothesis'):
+        st.caption(f"Next research direction: {direction_label(campaign['next_hypothesis'])}")
+    elif proposed:
         st.caption(f"Next planned hypothesis: {proposed[0]['proposal'].get('claim', proposed[0]['hypothesis_id'])}")
 
 if proposals:
@@ -52,6 +73,12 @@ if proposals:
             st.write("**Baseline:**", proposal.get("baseline", "—"))
             st.write("**Validation:**", proposal.get("evaluation_plan", "—"))
             st.write("**Shortcut risk:**", proposal.get("risk_and_shortcuts", "—"))
+            failure = next((json.loads(event['payload_json']).get('error')
+                            for event in campaign_history
+                            if event['kind'] == 'ATTEMPT_FAILED' and
+                            json.loads(event['payload_json']).get('hypothesis_id') == item['hypothesis_id']), None)
+            if failure:
+                st.caption(f"Why this attempt failed: {failure}")
             if proposal.get("references"):
                 st.write("**References:**", "; ".join(proposal["references"]))
 if reviews:
