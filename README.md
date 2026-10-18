@@ -41,6 +41,8 @@ The trusted controller charges Codex calls before invocation and GPU time on suc
 
 The ledger's `gpu_seconds` is **exclusive GPU slot wall time**, charged even if a candidate uses CPU internally. Peak VRAM and CUDA allocation measurements are separate evidence of actual device use. A zero peak VRAM value must not be described as GPU computation.
 
+For a CUDA research pilot, `research.fresh_hypotheses` makes Codex rank new proposals against measured prior runs and critic findings; `research.require_torch_cuda` rejects CPU-only pilot proposals before candidate implementation. The controller still limits each generated job to five minutes and verifies the candidate interface inside Bubblewrap. The first measured CUDA pilot is recorded in the ledger and MLflow as `cuda_masked_context_prediction` (research run `b0817b1f-d185-4827-8779-a69252e7b7e9`). Its synthetic scores are development proxies, and its critic marked the hypothesis inconclusive pending a matched local-context ablation and artifact-matched controls. The default campaign authorization remains disabled.
+
 On your laptop, open one SSH tunnel:
 
 ```bash

@@ -212,6 +212,60 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
     prior = campaigns.runs(campaign_id)
     directive = campaigns.get(campaign_id)['next_hypothesis']
     proposal = None
+    research = config['research']
+    fresh_events = [event for event in campaigns.events(campaign_id, 100)
+                    if event['kind'] == 'EVIDENCE_ADAPTED_HYPOTHESES']
+    if not prior and research.get('fresh_hypotheses') and fresh_events:
+        ids = set(json.loads(fresh_events[0]['payload_json']).get('hypotheses', []))
+        fresh = [p for p in list_proposals(store)
+                 if p['hypothesis_id'] in ids and p['status'] == 'PROPOSED']
+        fresh.sort(key=lambda p: json.loads(p['proposal_json']).get('priority_rank', 999))
+        if not fresh:
+            raise RuntimeError('all fresh campaign hypotheses are exhausted; refusing stale proposals')
+        proposal = fresh[0]
+    if not prior and research.get('fresh_hypotheses') and not fresh_events:
+        scout_file = REPO / 'literature' / 'scout_notes.json'
+        if research.get('fresh_literature') or not scout_file.is_file():
+            leads = scout_literature(store, campaign=context, personal_mode=True)
+            campaigns.event(campaign_id, 'LITERATURE', leads=leads)
+        else:
+            leads = json.loads(scout_file.read_text()).get('result', {})
+            campaigns.event(campaign_id, 'LITERATURE_REUSED', source=str(scout_file))
+        previous = [r for r in store.list_runs(20)
+                    if r['candidate_id'] != 'toy_normal_ae' and r['status'] in
+                    {'COMPLETED', 'REVIEWED', 'PROMOTED', 'REJECTED', 'FAILED'}]
+        evidence = []
+        for run in previous[:5]:
+            with store.connect() as con:
+                critique = con.execute("SELECT payload_json FROM events WHERE run_id=? AND kind='CRITIC_REVIEW' "
+                                       "ORDER BY id DESC LIMIT 1", (run['run_id'],)).fetchone()
+            evidence.append({'run_id': run['run_id'], 'hypothesis': run['hypothesis_id'], 'status': run['status'],
+                             'metrics': json.loads(run['metrics_json']), 'failure': run['error'],
+                             'critic': json.loads(critique['payload_json']) if critique else {}})
+        prompt = ("Propose THREE distinct, ranked, falsifiable next hypotheses for good-only, "
+                  "memory-bank-free logical anomaly heatmaps. Ground your choice in these literature "
+                  "leads and measured prior results, including generator sensitivity and actual GPU use "
+                  "where measured. THIS CAMPAIGN IS AN RTX 4090 CUDA PILOT: each proposed learning strategy "
+                  "must actually train a PyTorch model on CUDA and infer on CUDA, with estimated_gpu_minutes "
+                  "strictly greater than zero and at most five. No CPU-only screening proposals. Do not "
+                  "prescribe one architecture; propose scientifically distinct mechanisms. Only normal "
+                  "juice_bottle images are currently authorized; a one-category pilot cannot establish "
+                  "claims across all five LOCO categories. Use only installed "
+                  "PyTorch and NumPy, no external weights or new dependencies. Primary literature leads: "
+                  "EfficientAD https://arxiv.org/abs/2303.14535, CSAD https://arxiv.org/abs/2408.15628, "
+                  "MuDeNet https://doi.org/10.1016/j.inffus.2026.104214. Cite precisely and distinguish "
+                  "source claims from proposed ideas. "
+                  "new_dependencies must be []. All metrics are development proxies, not official LOCO "
+                  "results. Literature: " + json.dumps(leads) + " Prior evidence: " + json.dumps(evidence))
+        generated = add_research_proposals(store, prompt, campaign=context, personal_mode=True,
+                                           require_gpu_pilot=bool(research.get('require_torch_cuda')))
+        ids = {item['hypothesis_id'] for item in generated}
+        fresh = [p for p in list_proposals(store) if p['hypothesis_id'] in ids]
+        fresh.sort(key=lambda p: json.loads(p['proposal_json']).get('priority_rank', 999))
+        proposal = fresh[0] if fresh else None
+        campaigns.event(campaign_id, 'EVIDENCE_ADAPTED_HYPOTHESES',
+                        source_run=evidence[0]['run_id'] if evidence else '',
+                        hypotheses=[p['hypothesis_id'] for p in fresh])
     if prior and directive.startswith('evidence-followup:'):
         previous = prior[-1]
         with store.connect() as con:
@@ -225,7 +279,11 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
                   "appropriate; do not repeat rejected ideas. Synthetic metrics are development proxies only. "
                   "Use installed dependencies; new_dependencies must be [] when no install is needed. " +
                   json.dumps(history))
-        generated = add_research_proposals(store, prompt, campaign=context, personal_mode=True)
+        if research.get('require_torch_cuda'):
+            prompt += (' This is a CUDA pilot: all three proposals must train PyTorch on CUDA, '
+                       'estimated_gpu_minutes must be greater than zero and at most five; no CPU-only screen.')
+        generated = add_research_proposals(store, prompt, campaign=context, personal_mode=True,
+                                           require_gpu_pilot=bool(research.get('require_torch_cuda')))
         ids = {item['hypothesis_id'] for item in generated}
         fresh = [p for p in list_proposals(store)
                  if p['hypothesis_id'] in ids]
@@ -263,7 +321,11 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
                       "Use these previous measured outcomes and implementation failures to avoid repetition. "
                       "Treat unverified leads as unverified. Leads: " + json.dumps(leads) +
                       " Previous attempts: " + json.dumps(previous))
-        add_research_proposals(store, prompt, campaign=context, personal_mode=True)
+        if research.get('require_torch_cuda'):
+            prompt += (' This is a CUDA pilot: all three proposals must train PyTorch on CUDA, '
+                       'estimated_gpu_minutes must be greater than zero and at most five; no CPU-only screen.')
+        add_research_proposals(store, prompt, campaign=context, personal_mode=True,
+                               require_gpu_pilot=bool(research.get('require_torch_cuda')))
         campaigns.event(campaign_id, "HYPOTHESES_GENERATED")
         proposal = choose_proposal(store)
     if proposal is None:
@@ -279,7 +341,8 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
         return
     try:
         await_authorized_stage(campaigns, campaign_id)
-        implemented = implement_proposal(store, hypothesis_id, campaign=context, personal_mode=True)
+        implemented = implement_proposal(store, hypothesis_id, campaign=context, personal_mode=True,
+                                         require_torch_cuda=bool(research.get('require_torch_cuda')))
         from orchestrator.experiment_runner import candidate_file, probe_candidate_interface, run_candidate_unit_tests
         if candidate_file(REPO, hypothesis_id).resolve() != Path(implemented['candidate_module']).resolve():
             raise RuntimeError('candidate source resolution differs from the reviewed implementation')
@@ -299,7 +362,8 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
             campaigns.set_status(campaign_id, "LIMIT_REACHED", "insufficient remaining GPU/wall budget")
             return
         manifest_path = Path(runtime) / "good_manifest.json"
-        rid = queue_candidate(store, hypothesis_id, hypothesis_id, "juice_bottle", "smoke", "cuda",
+        rid = queue_candidate(store, hypothesis_id, hypothesis_id, "juice_bottle",
+                              "pilot" if research.get('require_torch_cuda') else "smoke", "cuda",
                               manifest_path, seconds=min(300, seconds), personal_mode_authorized=True,
                               campaign_id=campaign_id, campaign_name=config['campaign']['name'])
         campaigns.attach_run(campaign_id, rid)

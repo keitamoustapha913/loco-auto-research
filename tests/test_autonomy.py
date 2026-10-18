@@ -210,6 +210,41 @@ def test_next_hypothesis_generation_uses_measured_critique(tmp_path, monkeypatch
     assert campaigns.get(cid)['current_hypothesis'] == 'new_h'
 
 
+def test_fresh_gpu_cycle_uses_prior_evidence_and_cuda_contract(tmp_path, monkeypatch):
+    from orchestrator import autonomy, controller
+    store = StateStore(tmp_path / 'ledger.sqlite')
+    prior = store.create_run('prior_research', 'prior_candidate', 'juice_bottle', config={})
+    for state in ('IMPLEMENTED', 'VALIDATED', 'QUEUED', 'RUNNING'):
+        store.transition(prior, state)
+    store.set_run_result(prior, {'dev_synthetic/generator_gap': -0.14})
+    store.transition(prior, 'COMPLETED')
+    with store.connect() as con:
+        con.execute("INSERT INTO events(run_id,time,kind,payload_json) VALUES(?,?,?,?)",
+                    (prior, 1.0, 'CRITIC_REVIEW', json.dumps({'critic_concerns': ['generator shortcut']})))
+    cfg = config()
+    cfg['research'].update(fresh_literature=True, fresh_hypotheses=True, require_torch_cuda=True)
+    campaigns = CampaignState(store)
+    cid = campaigns.create(cfg)
+    prompts = []
+    monkeypatch.setattr(controller, 'scout_literature', lambda *a, **k: {'sources': []})
+    def propose(target, prompt, **kwargs):
+        prompts.append(prompt)
+        item = {'hypothesis_id': 'fresh_cuda_h', 'priority_rank': 1,
+                'priority_rationale': 'independent generator evidence', 'new_dependencies': []}
+        target.add_proposal(item)
+        return [item]
+    monkeypatch.setattr(controller, 'add_research_proposals', propose)
+    def implement(*args, **kwargs):
+        assert kwargs['require_torch_cuda'] is True
+        raise RuntimeError('fixture stop')
+    monkeypatch.setattr(controller, 'implement_proposal', implement)
+    with pytest.raises(RuntimeError, match='fixture stop'):
+        autonomy.run_cycle(store, campaigns, cid, tmp_path)
+    assert 'generator shortcut' in prompts[0]
+    assert '-0.14' in prompts[0]
+    assert campaigns.get(cid)['current_hypothesis'] == 'fresh_cuda_h'
+
+
 @pytest.mark.skipif(os.getenv('LOCO_TEST_BWRAP') != '1', reason='requires Linux user namespaces')
 def test_codex_personal_mount_adversarial_fixture(tmp_path):
     output = tmp_path / 'response.json'

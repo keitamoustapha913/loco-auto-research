@@ -70,7 +70,8 @@ def budgeted_invoke(store, role, repo_root, schema, prompt, campaign=None, **kwa
     return result
 
 
-def add_research_proposals(store, prompt, count=3, campaign=None, personal_mode=False):
+def add_research_proposals(store, prompt, count=3, campaign=None, personal_mode=False,
+                           require_gpu_pilot=False):
     schema = REPO / "schemas" / "proposals.schema.json"
     output = budgeted_invoke(store, "researcher", REPO, schema, prompt, timeout=240,
                              campaign=campaign, personal_mode=personal_mode)["response"]
@@ -87,6 +88,11 @@ def add_research_proposals(store, prompt, count=3, campaign=None, personal_mode=
     def signature(item):
         return ' '.join((item.get('claim', '') + ' ' + item.get('controlled_change', '')).lower().split())
     for proposal in proposals:
+        minutes = proposal.get('estimated_gpu_minutes')
+        if require_gpu_pilot and (isinstance(minutes, bool) or not isinstance(minutes, (int, float))
+                                  or not 0 < minutes <= 5
+                                  or 'cpu-only' in proposal.get('evaluation_plan', '').lower()):
+            raise ValueError('CUDA pilot requires GPU-trained hypotheses within five minutes; CPU-only proposals remain research leads')
         if any(not isinstance(dep, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+(?:[<>=!~]+[0-9][A-Za-z0-9_.-]*)?', dep)
                for dep in proposal.get('new_dependencies', [])):
             raise ValueError('new_dependencies must contain package names only; use [] for none')
@@ -127,7 +133,8 @@ def list_proposals(store):
     return [dict(row) for row in rows]
 
 
-def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False):
+def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
+                       require_torch_cuda=False):
     with store.connect() as con:
         row = con.execute("SELECT proposal_json FROM hypotheses WHERE hypothesis_id=?", (hypothesis_id,)).fetchone()
     if not row:
@@ -150,7 +157,10 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False)
         "Actually create model.py, a short README, and optionally test_model.py and candidate_manifest.json; "
         "a proposal or plan alone fails verification. "
         "If you write tests, use the system temporary directory for fixtures because candidate source is mounted read-only during tests. "
-        "Do not change other directories. "
+        "Do not change other directories. " +
+        ("This pilot must implement a real trainable PyTorch model. If config['device'] is cuda, "
+         "move model and training tensors to CUDA, train there, and run inference there. "
+         "Do not claim GPU execution if no CUDA tensors are used. " if require_torch_cuda else "") +
         f"Proposal: {json.dumps(proposal, sort_keys=True)}"
     )
     import subprocess

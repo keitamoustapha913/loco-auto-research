@@ -50,6 +50,18 @@ def test_dependency_field_rejects_narrative_instead_of_package_names(tmp_path, m
     assert controller.list_proposals(store) == []
 
 
+def test_cuda_pilot_rejects_cpu_only_hypotheses(tmp_path, monkeypatch):
+    store = StateStore(tmp_path / 'db.sqlite')
+    batch = [proposal(i) for i in (1, 2, 3)]
+    batch[0]['estimated_gpu_minutes'] = 0
+    batch[0]['evaluation_plan'] = 'CPU-only screening on good images.'
+    monkeypatch.setattr(controller, 'budgeted_invoke',
+                        lambda *args, **kwargs: {'response': {'proposals': batch}})
+    with pytest.raises(ValueError, match='CUDA pilot'):
+        controller.add_research_proposals(store, 'test', require_gpu_pilot=True)
+    assert controller.list_proposals(store) == []
+
+
 def test_nonexecuting_candidate_protocol_check(tmp_path):
     toy = Path(__file__).parents[1] / 'candidates/toy_normal_ae/model.py'
     assert 'source_sha256' in verify_candidate_source(toy)
