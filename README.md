@@ -1,6 +1,6 @@
 # LOCO Autoresearch laboratory
 
-A guarded, good-image-only research laboratory for compact logical anomaly localization. SQLite is the authoritative experiment ledger; MLflow stores experiment runs and artifacts. The six-page Streamlit dashboard shows live development state. Synthetic development scores are **proxies, never official LOCO results**.
+A guarded, good-image-only research laboratory for compact logical anomaly localization. SQLite is the authoritative experiment ledger; MLflow stores experiment runs and artifacts. The four-page Streamlit dashboard shows live development state. Synthetic development scores are **proxies, never official LOCO results**.
 
 ## Daily operation
 
@@ -30,6 +30,8 @@ ssh -N \
 ```
 
 The services run on the remote server; your browser displays them locally at [Dashboard](http://127.0.0.1:8501) and [MLflow](http://127.0.0.1:56000). Keep the tunnel open while browsing.
+
+The dashboard has **Home** for laboratory and research status, **Research** for hypotheses and decisions, **Results** for models, heatmaps and comparisons, and **System** for service health and logs. Toy smoke runs are labeled infrastructure tests and excluded from research counts and Pareto plots. The runner currently saves one aligned development heatmap preview per run. Dashboard controls remain read-only; operator actions use `loco-lab`.
 
 ## Research and security boundaries
 

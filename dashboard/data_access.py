@@ -2,12 +2,14 @@
 from __future__ import annotations
 import json
 import os
+from collections import deque
 from pathlib import Path
 import sqlite3
 import shutil
 import subprocess
 from urllib.request import urlopen
 from urllib.parse import quote
+from PIL import Image, UnidentifiedImageError
 
 
 def runtime_root():
@@ -70,6 +72,22 @@ def pending_outbox():
     return row[0]["count"] if row else 0
 
 
+def queue_paused():
+    result = rows("SELECT value FROM settings WHERE name='paused'")
+    return bool(result and result[0]["value"] == "1")
+
+
+def dataset_summary():
+    """Read only good-only manifest metadata; never load image data for the header."""
+    try:
+        from benchmark.data_guard import load_manifest
+        manifest, _ = load_manifest(runtime_root() / "good_manifest.json", verify_hashes=False)
+        categories = sorted({item["category"] for item in manifest["images"]})
+        return {"categories": categories, "images": len(manifest["images"])}
+    except (OSError, ValueError, KeyError):
+        return {"categories": [], "images": 0}
+
+
 def tracking_errors(limit=10):
     return rows("SELECT run_id,attempts,last_error,created_at FROM tracking_outbox WHERE delivered_at IS NULL AND attempts>0 ORDER BY id DESC LIMIT ?", (limit,))
 
@@ -103,7 +121,10 @@ def log_tail(name, lines=50):
     if name not in {'mlflow', 'dashboard', 'tracking'}:
         return ''
     path = runtime_root() / 'logs' / f'{name}.jsonl'
-    return '\n'.join(path.read_text(errors='replace').splitlines()[-lines:]) if path.is_file() else ''
+    if not path.is_file():
+        return ''
+    with path.open(errors='replace') as handle:
+        return '\n'.join(line.rstrip('\n') for line in deque(handle, maxlen=max(1, min(lines, 200))))
 
 
 def allowed_preview(run, filename):
@@ -117,6 +138,39 @@ def allowed_preview(run, filename):
     if not path.is_relative_to(artifact) or not path.is_file():
         return None
     return path
+
+
+def load_preview(run, filename):
+    """Load only named, size-bounded development previews from this run's job dir."""
+    path = allowed_preview(run, filename)
+    if path is None:
+        return None
+    try:
+        if path.stat().st_size > 32 * 1024 * 1024:
+            return None
+        with Image.open(path) as image:
+            if image.width * image.height > 24_000_000:
+                return None
+            return image.convert("RGB").copy()
+    except (OSError, ValueError, UnidentifiedImageError, Image.DecompressionBombError):
+        return None
+
+
+def heatmap_sample(run, opacity=0.38):
+    """Compose aligned previews without resizing or changing their coordinates."""
+    original = load_preview(run, "normal_preview.png")
+    synthetic = load_preview(run, "synthetic_input.png")
+    heatmap = load_preview(run, "synthetic_heatmap.png")
+    mask = load_preview(run, "synthetic_mask.png")
+    if original is None or synthetic is None or heatmap is None:
+        return None
+    if original.size != synthetic.size or original.size != heatmap.size or (mask and original.size != mask.size):
+        return None
+    if not 0 <= opacity <= 1:
+        raise ValueError("opacity must be between 0 and 1")
+    return {"original": original, "synthetic": synthetic, "heatmap": heatmap,
+            "overlay": Image.blend(synthetic, heatmap, opacity), "mask": mask,
+            "size": original.size}
 
 
 def get_mlflow_url(run):

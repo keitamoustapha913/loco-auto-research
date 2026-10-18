@@ -65,7 +65,7 @@ def test_dashboard_empty_and_recorded_pages(tmp_path, monkeypatch):
     from streamlit.testing.v1 import AppTest
     monkeypatch.setenv('LOCO_RUNTIME', str(tmp_path))
     monkeypatch.setenv('LOCO_LEDGER', str(tmp_path / 'ledger.sqlite'))
-    page = Path(__file__).resolve().parents[1] / 'dashboard/pages/02_Experiments.py'
+    page = Path(__file__).resolve().parents[1] / 'dashboard/pages/03_Results.py'
     empty = AppTest.from_file(page).run()
     assert not empty.exception
     assert empty.info
@@ -74,6 +74,8 @@ def test_dashboard_empty_and_recorded_pages(tmp_path, monkeypatch):
     monkeypatch.setenv('LOCO_LEDGER', str(tmp_path / 'ledger.sqlite'))
     recorded = AppTest.from_file(page).run()
     assert not recorded.exception
+    assert recorded.info  # Toy runs are excluded from research results by default.
+    recorded.toggle[0].set_value(True).run()
     assert recorded.dataframe
 
 
