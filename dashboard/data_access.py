@@ -4,6 +4,9 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import shutil
+import subprocess
+from urllib.request import urlopen
 from urllib.parse import quote
 
 
@@ -67,8 +70,44 @@ def pending_outbox():
     return row[0]["count"] if row else 0
 
 
+def tracking_errors(limit=10):
+    return rows("SELECT run_id,attempts,last_error,created_at FROM tracking_outbox WHERE delivered_at IS NULL AND attempts>0 ORDER BY id DESC LIMIT ?", (limit,))
+
+
+def ledger_summary():
+    counts = rows("SELECT status,COUNT(*) AS count FROM runs GROUP BY status")
+    usage = rows("SELECT COALESCE(SUM(gpu_seconds),0) AS gpu_seconds FROM runs")
+    return {'counts': {r['status']: r['count'] for r in counts}, 'gpu_seconds': usage[0]['gpu_seconds'] if usage else 0}
+
+
+def gpu_status():
+    if not shutil.which('nvidia-smi'):
+        return {'available': False}
+    try:
+        proc = subprocess.run(['nvidia-smi', '--query-gpu=name,memory.used,memory.total,utilization.gpu', '--format=csv,noheader,nounits'], capture_output=True, text=True, timeout=3)
+        if proc.returncode:
+            return {'available': False, 'error': proc.stderr.strip()}
+        name, used, total, utilization = [v.strip() for v in proc.stdout.splitlines()[0].split(',')]
+        return {'available': True, 'name': name, 'memory_used_mib': int(used), 'memory_total_mib': int(total), 'utilization_percent': int(utilization)}
+    except (OSError, ValueError, IndexError, subprocess.TimeoutExpired) as exc:
+        return {'available': False, 'error': str(exc)}
+
+
+def service_status():
+    from orchestrator.lab_cli import owned_process, service_healthy, SERVICES
+    runtime = runtime_root()
+    return {name: bool(owned_process(runtime, name) and (name == 'tracking' or service_healthy(name))) for name in SERVICES}
+
+
+def log_tail(name, lines=50):
+    if name not in {'mlflow', 'dashboard', 'tracking'}:
+        return ''
+    path = runtime_root() / 'logs' / f'{name}.jsonl'
+    return '\n'.join(path.read_text(errors='replace').splitlines()[-lines:]) if path.is_file() else ''
+
+
 def allowed_preview(run, filename):
-    if filename not in {"normal_preview.png", "synthetic_heatmap.png", "synthetic_overlay.png"}:
+    if filename not in {"normal_preview.png", "synthetic_input.png", "synthetic_mask.png", "synthetic_heatmap.png", "synthetic_overlay.png"}:
         return None
     job_root = (runtime_root() / "jobs").resolve()
     artifact = Path(run.get("artifact_dir") or "").resolve()
@@ -84,22 +123,24 @@ def get_mlflow_url(run):
     rid = run.get("mlflow_run_id")
     if not rid:
         return None
-    base = os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000").rstrip("/")
+    base = os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:56000").rstrip("/")
     if not base.startswith(("http://127.0.0.1:", "http://localhost:")):
         return None
     try:
+        with urlopen(base + '/health', timeout=1) as response:
+            if response.status != 200:
+                return None
         from mlflow.tracking import MlflowClient
         experiment_id = MlflowClient(tracking_uri=base).get_run(rid).info.experiment_id
         return f"{base}/#/experiments/{quote(str(experiment_id))}/runs/{quote(str(rid))}"
     except Exception:
-        return base
+        return None
 
 
 def tracking_health():
-    uri = os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
+    uri = os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:56000")
     try:
-        from mlflow.tracking import MlflowClient
-        MlflowClient(tracking_uri=uri).search_experiments(max_results=1)
-        return "Connected"
+        with urlopen(uri.rstrip('/') + '/health', timeout=2) as response:
+            return 'Connected' if response.status == 200 else 'Unhealthy'
     except Exception:
-        return "Offline / not installed"
+        return "Offline"

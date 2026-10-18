@@ -35,7 +35,7 @@ def synthetic_corruption(x, seed=0):
     return changed, mask
 
 
-def save_heatmaps(job_dir, good_image, synthetic_image, anomaly_map):
+def save_heatmaps(job_dir, good_image, synthetic_image, anomaly_map, mask):
     from PIL import Image
     arr = np.asarray(anomaly_map)
     lo, hi = np.percentile(arr, [2, 98])
@@ -45,6 +45,8 @@ def save_heatmaps(job_dir, good_image, synthetic_image, anomaly_map):
     heatmap = np.stack((score * 255, np.zeros_like(score), (1 - score) * 70), axis=-1).astype(np.uint8)
     overlay = (image_rgb.astype(float) * 0.62 + heatmap.astype(float) * 0.38).clip(0,255).astype(np.uint8)
     Image.fromarray(good_rgb).save(job_dir / "normal_preview.png")
+    Image.fromarray(image_rgb).save(job_dir / "synthetic_input.png")
+    Image.fromarray((np.asarray(mask) * 255).astype(np.uint8)).save(job_dir / "synthetic_mask.png")
     Image.fromarray(heatmap).save(job_dir / "synthetic_heatmap.png")
     Image.fromarray(overlay).save(job_dir / "synthetic_overlay.png")
 
@@ -90,6 +92,7 @@ def run(module_file, manifest_file, config, output):
     all_pred_normal = np.stack(all_pred_normal)
     all_pred_synth = np.stack(all_pred_synth)
     metrics = evaluate_dev(all_pred_normal, all_pred_synth, np.stack(masks), calibration_maps=all_pred_cal)
+    metrics["dev_synthetic/preview_anomaly_score"] = float(np.max(all_pred_synth[0]))
     normal_threshold = metrics["normal/threshold"]
     # Appearance edits that maintain the fixture's object layout test sensitivity
     # to superficial edits; these are not a substitute for real logical controls.
@@ -116,10 +119,10 @@ def run(module_file, manifest_file, config, output):
             metrics["inference/parameters"] = sum(p.numel() for p in model.parameters())
     except ImportError:
         pass
-    save_heatmaps(output, normal[0], synthetic[0], all_pred_synth[0])
+    save_heatmaps(output, normal[0], synthetic[0], all_pred_synth[0], masks[0])
     import sys
     provenance = {"protocol_version": "1.0", "python_version": sys.version.split()[0], "development_calibration_count":len(calibrate_paths), "normal_assessment_count":len(score_paths), "dependencies_pyproject_sha256":sha256_file(Path(__file__).resolve().parents[1] / "pyproject.toml"), "config_sha256": __import__("hashlib").sha256(json.dumps(config, sort_keys=True).encode()).hexdigest(), "metric_status": "SYNTHETIC_DEVELOPMENT_PROXY_ONLY", "model_module_sha256": sha256_file(module_file), "good_manifest_sha256": manifest_fingerprint(manifest), "checkpoint_sha256": sha256_file(checkpoint), "image_count_normal_validation": len(valid_paths), "device": device, "size": size}
-    provenance["artifact_hashes"] = {filename:sha256_file(output / filename) for filename in ("normal_preview.png", "synthetic_heatmap.png", "synthetic_overlay.png")}
+    provenance["artifact_hashes"] = {filename:sha256_file(output / filename) for filename in ("normal_preview.png", "synthetic_input.png", "synthetic_mask.png", "synthetic_heatmap.png", "synthetic_overlay.png")}
     (output / "run_manifest.json").write_text(json.dumps(provenance, indent=2))
     return {"metrics": {k: float(v) for k,v in metrics.items()}, "provenance": provenance}
 

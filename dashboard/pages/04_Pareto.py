@@ -1,21 +1,25 @@
 import streamlit as st
 from dashboard.data_access import list_runs
 from orchestrator.decision_engine import pareto_frontier
-st.title("Pareto view")
-st.warning("Quality axis is held-out **synthetic pixel AUROC proxy**, never official LOCO sPRO.")
+import pandas as pd
+import plotly.express as px
+
+st.title('Pareto trade-offs')
+st.warning('Localization quality is a synthetic development proxy, never official LOCO sPRO.')
 runs = list_runs()
-points = []
 front = set(pareto_frontier(runs))
-for r in runs:
-    m = r["metrics"]
-    if "dev_synthetic/pixel_auroc" in m and "inference/e2e_ms_p95" in m:
-        points.append({"Run":r["run_id"], "Candidate":r["candidate_id"], "Status":r["status"], "Latency p95 (ms)":m["inference/e2e_ms_p95"], "Synthetic pixel AUROC proxy":m["dev_synthetic/pixel_auroc"], "Pareto": "Nondominated" if r["run_id"] in front else "Dominated"})
-if not points:
-    st.info("Insufficient measured experiments for a Pareto comparison.")
-else:
-    import pandas as pd
-    import plotly.express as px
-    table = pd.DataFrame(points)
-    st.plotly_chart(px.scatter(table, x="Latency p95 (ms)", y="Synthetic pixel AUROC proxy", color="Pareto", hover_name="Run", hover_data=["Candidate", "Status"]), use_container_width=True)
-    st.dataframe(table, hide_index=True, use_container_width=True)
-    st.caption("Pareto membership is a screening aid; not independent evidence of real logical-anomaly generalization.")
+measurements = {
+    'Localization proxy versus latency': ('inference/e2e_ms_p95', 'dev_synthetic/pixel_auroc'),
+    'Localization proxy versus model size': ('inference/checkpoint_mib', 'dev_synthetic/pixel_auroc'),
+    'Latency versus model size': ('inference/checkpoint_mib', 'inference/e2e_ms_p95'),
+    'Peak VRAM versus localization proxy': ('inference/peak_vram_mib', 'dev_synthetic/pixel_auroc'),
+}
+for title, (x, y) in measurements.items():
+    st.subheader(title)
+    rows = [{'run': r['run_id'], 'candidate': r['candidate_id'], x: r['metrics'][x], y: r['metrics'][y],
+             'frontier': 'Nondominated' if r['run_id'] in front else 'Other'}
+            for r in runs if x in r['metrics'] and y in r['metrics']]
+    if rows:
+        st.plotly_chart(px.scatter(pd.DataFrame(rows), x=x, y=y, color='frontier', hover_name='run', hover_data=['candidate']), use_container_width=True)
+    else:
+        st.info('Measurements for this comparison are not available yet.')

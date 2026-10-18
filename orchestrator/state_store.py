@@ -148,6 +148,20 @@ class StateStore:
             query = ",".join(f"{k}=?" for k in updates)
             con.execute(f"UPDATE runs SET {query} WHERE run_id=?", (*updates.values(), run_id))
             con.execute("INSERT INTO events(run_id,time,kind,payload_json) VALUES(?,?,?,?)", (run_id, now, "TRANSITION", json.dumps({"from": old, "to": next_state, "reason": reason})))
+            if next_state in {"COMPLETED", "FAILED", "OOM", "TIMED_OUT", "CANCELLED", "INTERRUPTED"}:
+                result = dict(con.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone())
+                payload = {
+                    "run_id": run_id, "status": next_state, "category": result["category"],
+                    "stage": result["stage"], "candidate_id": result["candidate_id"],
+                    "hypothesis_id": result["hypothesis_id"], "git_sha": result["git_sha"],
+                    "manifest_sha256": result["manifest_sha256"],
+                    "metrics": json.loads(result["metrics_json"]), "params": json.loads(result["config_json"]),
+                    "artifact_dir": result["artifact_dir"], "created_at": result["created_at"],
+                    "started_at": result["started_at"], "finished_at": result["finished_at"],
+                    "gpu_seconds": result["gpu_seconds"], "error": result["error"],
+                }
+                con.execute("INSERT OR IGNORE INTO tracking_outbox(event_key,run_id,payload_json,created_at) VALUES(?,?,?,?)",
+                            (f"{run_id}:{next_state}", run_id, json.dumps(payload, sort_keys=True), now))
 
     def set_run_result(self, run_id, metrics, gpu_seconds=0, artifact_dir=""):
         if not isinstance(metrics, dict) or not all(isinstance(v, (float, int)) for v in metrics.values()):

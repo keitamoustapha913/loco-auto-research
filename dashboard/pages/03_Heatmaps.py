@@ -9,8 +9,12 @@ if not runs:
 run_by_id = {r["run_id"]: r for r in runs}
 run_id = st.selectbox("Development run", list(run_by_id))
 selected = run_by_id[run_id]
-c1, c2, c3 = st.columns(3)
-for column, filename, title in ((c1,"normal_preview.png","Good image"),(c2,"synthetic_heatmap.png","Synthetic anomaly heatmap"),(c3,"synthetic_overlay.png","Synthetic overlay")):
+st.write('**Candidate:**', selected['candidate_id'], '· **Run:**', run_id)
+st.write('**Preview anomaly score (max map value):**', selected.get('metrics', {}).get('dev_synthetic/preview_anomaly_score', 'Not recorded for this run'))
+columns = st.columns(5)
+for column, filename, title in zip(columns,
+    ('normal_preview.png', 'synthetic_input.png', 'synthetic_heatmap.png', 'synthetic_overlay.png', 'synthetic_mask.png'),
+    ('Good source image', 'Synthetic input', 'Anomaly heatmap', 'Overlay', 'Synthetic development mask')):
     with column:
         st.subheader(title)
         preview = allowed_preview(selected, filename)

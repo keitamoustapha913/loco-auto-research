@@ -1,0 +1,16 @@
+[Unit]
+Description=LOCO Autoresearch laboratory (local-only services)
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=%h/workspace-research/loco-auto-research
+Environment=LOCO_ENV_FILE=%h/workspace-research/loco-research.env
+ExecStart=%h/.local/bin/uv run --extra all loco-lab start
+ExecStop=%h/.local/bin/uv run --extra all loco-lab stop
+TimeoutStartSec=120
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target
