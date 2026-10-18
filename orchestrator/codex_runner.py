@@ -19,6 +19,9 @@ def invoke(role: str, repo_root: Path, schema_path: Path, prompt: str, timeout=1
     root = Path(repo_root).resolve(strict=True)
     cwd = Path(worktree).resolve(strict=True) if worktree else root
     if role == "implementer":
+        operator_uid = root.stat().st_uid
+        if os.getenv('LOCO_CODEX_ISOLATION_VERIFIED') != '1' or os.geteuid() == operator_uid:
+            raise AgentFailure('Implementer Codex execution requires a separate verified OS identity and workspace mounts')
         if worktree is None or not cwd.is_relative_to((root / "candidates").resolve()):
             raise AgentFailure("implementer needs assigned candidates/ worktree")
     elif worktree is not None:

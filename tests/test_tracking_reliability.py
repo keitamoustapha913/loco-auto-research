@@ -75,3 +75,29 @@ def test_dashboard_empty_and_recorded_pages(tmp_path, monkeypatch):
     recorded = AppTest.from_file(page).run()
     assert not recorded.exception
     assert recorded.dataframe
+
+
+def test_tracking_adds_research_sources_and_critique(tmp_path, monkeypatch):
+    store, rid = finished_store(tmp_path)
+    store.add_proposal({'hypothesis_id': 'smoke', 'references': ['https://example.org/source'], 'priority_rank': 1})
+    with store.connect() as con:
+        con.execute("INSERT INTO events(run_id,time,kind,payload_json) VALUES(?,?,?,?)",
+                    (rid, 1.0, 'CRITIC_REVIEW', json.dumps({'critic_concerns': ['shortcut']})))
+    tags = {}
+    class Client:
+        def __init__(self, tracking_uri): pass
+        def get_experiment_by_name(self, name): return types.SimpleNamespace(experiment_id='1')
+        def search_runs(self, ids, filter_string, max_results): return []
+        def create_run(self, experiment_id, tags, start_time=None):
+            return types.SimpleNamespace(info=types.SimpleNamespace(run_id='remote'))
+        def log_param(self, *args): pass
+        def log_metric(self, *args): pass
+        def set_tag(self, run_id, key, value): tags[key] = value
+        def set_terminated(self, *args, **kwargs): pass
+    ml = types.ModuleType('mlflow'); ml.set_tracking_uri = lambda uri: None
+    tracking = types.ModuleType('mlflow.tracking'); tracking.MlflowClient = Client
+    monkeypatch.setitem(sys.modules, 'mlflow', ml)
+    monkeypatch.setitem(sys.modules, 'mlflow.tracking', tracking)
+    assert sync_outbox(store, 'http://127.0.0.1:56000')['delivered'] == 1
+    assert 'example.org/source' in tags['research.source_references']
+    assert 'shortcut' in tags['research.critic_assessment']

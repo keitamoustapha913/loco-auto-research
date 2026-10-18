@@ -17,6 +17,14 @@ def test_pareto_quality_and_latency():
     assert set(pareto_frontier([a,b,c])) == {'b','c'}
     assert eligible(a)[0]
 
+
+def test_full_pareto_uses_size_and_vram():
+    a = mk_run('a',0.9,8)
+    b = mk_run('b',0.9,8)
+    a['metrics_json'] = json.dumps({**json.loads(a['metrics_json']), 'inference/parameters':1000, 'inference/peak_vram_mib':50})
+    b['metrics_json'] = json.dumps({**json.loads(b['metrics_json']), 'inference/parameters':2000, 'inference/peak_vram_mib':60})
+    assert pareto_frontier([a,b], include_resources=True) == ['a']
+
 def test_candidate_path_escape_denied():
     with pytest.raises(ValueError):
         safe_candidate_id('../bad')

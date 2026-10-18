@@ -104,6 +104,18 @@ def _sync_locked(store: StateStore, tracking_uri=None, max_events=100):
             client.set_tag(mlflow_run_id, "research.status", data["status"])
             if data.get('error'):
                 client.set_tag(mlflow_run_id, 'research.failure_reason', str(data['error'])[:500])
+            with store.connect() as con:
+                hypothesis = con.execute('SELECT proposal_json FROM hypotheses WHERE hypothesis_id=?',
+                                         (data['hypothesis_id'],)).fetchone()
+                critique = con.execute("SELECT payload_json FROM events WHERE run_id=? AND kind='CRITIC_REVIEW' ORDER BY id DESC LIMIT 1",
+                                       (run_id,)).fetchone()
+            if hypothesis:
+                proposal = json.loads(hypothesis['proposal_json'])
+                client.set_tag(mlflow_run_id, 'research.source_references', json.dumps(proposal.get('references', []))[:4000])
+                if proposal.get('priority_rank') is not None:
+                    client.set_tag(mlflow_run_id, 'research.hypothesis_rank', str(proposal['priority_rank']))
+            if critique:
+                client.set_tag(mlflow_run_id, 'research.critic_assessment', critique['payload_json'][:4000])
             if artifact_dir.is_dir():
                 # Allowlisted output types only. Never upload raw source images or test masks.
                 for filename in ("measurement.json", "run_manifest.json", "normal_preview.png", "synthetic_input.png", "synthetic_mask.png", "synthetic_heatmap.png", "synthetic_overlay.png"):

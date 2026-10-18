@@ -1,6 +1,7 @@
 """Deterministic subprocess executor with fixed command, time and output policies."""
 from __future__ import annotations
 import hashlib
+import ast
 import json
 import os
 from pathlib import Path
@@ -37,6 +38,20 @@ def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def verify_candidate_source(path):
+    """Non-executing protocol preflight; OS sandbox remains the security boundary."""
+    source = Path(path).read_text()
+    tree = ast.parse(source, filename=str(path))
+    functions = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    methods = {n.name for cls in tree.body if isinstance(cls, ast.ClassDef)
+               for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    if not {'train', 'load'}.issubset(functions) or 'predict' not in methods | functions:
+        raise ValueError('candidate source lacks train/load/predict contract')
+    if any(token in source.lower() for token in ('official_test', 'loco-sealed', 'ground_truth')):
+        raise ValueError('candidate source references protected evaluation data')
+    return {'source_sha256': sha256(path), 'protocol_symbols': sorted(functions | methods)}
+
+
 def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Path, runtime: Path):
     """Never execute untrusted candidate in controller process.
 
@@ -55,12 +70,26 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
     job_dir = runtime / "jobs" / run["run_id"]
     job_dir.mkdir(parents=True, exist_ok=False)
     config = json.loads(run["config_json"])
-    config_path = job_dir / "config.json"
+    isolated = run['candidate_id'] != 'toy_normal_ae' or os.getenv('LOCO_FORCE_SANDBOX_TOY') == '1'
+    input_dir = runtime / 'controller' / 'job_inputs' / run['run_id'] if isolated else job_dir
+    input_dir.mkdir(parents=True, exist_ok=True)
+    config_path = input_dir / "config.json"
     config_path.write_text(json.dumps(config, sort_keys=True, indent=2))
     result_path = job_dir / "measurement.json"
     command = [sys.executable, "-m", "scripts.run_candidate", "--module", str(module_file), "--manifest", str(manifest_path), "--config", str(config_path), "--output", str(job_dir), "--result", str(result_path)]
     environment = {key: value for key, value in os.environ.items() if key not in {"OPENAI_API_KEY", "GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "MLFLOW_TRACKING_TOKEN"}}
     environment["PYTHONPATH"] = str(repo_root)
+    if isolated:
+        from orchestrator.sandbox import command as sandbox_command, write_sandbox_manifest
+        sandbox_manifest, data_root = write_sandbox_manifest(manifest_path, input_dir)
+        command = sandbox_command(repo_root, module_file, data_root, job_dir,
+            ['-m', 'scripts.run_candidate', '--module', '/candidate/model.py',
+             '--manifest', '/inputs/good_manifest.json', '--config', '/inputs/config.json',
+             '--output', '/output', '--result', '/output/measurement.json'],
+            use_gpu=config.get('device', 'cpu').startswith('cuda'),
+            input_files={'config.json': config_path, 'good_manifest.json': sandbox_manifest})
+        # Bubblewrap clears its environment; no controller or Codex secrets enter.
+        environment = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}
     timeout = min(max_job_seconds(), int(config.get("timeout_seconds", max_job_seconds())))
     started = time.monotonic()
     with (job_dir / "stdout.log").open("wb") as stdout, (job_dir / "stderr.log").open("wb") as stderr:

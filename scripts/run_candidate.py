@@ -17,8 +17,19 @@ from benchmark.inference_benchmark import benchmark_predict
 
 
 def load_image(path, size):
-    im = Image.open(path).convert("RGB").resize((size, size))
+    im = Image.open(path).convert("RGB").resize((size, size), Image.Resampling.BILINEAR)
     return np.asarray(im, dtype=np.float32).transpose(2, 0, 1).copy() / 255
+
+
+def restore_anomaly_map(anomaly_map, original_size):
+    """Map a model-space heatmap to the source image's (width, height) grid."""
+    array = np.asarray(anomaly_map, dtype=np.float32)
+    if array.ndim != 2 or not np.isfinite(array).all():
+        raise ValueError('expected finite 2D anomaly map')
+    width, height = original_size
+    if width <= 0 or height <= 0:
+        raise ValueError('invalid original image dimensions')
+    return np.asarray(Image.fromarray(array, mode='F').resize((width, height), Image.Resampling.BILINEAR), dtype=np.float32)
 
 
 def synthetic_corruption(x, seed=0):
@@ -35,8 +46,39 @@ def synthetic_corruption(x, seed=0):
     return changed, mask
 
 
-def save_heatmaps(job_dir, good_image, synthetic_image, anomaly_map, mask):
+def alternate_corruption(x, seed=0):
+    """A second good-image-only generator for shortcut sensitivity checks."""
+    rng = np.random.default_rng(seed)
+    changed = x.copy()
+    _, height, width = x.shape
+    patch = max(2, min(height, width) // 6)
+    source_y = int(rng.integers(0, height - patch + 1))
+    source_x = int(rng.integers(0, width - patch + 1))
+    target_y = (source_y + height // 2) % (height - patch + 1)
+    target_x = (source_x + width // 2) % (width - patch + 1)
+    changed[:, target_y:target_y+patch, target_x:target_x+patch] = x[:, source_y:source_y+patch, source_x:source_x+patch]
+    mask = np.zeros((height, width), dtype=np.uint8)
+    mask[target_y:target_y+patch, target_x:target_x+patch] = 1
+    return changed, mask
+
+
+def split_validation_paths(valid_paths):
+    """Stable, disjoint good-only calibration and assessment partitions."""
+    paths = list(valid_paths)
+    if len(paths) < 2 or len(set(paths)) != len(paths):
+        raise ValueError('Need at least two distinct normal validation images')
+    cut = max(1, len(paths) // 3)
+    return paths[:cut], paths[cut:]
+
+
+def save_heatmaps(job_dir, good_image, synthetic_image, anomaly_map, mask, original_image=None):
     from PIL import Image
+    if original_image is not None:
+        width, height = original_image.size
+        anomaly_map = restore_anomaly_map(anomaly_map, (width, height))
+        synthetic_image = np.asarray(Image.fromarray((synthetic_image.transpose(1,2,0) * 255).astype(np.uint8)).resize((width, height), Image.Resampling.BILINEAR), dtype=np.float32).transpose(2,0,1) / 255
+        mask = np.asarray(Image.fromarray((np.asarray(mask) * 255).astype(np.uint8)).resize((width, height), Image.Resampling.NEAREST), dtype=np.uint8) > 0
+        good_image = np.asarray(original_image, dtype=np.float32).transpose(2,0,1) / 255
     arr = np.asarray(anomaly_map)
     lo, hi = np.percentile(arr, [2, 98])
     score = np.clip((arr - lo) / max(1e-8, hi - lo), 0, 1)
@@ -73,11 +115,8 @@ def run(module_file, manifest_file, config, output):
     checkpoint_meta = mod.train(config, manifest_file, output / "checkpoint")
     predictor = mod.load(output / "checkpoint" / "checkpoint_manifest.json", device=device)
     valid_paths = [p for p, entry in zip(paths, manifest["images"]) if entry["split"] == "validation/good"]
-    if len(valid_paths) < 2:
-        raise ValueError("Need >=2 normal validation images for disjoint calibration and assessment")
     # A disjoint good subset calibrates scores; remaining good images assess FPR.
-    calibrate_paths = valid_paths[:max(1, len(valid_paths) // 3)]
-    score_paths = valid_paths[len(calibrate_paths):]
+    calibrate_paths, score_paths = split_validation_paths(valid_paths)
     calibration = np.stack([load_image(p, size) for p in calibrate_paths])
     normal = np.stack([load_image(p, size) for p in score_paths])
     corrupt, masks = zip(*(synthetic_corruption(im, i + 5000) for i, im in enumerate(normal)))
@@ -93,6 +132,16 @@ def run(module_file, manifest_file, config, output):
     all_pred_synth = np.stack(all_pred_synth)
     metrics = evaluate_dev(all_pred_normal, all_pred_synth, np.stack(masks), calibration_maps=all_pred_cal)
     metrics["dev_synthetic/preview_anomaly_score"] = float(np.max(all_pred_synth[0]))
+    alternate, alternate_masks = zip(*(alternate_corruption(im, i + 7000) for i, im in enumerate(normal)))
+    alternate_maps = []
+    for im in alternate:
+        response = predictor.predict(im[None])
+        maps, _ = validate_prediction(response, (1, 3, size, size))
+        alternate_maps.append(maps[0, 0])
+    from benchmark.metrics import synthetic_pixel_auroc
+    alternate_auroc = synthetic_pixel_auroc(np.stack(alternate_maps), np.stack(alternate_masks))
+    metrics['dev_synthetic/alternate_pixel_auroc'] = float(alternate_auroc)
+    metrics['dev_synthetic/generator_gap'] = float(metrics['dev_synthetic/pixel_auroc'] - alternate_auroc)
     normal_threshold = metrics["normal/threshold"]
     # Appearance edits that maintain the fixture's object layout test sensitivity
     # to superficial edits; these are not a substitute for real logical controls.
@@ -119,9 +168,12 @@ def run(module_file, manifest_file, config, output):
             metrics["inference/parameters"] = sum(p.numel() for p in model.parameters())
     except ImportError:
         pass
-    save_heatmaps(output, normal[0], synthetic[0], all_pred_synth[0], masks[0])
+    with Image.open(score_paths[0]) as source:
+        original = source.convert('RGB')
+        original_size = original.size
+        save_heatmaps(output, normal[0], synthetic[0], all_pred_synth[0], masks[0], original_image=original)
     import sys
-    provenance = {"protocol_version": "1.0", "python_version": sys.version.split()[0], "development_calibration_count":len(calibrate_paths), "normal_assessment_count":len(score_paths), "dependencies_pyproject_sha256":sha256_file(Path(__file__).resolve().parents[1] / "pyproject.toml"), "config_sha256": __import__("hashlib").sha256(json.dumps(config, sort_keys=True).encode()).hexdigest(), "metric_status": "SYNTHETIC_DEVELOPMENT_PROXY_ONLY", "model_module_sha256": sha256_file(module_file), "good_manifest_sha256": manifest_fingerprint(manifest), "checkpoint_sha256": sha256_file(checkpoint), "image_count_normal_validation": len(valid_paths), "device": device, "size": size}
+    provenance = {"protocol_version": "1.0", "python_version": sys.version.split()[0], "development_calibration_count":len(calibrate_paths), "normal_assessment_count":len(score_paths), "dependencies_pyproject_sha256":sha256_file(Path(__file__).resolve().parents[1] / "pyproject.toml"), "config_sha256": __import__("hashlib").sha256(json.dumps(config, sort_keys=True).encode()).hexdigest(), "metric_status": "SYNTHETIC_DEVELOPMENT_PROXY_ONLY", "model_module_sha256": sha256_file(module_file), "good_manifest_sha256": manifest_fingerprint(manifest), "checkpoint_sha256": sha256_file(checkpoint), "image_count_normal_validation": len(valid_paths), "device": device, "size": size, "preview_original_width": original_size[0], "preview_original_height": original_size[1]}
     provenance["artifact_hashes"] = {filename:sha256_file(output / filename) for filename in ("normal_preview.png", "synthetic_input.png", "synthetic_mask.png", "synthetic_heatmap.png", "synthetic_overlay.png")}
     (output / "run_manifest.json").write_text(json.dumps(provenance, indent=2))
     return {"metrics": {k: float(v) for k,v in metrics.items()}, "provenance": provenance}

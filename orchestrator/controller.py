@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 import subprocess
+from difflib import SequenceMatcher
 from pathlib import Path
 import sys
 from orchestrator.budgets import BudgetExceeded, max_job_seconds, enforce
@@ -48,8 +49,25 @@ def add_research_proposals(store, prompt, count=3):
     families = {p["candidate_family"] for p in proposals}
     if len(families) < count:
         raise ValueError("expected materially different candidate families")
+    ranks = [p.get('priority_rank') for p in proposals]
+    if len(set(ranks)) != len(proposals) or any(not isinstance(r, int) or r < 1 for r in ranks):
+        raise ValueError('hypothesis priority ranks must be distinct positive integers')
+    prior = [json.loads(row['proposal_json']) for row in list_proposals(store)]
+    def signature(item):
+        return ' '.join((item.get('claim', '') + ' ' + item.get('controlled_change', '')).lower().split())
+    for proposal in proposals:
+        if any(proposal['hypothesis_id'] == old['hypothesis_id'] or
+               SequenceMatcher(None, signature(proposal), signature(old)).ratio() > 0.92
+               for old in prior):
+            raise ValueError(f"duplicate research proposal: {proposal['hypothesis_id']}")
+        prior.append(proposal)
     for proposal in proposals:
         store.add_proposal(proposal)
+        with store.connect() as con:
+            con.execute('INSERT INTO events(run_id,time,kind,payload_json) VALUES(NULL,?,?,?)',
+                        (__import__('time').time(), 'HYPOTHESIS_RANKING', json.dumps({
+                            'hypothesis_id': proposal['hypothesis_id'], 'priority_rank': proposal['priority_rank'],
+                            'priority_rationale': proposal['priority_rationale']})))
     return proposals
 
 
@@ -98,8 +116,10 @@ def implement_proposal(store, hypothesis_id):
             raise ValueError(f"Agent attempted to modify out-of-scope path: {filename}")
     if not allowed_file.is_file():
         raise ValueError("implementation missing model.py")
-    if response["response"].get("new_dependencies"):
-        raise PermissionError("Agent requested new dependencies; operator approval required before execution")
+    if response["response"].get("new_dependencies") or response['response'].get('external_weights'):
+        raise PermissionError("Agent requested dependencies or external weights; provenance and operator approval required")
+    from orchestrator.experiment_runner import verify_candidate_source
+    verify_candidate_source(allowed_file)
     store.set_hypothesis_status(hypothesis_id, "IMPLEMENTED")
     return {"worktree": str(tree), "candidate_module": str(allowed_file), "agent": response["response"]}
 
@@ -120,7 +140,7 @@ def queue_candidate(store, hypothesis_id, candidate_id, category, stage, device,
     if candidate_tree.is_dir():
         git_sha = subprocess.run(["git", "-C", str(candidate_tree), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
     else:
-        git_sha = "standalone-candidate"
+        git_sha = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
     run_id = store.create_run(hypothesis_id, candidate_id, category, stage, cfg, git_sha=git_sha, manifest_sha256=manifest_fingerprint(manifest))
     for state in ("IMPLEMENTED", "VALIDATED", "QUEUED"):
         store.transition(run_id, state)
@@ -144,6 +164,7 @@ def run_research_campaign(store, manifest_path, device="cuda", max_experiments=3
         add_research_proposals(store, "Propose 3 genuinely distinct, falsifiable MVTec LOCO logical heatmap methods; normal-only learning, no inference memory bank, no sealed benchmark access. Treat these scout leads as UNVERIFIED until independently checked: " + json.dumps(leads))
     completed = []
     proposals = [p for p in list_proposals(store) if p["status"] == "PROPOSED"]
+    proposals.sort(key=lambda row: json.loads(row['proposal_json']).get('priority_rank', 999))
     for row in proposals[:max_experiments]:
         enforce(store, next_gpu_seconds=300 if device.startswith("cuda") else 0)
         hypothesis_id = row["hypothesis_id"]

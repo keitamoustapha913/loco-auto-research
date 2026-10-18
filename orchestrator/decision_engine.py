@@ -18,12 +18,20 @@ def eligible(run, max_latency_ms=20.0, max_normal_fpr=0.10):
     return True, "eligible for further investigation (NOT official LOCO performance)"
 
 
-def pareto_frontier(runs):
-    """Max synthetic pixel-AUROC proxy, min latency; never promote on proxy alone."""
+def pareto_frontier(runs, include_resources=False):
+    """Development frontier; full mode also minimizes size and peak VRAM."""
     valid = []
     for row in runs:
         ok, _ = eligible(row, max_latency_ms=float("inf"), max_normal_fpr=1.0)
         if ok:
             metrics = json.loads(row["metrics_json"])
-            valid.append((row["run_id"], metrics["dev_synthetic/pixel_auroc"], metrics["inference/e2e_ms_p95"]))
-    return [id_ for id_, quality, latency in valid if not any((q2 >= quality and l2 <= latency and (q2 > quality or l2 < latency)) for other, q2, l2 in valid if other != id_)]
+            if include_resources and not all(k in metrics for k in ('inference/parameters', 'inference/peak_vram_mib')):
+                continue
+            vector = (-metrics['dev_synthetic/pixel_auroc'], metrics['inference/e2e_ms_p95'])
+            if include_resources:
+                vector += (metrics['inference/parameters'], metrics['inference/peak_vram_mib'])
+            valid.append((row['run_id'], vector))
+    return [rid for rid, vector in valid if not any(
+        other != rid and all(b <= a for a, b in zip(vector, competitor)) and
+        any(b < a for a, b in zip(vector, competitor))
+        for other, competitor in valid)]
