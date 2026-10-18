@@ -1,0 +1,27 @@
+# Operator review copy. Keep authorization false until this new bounded campaign
+# and the documented shared-host-UID risk are explicitly approved.
+campaign:
+  name: juice-bottle-masked-context-ablation
+  dataset: juice_bottle
+  mode: autonomous
+  gpu_device: cuda
+limits:
+  max_gpu_hours: 0.1
+  max_wall_hours: 2
+  max_experiments: 3
+  max_codex_calls: 4
+  max_job_seconds: 120
+  max_consecutive_failures: 1
+  max_parallel_gpu_jobs: 1
+research:
+  study: masked_context_ablation
+  previous_run_id: b0817b1f-d185-4827-8779-a69252e7b7e9
+  synthetic_anomalies_allowed: true
+  official_test_access: false
+tracking:
+  sqlite: true
+  mlflow: true
+  dashboard: true
+security:
+  execution_mode: personal_bwrap
+  operator_accepts_shared_uid_risk: false

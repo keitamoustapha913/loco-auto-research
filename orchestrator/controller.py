@@ -205,7 +205,8 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
 
 
 def queue_candidate(store, hypothesis_id, candidate_id, category, stage, device, manifest_path, seconds=300,
-                    personal_mode_authorized=False, campaign_id=None, campaign_name=None):
+                    personal_mode_authorized=False, campaign_id=None, campaign_name=None,
+                    context_arm=None):
     from benchmark.data_guard import load_manifest, manifest_fingerprint
     from orchestrator.experiment_runner import candidate_file, sha256
     if candidate_id != "toy_normal_ae" and not personal_mode_authorized and os.getenv("LOCO_SANDBOX_VERIFIED") != "1":
@@ -217,13 +218,17 @@ def queue_candidate(store, hypothesis_id, candidate_id, category, stage, device,
     enforce(store, next_gpu_seconds=seconds if device == "cuda" else 0)
     timeout = min(int(seconds), max_job_seconds())
     cfg = {"device": device, "size": 128, "epochs": 1, "seed": 7, "timeout_seconds": timeout, "category": category, "model_sha256": sha256(module)}
+    if context_arm is not None:
+        if candidate_id != 'masked_context_ablation' or context_arm not in {'local', 'global', 'combined'}:
+            raise ValueError('context_arm is only available for the reviewed masked-context ablation')
+        cfg.update(context_arm=context_arm, steps=100, batch_size=4)
     if campaign_id:
         cfg["campaign_id"] = campaign_id
         if campaign_name:
             cfg["campaign_name"] = campaign_name
         cfg["execution_mode"] = "personal_bwrap" if personal_mode_authorized else "isolated"
     candidate_tree = REPO / "candidates" / "worktrees" / candidate_id
-    if candidate_tree.is_dir():
+    if candidate_tree.is_dir() and module.resolve().is_relative_to(candidate_tree.resolve()):
         git_sha = subprocess.run(["git", "-C", str(candidate_tree), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
     else:
         git_sha = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()

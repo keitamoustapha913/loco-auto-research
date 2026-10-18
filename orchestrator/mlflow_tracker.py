@@ -131,7 +131,7 @@ def _sync_locked(store: StateStore, tracking_uri=None, max_events=100):
                 client.set_tag(mlflow_run_id, 'research.critic_assessment', critique['payload_json'][:4000])
             if artifact_dir.is_dir():
                 # Allowlisted output types only. Never upload raw source images or test masks.
-                for filename in ("measurement.json", "run_manifest.json", "normal_preview.png", "synthetic_input.png", "synthetic_mask.png", "synthetic_heatmap.png", "synthetic_overlay.png"):
+                for filename in ("measurement.json", "run_manifest.json", "development_case_metrics.json", "normal_preview.png", "synthetic_input.png", "synthetic_mask.png", "synthetic_heatmap.png", "synthetic_overlay.png"):
                     item_path = artifact_dir / filename
                     if item_path.is_file() and not item_path.is_symlink():
                         client.log_artifact(mlflow_run_id, str(item_path))

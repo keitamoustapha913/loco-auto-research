@@ -205,6 +205,9 @@ def choose_proposal(store, excluded=()):
 
 def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, runtime: Path):
     """Perform at most one measured attempt; caller persists and repeats."""
+    if json.loads(campaigns.get(campaign_id)['config_json'])['research'].get('study') == 'masked_context_ablation':
+        from orchestrator.ablation_study import run_ablation_cycle
+        return run_ablation_cycle(store, campaigns, campaign_id, runtime)
     from orchestrator.controller import (add_research_proposals, budgeted_invoke,
         implement_proposal, list_proposals, queue_candidate, run_worker_once, scout_literature)
     config = json.loads(campaigns.get(campaign_id)["config_json"])

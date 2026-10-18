@@ -23,6 +23,12 @@ def direction_label(value: str) -> str:
     return value.replace('_', ' ') if value else 'No next direction recorded'
 METRICS = {
     "dev_synthetic/pixel_auroc": ("Synthetic localization AUROC", "Area under the pixel ROC curve on synthetic development changes; not official LOCO performance.", "score"),
+    "dev_synthetic/pixel_ap": ("Synthetic localization AP", "Micro pixel average precision on the primary synthetic development edit; affected by mask prevalence and not official LOCO performance.", "score"),
+    "dev_synthetic/alternate_pixel_auroc": ("Alternate-generator AUROC", "Pixel AUROC on an independently defined synthetic development generator; not official LOCO performance.", "score"),
+    "dev_synthetic/alternate_pixel_ap": ("Alternate-generator AP", "Micro pixel average precision on the alternate synthetic generator; not official LOCO performance.", "score"),
+    "dev_synthetic/relocated_pixel_ap": ("Relocated-patch AP", "Micro pixel average precision on feathered relocated patches; an additional synthetic proxy.", "score"),
+    "robustness/artifact_matched_good_fpr": ("Matched-control false alarm rate", "Share of same-location good-image donor edits above the separately calibrated normal threshold. These controls are plausibly layout-preserving, not certified valid.", "percent"),
+    "robustness/photometric_good_fpr": ("Photometric-control false alarm rate", "Share of mild appearance edits above the separately calibrated normal threshold; object layout is preserved.", "percent"),
     "dev_synthetic/region_pro_proxy_NOT_OFFICIAL": ("Synthetic region overlap proxy", "Region overlap on synthetic development masks; not official LOCO sPRO.", "score"),
     "normal/image_fpr_at_threshold": ("Normal image false positive rate", "Share of permitted good validation images above the selected threshold.", "percent"),
     "inference/e2e_ms_p95": ("Inference latency (p95)", "95th percentile end-to-end batch-one inference time in milliseconds.", "ms"),

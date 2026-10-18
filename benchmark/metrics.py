@@ -47,6 +47,26 @@ def synthetic_pixel_auroc(maps, masks):
     return binary_auroc(masks.astype(np.int8), maps)
 
 
+def synthetic_pixel_average_precision(maps, masks):
+    """Micro pixel AP on synthetic development masks, never official LOCO AP."""
+    scores = np.asarray(maps, dtype=np.float64)
+    labels = np.asarray(masks, dtype=np.uint8)
+    if scores.shape != labels.shape or scores.ndim != 3 or not np.isfinite(scores).all() or not np.isin(labels, [0, 1]).all():
+        raise ValueError('expected finite aligned [N,H,W] maps and binary masks')
+    y, s = labels.ravel(), scores.ravel()
+    positives = int(y.sum())
+    if not positives or positives == y.size:
+        raise ValueError('pixel AP requires positive and negative synthetic pixels')
+    order = np.argsort(-s, kind='stable')
+    ranked_y, ranked_s = y[order], s[order]
+    cumulative = np.cumsum(ranked_y, dtype=np.int64)
+    ends = np.r_[np.flatnonzero(ranked_s[:-1] != ranked_s[1:]), y.size - 1]
+    true_positives = cumulative[ends]
+    precision = true_positives / (ends + 1)
+    increments = np.diff(np.r_[0, true_positives]) / positives
+    return float(np.sum(precision * increments))
+
+
 def synthetic_region_pro_proxy(maps, masks, max_fpr=0.05, steps=80):
     """Approximate per-region overlap integrated over <=max_fpr of normal pixels.
 

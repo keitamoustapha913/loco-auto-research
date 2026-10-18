@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "source_run_id": {"type": "string"},
+    "next_arm": {"enum": ["local", "global"]},
+    "evidence": {"type": "string", "minLength": 20},
+    "falsifiable_prediction": {"type": "string", "minLength": 20},
+    "shortcut_risk": {"type": "string", "minLength": 20}
+  },
+  "required": ["schema_version", "source_run_id", "next_arm", "evidence",
+               "falsifiable_prediction", "shortcut_risk"]
+}

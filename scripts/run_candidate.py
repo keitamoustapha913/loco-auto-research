@@ -62,6 +62,42 @@ def alternate_corruption(x, seed=0):
     return changed, mask
 
 
+def paired_patch_edits(image, same_location_good_donor, seed=0):
+    """Relocated patch and two layout-preserving controls with identical blend mask.
+
+    Both inputs must be permitted good validation images. The donor control is
+    plausibly layout-preserving, not certified logically valid by annotation.
+    """
+    source = np.asarray(image, dtype=np.float32)
+    donor = np.asarray(same_location_good_donor, dtype=np.float32)
+    if source.shape != donor.shape or source.ndim != 3 or source.shape[0] != 3:
+        raise ValueError('paired edits need aligned RGB good images')
+    _, height, width = source.shape
+    patch = max(4, min(height, width) // 6)
+    rng = np.random.default_rng(seed)
+    source_y = int(rng.integers(0, height - patch + 1))
+    source_x = int(rng.integers(0, width - patch + 1))
+    target_y = (source_y + height // 2) % (height - patch + 1)
+    target_x = (source_x + width // 2) % (width - patch + 1)
+    edge = min(3, patch // 4)
+    yy, xx = np.mgrid[:patch, :patch]
+    distance = np.minimum.reduce((yy + 1, xx + 1, patch - yy, patch - xx))
+    alpha = (0.8 * np.minimum(distance / max(edge, 1), 1.0))[None]
+    base = source[:, target_y:target_y + patch, target_x:target_x + patch]
+    relocated = source.copy()
+    control = source.copy()
+    photometric = source.copy()
+    relocated[:, target_y:target_y + patch, target_x:target_x + patch] = (
+        base * (1 - alpha) + source[:, source_y:source_y + patch, source_x:source_x + patch] * alpha)
+    control[:, target_y:target_y + patch, target_x:target_x + patch] = (
+        base * (1 - alpha) + donor[:, target_y:target_y + patch, target_x:target_x + patch] * alpha)
+    photometric[:, target_y:target_y + patch, target_x:target_x + patch] = (
+        base * (1 - alpha) + np.clip(base * 0.95 + 0.025, 0, 1) * alpha)
+    mask = np.zeros((height, width), dtype=np.uint8)
+    mask[target_y:target_y + patch, target_x:target_x + patch] = 1
+    return relocated, control, photometric, mask
+
+
 def split_validation_paths(valid_paths):
     """Stable, disjoint good-only calibration and assessment partitions."""
     paths = list(valid_paths)
@@ -95,7 +131,7 @@ def save_heatmaps(job_dir, good_image, synthetic_image, anomaly_map, mask, origi
 
 def run(module_file, manifest_file, config, output):
     from benchmark.data_guard import sha256_file
-    from benchmark.metrics import synthetic_region_pro_proxy
+    from benchmark.metrics import synthetic_pixel_average_precision, synthetic_region_pro_proxy
     output.mkdir(parents=True, exist_ok=True)
     manifest, paths = load_manifest(manifest_file)
     category = config.get("category", "fixture")
@@ -133,6 +169,7 @@ def run(module_file, manifest_file, config, output):
     all_pred_normal = np.stack(all_pred_normal)
     all_pred_synth = np.stack(all_pred_synth)
     metrics = evaluate_dev(all_pred_normal, all_pred_synth, np.stack(masks), calibration_maps=all_pred_cal)
+    metrics['dev_synthetic/pixel_ap'] = synthetic_pixel_average_precision(all_pred_synth, np.stack(masks))
     metrics['training/duration_seconds'] = float(training_duration_seconds)
     metrics["dev_synthetic/preview_anomaly_score"] = float(np.max(all_pred_synth[0]))
     alternate, alternate_masks = zip(*(alternate_corruption(im, i + 7000) for i, im in enumerate(normal)))
@@ -144,8 +181,47 @@ def run(module_file, manifest_file, config, output):
     from benchmark.metrics import synthetic_pixel_auroc
     alternate_auroc = synthetic_pixel_auroc(np.stack(alternate_maps), np.stack(alternate_masks))
     metrics['dev_synthetic/alternate_pixel_auroc'] = float(alternate_auroc)
+    metrics['dev_synthetic/alternate_pixel_ap'] = synthetic_pixel_average_precision(
+        np.stack(alternate_maps), np.stack(alternate_masks))
     metrics['dev_synthetic/generator_gap'] = float(metrics['dev_synthetic/pixel_auroc'] - alternate_auroc)
+    paired = [paired_patch_edits(normal[i], normal[(i ^ 1) if (i ^ 1) < len(normal) else i - 1], seed=i + 9000)
+              for i in range(len(normal))]
+    relocated, matched_controls, photometric_controls, matched_masks = zip(*paired)
+    paired_maps, control_scores, photometric_scores = [], [], []
+    for altered, control, photometric in zip(relocated, matched_controls, photometric_controls):
+        prediction = predictor.predict(altered[None])
+        maps, _ = validate_prediction(prediction, (1, 3, size, size))
+        paired_maps.append(maps[0, 0])
+        control_prediction = predictor.predict(control[None])
+        _, scores = validate_prediction(control_prediction, (1, 3, size, size))
+        control_scores.append(float(scores[0]))
+        photometric_prediction = predictor.predict(photometric[None])
+        _, scores = validate_prediction(photometric_prediction, (1, 3, size, size))
+        photometric_scores.append(float(scores[0]))
+    paired_maps = np.stack(paired_maps)
+    matched_masks = np.stack(matched_masks)
+    metrics['dev_synthetic/relocated_pixel_auroc'] = synthetic_pixel_auroc(paired_maps, matched_masks)
+    metrics['dev_synthetic/relocated_pixel_ap'] = synthetic_pixel_average_precision(paired_maps, matched_masks)
     normal_threshold = metrics["normal/threshold"]
+    metrics['robustness/artifact_matched_good_fpr'] = float(np.mean(np.asarray(control_scores) > normal_threshold))
+    metrics['robustness/photometric_good_fpr'] = float(np.mean(np.asarray(photometric_scores) > normal_threshold))
+    case_metrics = []
+    for index in range(len(normal)):
+        case_metrics.append({
+            'image_index': index, 'donor_pair_cluster': index // 2,
+            'primary_pixel_ap': synthetic_pixel_average_precision(
+                all_pred_synth[index:index + 1], np.asarray(masks)[index:index + 1]),
+            'alternate_pixel_ap': synthetic_pixel_average_precision(
+                np.asarray(alternate_maps)[index:index + 1], np.asarray(alternate_masks)[index:index + 1]),
+            'relocated_pixel_ap': synthetic_pixel_average_precision(
+                paired_maps[index:index + 1], matched_masks[index:index + 1]),
+            'normal_alarm': bool(np.max(all_pred_normal[index]) > normal_threshold),
+            'matched_control_alarm': bool(control_scores[index] > normal_threshold),
+            'photometric_control_alarm': bool(photometric_scores[index] > normal_threshold),
+        })
+    (output / 'development_case_metrics.json').write_text(json.dumps({
+        'schema_version': '1.0', 'metric_status': 'SYNTHETIC_DEVELOPMENT_PROXY_ONLY',
+        'cases': case_metrics}, sort_keys=True, indent=2))
     # Appearance edits that maintain the fixture's object layout test sensitivity
     # to superficial edits; these are not a substitute for real logical controls.
     edited_good = np.clip(normal * 0.93 + 0.03, 0, 1)
@@ -176,8 +252,7 @@ def run(module_file, manifest_file, config, output):
         original_size = original.size
         save_heatmaps(output, normal[0], synthetic[0], all_pred_synth[0], masks[0], original_image=original)
     import sys
-    provenance = {"protocol_version": "1.0", "python_version": sys.version.split()[0], "development_calibration_count":len(calibrate_paths), "normal_assessment_count":len(score_paths), "dependencies_pyproject_sha256":sha256_file(Path(__file__).resolve().parents[1] / "pyproject.toml"), "config_sha256": __import__("hashlib").sha256(json.dumps(config, sort_keys=True).encode()).hexdigest(), "metric_status": "SYNTHETIC_DEVELOPMENT_PROXY_ONLY", "model_module_sha256": sha256_file(module_file), "good_manifest_sha256": manifest_fingerprint(manifest), "checkpoint_sha256": sha256_file(checkpoint), "image_count_normal_validation": len(valid_paths), "device": device, "size": size, "preview_original_width": original_size[0], "preview_original_height": original_size[1]}
-    provenance["artifact_hashes"] = {filename:sha256_file(output / filename) for filename in ("normal_preview.png", "synthetic_input.png", "synthetic_mask.png", "synthetic_heatmap.png", "synthetic_overlay.png")}
+    provenance = {"protocol_version": "1.1", "python_version": sys.version.split()[0], "development_calibration_count":len(calibrate_paths), "normal_assessment_count":len(score_paths), "dependencies_pyproject_sha256":sha256_file(Path(__file__).resolve().parents[1] / "pyproject.toml"), "config_sha256": __import__("hashlib").sha256(json.dumps(config, sort_keys=True).encode()).hexdigest(), "metric_status": "SYNTHETIC_DEVELOPMENT_PROXY_ONLY", "model_module_sha256": sha256_file(module_file), "good_manifest_sha256": manifest_fingerprint(manifest), "checkpoint_sha256": sha256_file(checkpoint), "image_count_normal_validation": len(valid_paths), "device": device, "size": size, "preview_original_width": original_size[0], "preview_original_height": original_size[1], "artifact_hashes": {filename:sha256_file(output / filename) for filename in ("normal_preview.png", "synthetic_input.png", "synthetic_mask.png", "synthetic_heatmap.png", "synthetic_overlay.png", "development_case_metrics.json")}, "artifact_control_status": "same-location donor from a separate good assessment image is plausibly layout-preserving, not certified valid; mild photometric edit preserves layout", "synthetic_generator_protocol": "white_patch_v1, relocated_copy_v1, feathered_relocation_v1"}
     (output / "run_manifest.json").write_text(json.dumps(provenance, indent=2))
     return {"metrics": {k: float(v) for k,v in metrics.items()}, "provenance": provenance}
 

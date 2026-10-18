@@ -59,6 +59,9 @@ def test_stage_and_provenance_labels_do_not_turn_proxies_into_official_scores():
     assert classify_run(unverified) == "Unclassified run"
     assert "Synthetic" in METRICS["dev_synthetic/pixel_auroc"][0]
     assert "not official" in METRICS["dev_synthetic/pixel_auroc"][1]
+    assert "Synthetic" in METRICS["dev_synthetic/pixel_ap"][0]
+    assert "not official" in METRICS["dev_synthetic/pixel_ap"][1]
+    assert "not certified" in METRICS["robustness/artifact_matched_good_fpr"][1]
     assert format_metric(0.125, "percent") == "12.5%"
     assert format_metric(8.42, "ms") == "8.4 ms"
     assert format_duration(125) == "2 min 05 s"

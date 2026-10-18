@@ -23,9 +23,19 @@ def run_details(run: dict, *, compact=False):
     columns[2].metric("Inference latency", format_metric(metric_value(run, "inference/e2e_ms_p95"), "ms"))
     if not compact:
         st.write("**Research hypothesis:**", str(run.get("hypothesis_id") or "—").replace("_", " "))
+        if (run.get('config') or {}).get('context_arm'):
+            st.caption(f"Context arm: {run['config']['context_arm'].title()}")
         for key in ("dev_synthetic/pixel_auroc", "normal/image_fpr_at_threshold", "inference/checkpoint_mib", "inference/peak_vram_mib"):
             label, help_text, kind = METRICS[key]
             st.metric(label, format_metric(metric_value(run, key), kind), help=help_text)
+        if metric_value(run, 'dev_synthetic/pixel_ap') is not None:
+            with st.expander('Synthetic ablation diagnostics'):
+                for key in ('dev_synthetic/pixel_ap', 'dev_synthetic/alternate_pixel_auroc',
+                            'dev_synthetic/alternate_pixel_ap', 'dev_synthetic/relocated_pixel_ap',
+                            'robustness/artifact_matched_good_fpr',
+                            'robustness/photometric_good_fpr'):
+                    label, help_text, kind = METRICS[key]
+                    st.metric(label, format_metric(metric_value(run, key), kind), help=help_text)
         st.caption("Synthetic measurements describe development examples only; no official LOCO score is shown here.")
     with st.expander("Technical provenance"):
         st.write("Run ID:", run.get("run_id") or "—")

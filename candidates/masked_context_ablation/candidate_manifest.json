@@ -1,0 +1,9 @@
+{
+  "candidate_id": "masked_context_ablation",
+  "parent_candidate": "cuda_masked_context_prediction",
+  "parent_git_commit": "3367a666bb77fc1122666a741cf3d6554fb7eb97",
+  "ablation_axis": "context_arm",
+  "allowed_arms": ["local", "global", "combined"],
+  "external_weights": [],
+  "metric_status": "synthetic_development_proxy_only"
+}
