@@ -14,7 +14,7 @@ import sys
 from benchmark.data_guard import load_manifest
 
 BENCHMARK_FILES = ('__init__.py', 'data_guard.py', 'train_adapter.py',
-                   'metrics.py', 'validation.py', 'inference_benchmark.py')
+                   'metrics.py', 'metrics_v2.py', 'validation.py', 'inference_benchmark.py')
 
 
 def available():

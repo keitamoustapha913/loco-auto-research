@@ -1,0 +1,35 @@
+# PREPARED ONLY. A separately approved, private operator copy may set the
+# shared-UID risk flag. This file remains disabled and must never auto-start.
+campaign:
+  name: juice-bottle-stage6-confirmatory
+  dataset: juice_bottle
+  mode: autonomous
+  gpu_device: cuda
+limits:
+  max_gpu_hours: 0.5
+  max_wall_hours: 4
+  max_experiments: 15
+  max_codex_calls: 1
+  max_job_seconds: 120
+  max_consecutive_failures: 1
+  max_parallel_gpu_jobs: 1
+research:
+  study: stage6_multiseed
+  previous_campaign_id: 9b5e808f-48e9-4d72-a5ee-2b95df84e18a
+  arms: [local, global, combined, neither, spatial]
+  seeds: [7, 17, 29]
+  steps_per_job: 100
+  batch_size: 4
+  input_size: 128
+  evaluator_version: development-v2.0
+  primary_comparison: combined_minus_local_macro_pixel_ap
+  confirmatory_min_gain: 0.03
+  synthetic_anomalies_allowed: true
+  official_test_access: false
+tracking:
+  sqlite: true
+  mlflow: true
+  dashboard: true
+security:
+  execution_mode: personal_bwrap
+  operator_accepts_shared_uid_risk: false

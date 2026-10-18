@@ -103,3 +103,42 @@ def test_tracking_adds_research_sources_and_critique(tmp_path, monkeypatch):
     assert sync_outbox(store, 'http://127.0.0.1:56000')['delivered'] == 1
     assert 'example.org/source' in tags['research.source_references']
     assert 'shortcut' in tags['research.critic_assessment']
+
+
+def test_tracking_versioned_evaluation_without_mutating_historical_metrics(tmp_path, monkeypatch):
+    from benchmark.metrics_v2 import EVALUATOR_VERSION
+    store = StateStore(tmp_path / 'ledger.sqlite')
+    rid = store.create_run('stage6', 'masked_context_ablation', 'fixture', config={'seed': 7})
+    job = tmp_path / 'jobs' / rid
+    job.mkdir(parents=True)
+    (job / 'run_manifest.json').write_text(json.dumps({
+        'protocol_version': '2.0', 'metric_evaluator_version': EVALUATOR_VERSION,
+        'synthetic_generator_source_sha256': 'known-generator'}))
+    (job / 'development_case_metrics.json').write_text('{"cases": []}')
+    for state in ('IMPLEMENTED', 'VALIDATED', 'QUEUED', 'RUNNING'):
+        store.transition(rid, state)
+    store.set_run_result(rid, {'dev_synthetic/pixel_ap': .4}, artifact_dir=job)
+    store.transition(rid, 'COMPLETED')
+    old_metrics = store.get_run(rid)['metrics_json']
+    tags, artifacts = {}, []
+    class Client:
+        def __init__(self, tracking_uri): pass
+        def get_experiment_by_name(self, name): return types.SimpleNamespace(experiment_id='1')
+        def search_runs(self, ids, filter_string, max_results): return []
+        def create_run(self, experiment_id, tags, start_time=None):
+            return types.SimpleNamespace(info=types.SimpleNamespace(run_id='remote-v2'))
+        def log_param(self, *args): pass
+        def log_metric(self, *args): pass
+        def set_tag(self, run_id, key, value): tags[key] = value
+        def log_artifact(self, run_id, path, artifact_path=None): artifacts.append(Path(path).name)
+        def set_terminated(self, *args, **kwargs): pass
+    ml = types.ModuleType('mlflow'); ml.set_tracking_uri = lambda uri: None
+    tracking = types.ModuleType('mlflow.tracking'); tracking.MlflowClient = Client
+    monkeypatch.setitem(sys.modules, 'mlflow', ml)
+    monkeypatch.setitem(sys.modules, 'mlflow.tracking', tracking)
+    monkeypatch.setenv('LOCO_RUNTIME', str(tmp_path))
+    assert sync_outbox(store, 'http://127.0.0.1:56000')['delivered'] == 1
+    assert tags['evaluation.metric_version'] == EVALUATOR_VERSION
+    assert tags['protocol.version'] == '2.0'
+    assert 'development_case_metrics.json' in artifacts
+    assert store.get_run(rid)['metrics_json'] == old_metrics

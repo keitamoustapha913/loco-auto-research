@@ -206,7 +206,7 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
 
 def queue_candidate(store, hypothesis_id, candidate_id, category, stage, device, manifest_path, seconds=300,
                     personal_mode_authorized=False, campaign_id=None, campaign_name=None,
-                    context_arm=None):
+                    context_arm=None, seed=None):
     from benchmark.data_guard import load_manifest, manifest_fingerprint
     from orchestrator.experiment_runner import candidate_file, sha256
     if candidate_id != "toy_normal_ae" and not personal_mode_authorized and os.getenv("LOCO_SANDBOX_VERIFIED") != "1":
@@ -217,9 +217,13 @@ def queue_candidate(store, hypothesis_id, candidate_id, category, stage, device,
         raise ValueError("category absent from authorized good-only manifest")
     enforce(store, next_gpu_seconds=seconds if device == "cuda" else 0)
     timeout = min(int(seconds), max_job_seconds())
-    cfg = {"device": device, "size": 128, "epochs": 1, "seed": 7, "timeout_seconds": timeout, "category": category, "model_sha256": sha256(module)}
+    if seed is not None and (candidate_id != 'masked_context_ablation' or seed not in {7, 17, 29}):
+        raise ValueError('seed is restricted to the predeclared masked-context study seeds')
+    cfg = {"device": device, "size": 128, "epochs": 1, "seed": 7 if seed is None else seed,
+           "timeout_seconds": timeout, "category": category, "model_sha256": sha256(module),
+           "metric_evaluator_version": "development-v2.0"}
     if context_arm is not None:
-        if candidate_id != 'masked_context_ablation' or context_arm not in {'local', 'global', 'combined'}:
+        if candidate_id != 'masked_context_ablation' or context_arm not in {'local', 'global', 'combined', 'neither', 'spatial'}:
             raise ValueError('context_arm is only available for the reviewed masked-context ablation')
         cfg.update(context_arm=context_arm, steps=100, batch_size=4)
     if campaign_id:

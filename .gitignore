@@ -27,6 +27,7 @@ results/heatmaps/*
 !results/heatmaps/.gitkeep
 results/reports/*
 !results/reports/.gitkeep
+!results/reports/stage6_metric_audit.md
 mlruns/
 mlartifacts/
 /candidates/worktrees/

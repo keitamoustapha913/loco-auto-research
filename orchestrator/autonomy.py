@@ -60,6 +60,9 @@ def load_campaign_config(path=None):
         raise ValueError("official test data must remain excluded")
     if config["security"].get("execution_mode") != "personal_bwrap":
         raise ValueError("unknown execution boundary")
+    if config['research'].get('study') == 'stage6_multiseed':
+        from orchestrator.multiseed_study import prescribed_plan
+        prescribed_plan(config)
     return config
 
 
@@ -205,7 +208,11 @@ def choose_proposal(store, excluded=()):
 
 def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, runtime: Path):
     """Perform at most one measured attempt; caller persists and repeats."""
-    if json.loads(campaigns.get(campaign_id)['config_json'])['research'].get('study') == 'masked_context_ablation':
+    study = json.loads(campaigns.get(campaign_id)['config_json'])['research'].get('study')
+    if study == 'stage6_multiseed':
+        from orchestrator.multiseed_study import run_multiseed_cycle
+        return run_multiseed_cycle(store, campaigns, campaign_id, runtime)
+    if study == 'masked_context_ablation':
         from orchestrator.ablation_study import run_ablation_cycle
         return run_ablation_cycle(store, campaigns, campaign_id, runtime)
     from orchestrator.controller import (add_research_proposals, budgeted_invoke,

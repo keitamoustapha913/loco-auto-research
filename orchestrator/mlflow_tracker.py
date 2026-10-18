@@ -101,9 +101,16 @@ def _sync_locked(store: StateStore, tracking_uri=None, max_events=100):
             meta_path = artifact_dir / "run_manifest.json"
             if meta_path.is_file():
                 meta = json.loads(meta_path.read_text())
+                if meta.get('protocol_version'):
+                    client.set_tag(mlflow_run_id, 'protocol.version', str(meta['protocol_version']))
                 for field, tag in (("model_module_sha256", "candidate.code_sha256"), ("config_sha256", "config.sha256"), ("dependencies_pyproject_sha256", "dependencies.sha256")):
                     if meta.get(field):
                         client.set_tag(mlflow_run_id, tag, meta[field])
+                for field, tag in (("metric_evaluator_version", "evaluation.metric_version"),
+                                   ("synthetic_generator_source_sha256", "evaluation.generator_source_sha256"),
+                                   ("synthetic_mask_semantics", "evaluation.synthetic_mask_semantics")):
+                    if meta.get(field):
+                        client.set_tag(mlflow_run_id, tag, str(meta[field])[:1000])
             for k, v in data.get("params", {}).items():
                 # Parameters are immutable per MLflow run; same key/value is idempotent.
                 if isinstance(v, (str, int, float, bool)):
@@ -131,7 +138,7 @@ def _sync_locked(store: StateStore, tracking_uri=None, max_events=100):
                 client.set_tag(mlflow_run_id, 'research.critic_assessment', critique['payload_json'][:4000])
             if artifact_dir.is_dir():
                 # Allowlisted output types only. Never upload raw source images or test masks.
-                for filename in ("measurement.json", "run_manifest.json", "development_case_metrics.json", "normal_preview.png", "synthetic_input.png", "synthetic_mask.png", "synthetic_heatmap.png", "synthetic_overlay.png"):
+                for filename in ("measurement.json", "run_manifest.json", "development_case_metrics.json", "stage6_comparison.json", "normal_preview.png", "synthetic_input.png", "synthetic_mask.png", "synthetic_heatmap.png", "synthetic_overlay.png"):
                     item_path = artifact_dir / filename
                     if item_path.is_file() and not item_path.is_symlink():
                         client.log_artifact(mlflow_run_id, str(item_path))

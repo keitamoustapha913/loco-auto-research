@@ -161,6 +161,10 @@ def test_bounded_cpu_fixture_runs_full_ablation_evaluator_inside_bubblewrap(tmp_
     assert process.returncode == 0, process.stderr[-2000:]
     measurement = json.loads((output / 'measurement.json').read_text())
     metrics = measurement['metrics']
+    assert measurement['provenance']['metric_evaluator_version'] == 'development-v2.0'
+    assert measurement['provenance']['synthetic_mask_semantics'].startswith('edited target footprint only')
+    assert metrics['normal/image_assessed'] == 2
+    assert 'normal/image_false_positives' in metrics
     assert all(key in metrics for key in (
         'dev_synthetic/pixel_ap', 'dev_synthetic/alternate_pixel_ap',
         'dev_synthetic/relocated_pixel_ap', 'robustness/artifact_matched_good_fpr',

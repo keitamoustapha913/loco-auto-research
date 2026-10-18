@@ -96,6 +96,22 @@ def campaign_timeline(limit=200):
     return rows("SELECT * FROM campaign_events ORDER BY id DESC LIMIT ?", (max(1, min(int(limit), 500)),))
 
 
+def latest_multiseed_comparison():
+    """Read only completed versioned comparisons; no inference from single runs."""
+    records = rows("SELECT payload_json FROM campaign_events WHERE kind='STAGE6_COMPARISON' ORDER BY id DESC LIMIT 1")
+    if not records:
+        return None
+    try:
+        comparison = json.loads(records[0]['payload_json'])['comparison']
+        if (comparison.get('metric_evaluator_version') != 'development-v2.0' or
+            len(comparison.get('per_seed', [])) != 15 or
+            len(comparison.get('seeds', [])) != 3):
+            return None
+        return comparison
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def pending_outbox():
     row = rows("SELECT COUNT(*) AS count FROM tracking_outbox WHERE delivered_at IS NULL")
     return row[0]["count"] if row else 0

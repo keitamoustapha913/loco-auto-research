@@ -40,12 +40,18 @@ class Net(nn.Module):
                 local = context
         elif arm == 'local':
             context = local
+        elif arm in ('neither', 'spatial'):
+            local = torch.zeros_like(local)
+            context = torch.zeros_like(local)
         else:
             raise ValueError('unknown context arm')
         h, w = x.shape[-2:]
         yy, xx = torch.meshgrid(torch.linspace(-1, 1, h, device=x.device), torch.linspace(-1, 1, w, device=x.device), indexing='ij')
         coords = torch.stack((yy, xx))[None].expand(x.shape[0], -1, -1, -1)
-        return self.layers(torch.cat((local, context, coords, visible.expand(x.shape[0], -1, -1, -1)), 1))
+        visibility = visible.expand(x.shape[0], -1, -1, -1)
+        if arm == 'spatial':
+            visibility = torch.zeros_like(visibility)
+        return self.layers(torch.cat((local, context, coords, visibility), 1))
 
 
 def _device(value):
@@ -90,8 +96,8 @@ def train(config: dict, allowed_train_manifest: Path, output_dir: Path):
     if not 1 <= steps <= 100 or not 1 <= batch <= 16:
         raise ValueError('pilot permits 1..100 updates and batch 1..16')
     arm = config.get('context_arm', 'combined')
-    if arm not in ('global', 'local', 'combined'):
-        raise ValueError('context_arm must be local, global or combined')
+    if arm not in ('global', 'local', 'combined', 'neither', 'spatial'):
+        raise ValueError('context_arm must be local, global, combined, neither or spatial')
     manifest_path = Path(allowed_train_manifest)
     raw = manifest_path.read_bytes()
     manifest = json.loads(raw)

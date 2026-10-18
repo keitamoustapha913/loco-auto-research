@@ -45,6 +45,7 @@ def run_details(run: dict, *, compact=False):
         st.write("Started:", format_date(run.get("started_at")))
         st.write("Finished:", format_date(run.get("finished_at")))
         st.write("Seed:", (run.get("config") or {}).get("seed", "—"))
+        st.write("Metric evaluator:", (run.get("config") or {}).get("metric_evaluator_version", "legacy development v1"))
         url = get_mlflow_url(run)
         if url:
             st.link_button("Open this run in MLflow", url)

@@ -4,7 +4,7 @@ import plotly.express as px
 import streamlit as st
 
 from dashboard.components import page_intro, run_details
-from dashboard.data_access import allowed_preview, heatmap_sample, list_runs
+from dashboard.data_access import allowed_preview, heatmap_sample, latest_multiseed_comparison, list_runs
 from dashboard.presentation import (
     INFRASTRUCTURE, METRICS, classify_run, comparable_research_runs,
     experiment_rows, format_metric, metric_value, research_runs, research_summary, run_label,
@@ -75,6 +75,27 @@ with heatmaps_tab:
                     c3.caption("No synthetic mask saved for this run.")
 
 with compare_tab:
+    study = latest_multiseed_comparison()
+    if study:
+        st.subheader("Three-seed comparison")
+        st.caption("Version 2 synthetic development evaluation · mean ± sample SD across training seeds. Image-pair intervals and seed variation are distinct; no official LOCO scores.")
+        table = []
+        for arm in study['arms']:
+            values = study['across_seed'][arm]
+            table.append({'Context': arm.replace('_', ' ').title(),
+                'Primary AP': f"{values['primary_pixel_ap']['mean']:.3f} ± {values['primary_pixel_ap']['sample_sd']:.3f}",
+                'Alternate AP': f"{values['alternate_pixel_ap']['mean']:.3f} ± {values['alternate_pixel_ap']['sample_sd']:.3f}",
+                'Copy-insertion AP': f"{values['relocated_pixel_ap']['mean']:.3f} ± {values['relocated_pixel_ap']['sample_sd']:.3f}"})
+        st.dataframe(table, hide_index=True, width="stretch")
+        with st.expander("Paired differences and per-seed runs"):
+            differences = []
+            for arm, endpoints in study['paired_differences'].items():
+                for endpoint, value in endpoints.items():
+                    differences.append({'Arm minus local': arm.title(), 'Proxy': endpoint.replace('_', ' '),
+                        'Mean paired difference': f"{value['arm_minus_local_mean']:+.3f}",
+                        'Between-seed SD': f"{value['between_seed_sample_sd']:.3f}"})
+            st.dataframe(differences, hide_index=True, width="stretch")
+            st.caption("Per-seed image-cluster intervals and run IDs are recorded in the campaign comparison and MLflow artifact.")
     comparable = comparable_research_runs(runs)
     if not comparable:
         st.info("Pareto comparison will appear after at least two different research candidates have complete, comparable development measurements on the same good-image manifest. Infrastructure tests are excluded.")
