@@ -13,7 +13,7 @@ import sys
 
 from benchmark.data_guard import load_manifest
 
-BENCHMARK_FILES = ('__init__.py', 'data_guard.py', 'train_adapter.py', 'stage7_controls.py',
+BENCHMARK_FILES = ('__init__.py', 'data_guard.py', 'train_adapter.py', 'stage7_controls.py', 'semantic_validation.py',
                    'metrics.py', 'metrics_v2.py', 'validation.py', 'inference_benchmark.py')
 
 
@@ -30,7 +30,7 @@ def write_sandbox_manifest(source, output_dir):
     return path, Path(manifest['root']).resolve(strict=True)
 
 
-def command(repo_root, candidate_file, data_root, output_dir, inner_command, use_gpu=False, input_files=None):
+def command(repo_root, candidate_file, data_root, output_dir, inner_command, use_gpu=False, input_files=None, case_dir=None):
     if not available():
         raise RuntimeError('Bubblewrap is required for untrusted candidate execution')
     repo = Path(repo_root).resolve(strict=True)
@@ -57,8 +57,13 @@ def command(repo_root, candidate_file, data_root, output_dir, inner_command, use
             '--ro-bind', model.parent, '/candidate']
     for name in BENCHMARK_FILES:
         args += ['--ro-bind', repo / 'benchmark' / name, '/lab/benchmark/' + name]
-    for name in ('__init__.py', 'run_candidate.py', 'stage7_eval.py', 'stage7_texture_eval.py'):
+    for name in ('__init__.py', 'run_candidate.py', 'stage7_eval.py', 'stage7_texture_eval.py', 'stage8_eval.py'):
         args += ['--ro-bind', repo / 'scripts' / name, '/lab/scripts/' + name]
+    if case_dir is not None:
+        cases = Path(case_dir).resolve(strict=True)
+        if not cases.is_dir() or not cases.is_relative_to(repo / 'results' / 'metrics'):
+            raise PermissionError('case artifacts must be under repository results/metrics')
+        args += ['--dir', '/cases', '--ro-bind', cases, '/cases']
     args += ['--ro-bind', repo / 'pyproject.toml', '/lab/pyproject.toml']
     for name, path in (input_files or {}).items():
         if name not in {'config.json', 'good_manifest.json', 'checkpoint_manifest.json', 'model.pt'}:

@@ -1,0 +1,25 @@
+# REVIEW PROPOSAL ONLY. No campaign launcher consumes this file automatically.
+enabled: false
+study: verified_component_relationship_pilot
+dataset: separately_authorized_good_only_versioned_manifest
+prerequisites:
+  fresh_source_clusters_disjoint_from_training_calibration_prior_assessment: true
+  blinded_independent_validity_reviews_per_case: 2
+  independent_semantic_target_masks: true
+  status_counterbalanced_against_edit_strength_and_generator: true
+  frozen_development_v2_metrics_and_thresholds: true
+arms:
+  - factorized_component_evidence_baseline
+  - conditional_component_relationship_treatment
+limits:
+  max_gpu_jobs: 2
+  max_job_seconds: 300
+  max_aggregate_gpu_slot_seconds: 600
+  max_wall_minutes: 90
+  max_parallel_gpu_jobs: 1
+  max_codex_calls: 2
+  automatic_follow_on_campaign: false
+security:
+  use_existing_guarded_runner: true
+  official_test_access: false
+  operator_authorization_required: true
