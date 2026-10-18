@@ -13,7 +13,7 @@ import sys
 
 from benchmark.data_guard import load_manifest
 
-BENCHMARK_FILES = ('__init__.py', 'data_guard.py', 'train_adapter.py',
+BENCHMARK_FILES = ('__init__.py', 'data_guard.py', 'train_adapter.py', 'stage7_controls.py',
                    'metrics.py', 'metrics_v2.py', 'validation.py', 'inference_benchmark.py')
 
 
@@ -57,11 +57,11 @@ def command(repo_root, candidate_file, data_root, output_dir, inner_command, use
             '--ro-bind', model.parent, '/candidate']
     for name in BENCHMARK_FILES:
         args += ['--ro-bind', repo / 'benchmark' / name, '/lab/benchmark/' + name]
-    for name in ('__init__.py', 'run_candidate.py'):
+    for name in ('__init__.py', 'run_candidate.py', 'stage7_eval.py', 'stage7_texture_eval.py'):
         args += ['--ro-bind', repo / 'scripts' / name, '/lab/scripts/' + name]
     args += ['--ro-bind', repo / 'pyproject.toml', '/lab/pyproject.toml']
     for name, path in (input_files or {}).items():
-        if name not in {'config.json', 'good_manifest.json'}:
+        if name not in {'config.json', 'good_manifest.json', 'checkpoint_manifest.json', 'model.pt'}:
             raise ValueError('unapproved sandbox input name')
         args += ['--ro-bind', Path(path).resolve(strict=True), '/inputs/' + name]
     if use_gpu:

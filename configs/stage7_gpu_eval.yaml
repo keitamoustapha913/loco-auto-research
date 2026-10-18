@@ -1,0 +1,13 @@
+# PROPOSED ONLY. Separate operator authorization is required before GPU use.
+# No training, checkpoint changes, new candidate architecture or autonomy.
+enabled: false
+study: stage7-frozen-diagnostics-v1
+device: cuda
+max_unique_checkpoints: 12
+max_gpu_seconds_per_checkpoint: 60
+max_aggregate_gpu_slot_seconds: 720
+max_wall_minutes: 45
+max_parallel_gpu_jobs: 1
+codex_calls: 0
+data: authorized_good_validation_only
+evaluator: development-v2.0

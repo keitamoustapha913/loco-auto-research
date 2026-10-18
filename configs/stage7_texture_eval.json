@@ -1,0 +1,12 @@
+{
+  "protocol": "stage7-texture-equivariance-v2",
+  "parent_protocol": "stage7-frozen-diagnostics-v1",
+  "evaluator": "development-v2.0",
+  "device": "cpu",
+  "assessment_images": 12,
+  "texture_seed": 22013,
+  "texture_sigma": 0.02,
+  "shift_pixels": 8,
+  "no_training": true,
+  "official_test_access": false
+}

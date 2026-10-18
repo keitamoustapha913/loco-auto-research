@@ -1,0 +1,14 @@
+{
+  "protocol": "stage7-frozen-diagnostics-v1",
+  "evaluator": "development-v2.0",
+  "device": "cpu",
+  "assessment_images": 12,
+  "assessment_stride": 3,
+  "edit_seed": 13007,
+  "arms": ["local", "global", "combined", "neither"],
+  "seeds": [7, 17, 29],
+  "timeout_seconds_per_checkpoint": 120,
+  "bootstrap_repeats": 2000,
+  "no_training": true,
+  "official_test_access": false
+}
