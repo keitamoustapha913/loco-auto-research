@@ -1,0 +1,34 @@
+# `logical-review-v1`: provisional `juice_bottle` relationship set
+
+This is a **development review protocol**, not an official LOCO evaluation. Its only image sources are the fingerprinted good-only manifest. The [MVTec LOCO description](https://www.mvtec.com/research-teaching/datasets/mvtec-loco-ad) defines logical anomalies as violated constraints, and [MVTec's logical-anomaly explanation](https://www.mvtec.com/doc/merlic/5.8/manual/en-us/Content/Tool_reference/Processing/Deep_learning_ai/detect_anomalies_in_the_global_context.html) gives a generic fruit-juice label mismatch example. Neither establishes the exact valid flavors or labeling rules for our permitted `juice_bottle` images. Official anomalous data and masks are not consulted.
+
+## Rule and sampling
+
+Permitted good images show fruit pictograms, liquid variants and the same lower text label. The proposed rule is: **the front fruit pictogram identifies the liquid variant**. It is a hypothesis requiring human product-logic review, not a known ground truth. Component count and sticker order are observed regularities; this package does not certify their universality. Missing-label, duplicate-label, position and liquid recolor candidates are **out of scope** because clean edits and/or unambiguous semantic targets are not established.
+
+The frozen investigator configuration is `configs/logical_review_v1.json`. It selects `validation/good/020` and `/030` as target source groups. They are in the prior 36-image assessment partition, outside the first 18 calibration images. Cherry-label donors `/030` and `/040` and banana-label donor `/019` are also in that assessment partition. The code rejects calibration, training, other category and any non-good paths. Every source and donor hash is checked against the authorized manifest. **All four images were available during earlier Stages 5–8; fresh independent source groups = 0.** No claim of independent confirmation is possible. The repeated banana donor also couples the two proposed violations.
+
+For each target, the generator makes one same-variant cherry-to-cherry label-interior swap and one cross-variant banana-to-cherry swap. The same resize, paste region and feathered blend are used for the paired conditions. Both are edits, so the same-variant image is only a **putative valid control**, and the cross-variant image is only a **putative violation**. Donor printing, lighting and texture can still reveal the edit. Visual realism cannot certify a product rule or artifact equivalence.
+
+## Package and review
+
+The generated, ignored local package is `results/metrics/logical_review_v1_final/`:
+
+- `review.html` shows four opaque cases, each with its good original, edited candidate, proposed rule and a blue draft localization box. It conceals intended status and donor identity.
+- `review_form_template.json` contains `valid`, `violation` or `uncertain`, plus separate rule support, artifact concern, proposed-region judgment and free-text reason for each case. Reviewers should copy this form, replace the reviewer ID and work independently.
+- `investigator_manifest.json` records source/donor paths and hashes, transformation, intended status, source group, rule ID, image hashes and the distinction between a draft fruit region and the renderer footprint. **Do not show this manifest to blinded reviewers.**
+- Full-resolution 800×1600 source, edited, preview, draft-region and edit-footprint images are present for each case. The draft mask is **not** a semantic target.
+
+Reviewers should ask, in order: (1) Is the proposed fruit/liquid rule actually valid for this product? (2) If so, does this specific edit retain or violate it? (3) Could the answer be driven mainly by compositing artifacts? (4) If invalid, is the fruit illustration alone an adequate attribution, or must both label and liquid be implicated? Accept, reject or mark uncertain; a substantive explanation is required. Two distinct independent reviewers must agree. Disagreement, an unsupported rule, artifact domination, an uncertain judgment or a stale case hash excludes the case. The operator controls reviewer identity and must not substitute a model or generator decision for human review.
+
+Use `python -m scripts.logical_review_set adjudicate --bundle results/metrics/logical_review_v1_final/investigator_manifest.json --reviews FIRST.json SECOND.json --output REVIEW_OUT.json`. It preserves decisions and provenance. Agreed violations receive only `reviewed_violation_logic_only` because **no independent semantic mask exists**. No current case is localization-metric ready. If the rule is rejected or the relation cannot be localized unambiguously, stop this line of evaluation and record that decision.
+
+## Frozen evaluation rules, contingent on review
+
+1. Do not score provisional, rejected or uncertain edits as certified semantic cases. Count unmodified authorized good originals separately; the two target originals are only two source groups. Use frozen good-only thresholds from a disjoint calibration partition. Never recalibrate on edited or official data.
+2. For image detection, report per-case scores, verified-valid false-alarm **numerator/denominator**, reviewed-violation detection **numerator/denominator**, and their paired within-target score differences. With at most two target groups, report descriptive values and no significance claim or architecture ranking.
+3. For localization, a separate human annotator must draw a binary 800×1600 target after the logical rule and attribution policy are accepted. The fruit illustration, implicated pair, or an explicitly ambiguous region must be chosen **before** model maps are viewed. Two reviewers must accept its semantics and hash. The pasted-pixel footprint and blue draft box are never silently reused as semantic ground truth. If a single defensible region cannot be agreed, localization AP is undefined; report logic-only detection instead.
+4. If any targets become accepted, use `development-v2.0` score direction, per-image and pooled pixel AP with explicit positive counts, and nearest-neighbor target resizing. Keep valid-edit alarms, unmodified-normal alarms and generator/artifact controls separate. Resample complete source/donor groups, not individual pixels. The current sample size is too small for a stable uncertainty interval.
+5. Freeze case-image hashes, review decisions, target masks, checkpoint hashes, evaluator version and threshold before comparison. A future independent confirmation set requires newly acquired permitted good source groups with capture identity and source/donor separation from fitting, calibration and prior assessment. No GPU or model selection is authorized by this document.
+
+Current state: **2 good target originals; 2 provisional valid edits; 2 provisional violations; 0 human-verified edits; 0 accepted semantic targets.**

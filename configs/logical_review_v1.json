@@ -1,0 +1,36 @@
+{
+  "protocol": "logical-review-v1",
+  "category": "juice_bottle",
+  "dataset_fingerprint": "30a59fec4030867900a3396f5ca4191c0ef7995bf75fee7781d0f2ea2a629b3d",
+  "rule_id": "fruit_label_corresponds_to_liquid_variant",
+  "rule_question": "Does the front fruit pictogram identify the liquid variant in this bottle?",
+  "rule_evidence": "The inspected good-only bottles show banana pictograms with pale liquid and cherry pictograms with dark reddish liquid. This is an observed correlation, not a certified product rule.",
+  "original_size": [800, 1600],
+  "eligible_source_partition": "stage6_assessment_validation_images_18_to_53",
+  "cases": [
+    {
+      "target": "juice_bottle/validation/good/020.png",
+      "target_variant": "cherry",
+      "target_sticker_xyxy": [289, 727, 562, 999],
+      "valid_donor": "juice_bottle/validation/good/030.png",
+      "valid_donor_variant": "cherry",
+      "valid_donor_sticker_xyxy": [282, 737, 558, 1011],
+      "cross_donor": "juice_bottle/validation/good/019.png",
+      "cross_donor_sticker_xyxy": [222, 744, 517, 1018],
+      "cross_donor_variant": "banana"
+    },
+    {
+      "target": "juice_bottle/validation/good/030.png",
+      "target_variant": "cherry",
+      "target_sticker_xyxy": [282, 737, 558, 1011],
+      "valid_donor": "juice_bottle/validation/good/040.png",
+      "valid_donor_variant": "cherry",
+      "valid_donor_sticker_xyxy": [270, 718, 551, 982],
+      "cross_donor": "juice_bottle/validation/good/019.png",
+      "cross_donor_sticker_xyxy": [222, 744, 517, 1018],
+      "cross_donor_variant": "banana"
+    }
+  ],
+  "reviewers_required": 2,
+  "official_test_access": false
+}
