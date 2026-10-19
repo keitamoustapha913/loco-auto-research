@@ -1,0 +1,35 @@
+# Proposal only: private operator authorization required before start.
+campaign:
+  name: juice-bottle-real-development-pilot
+  dataset: juice_bottle
+  mode: autonomous
+  gpu_device: cuda
+limits:
+  max_gpu_hours: 0.06666666666666667
+  max_wall_hours: 1
+  max_experiments: 2
+  max_codex_calls: 8
+  max_job_seconds: 120
+  max_consecutive_failures: 2
+  max_parallel_gpu_jobs: 1
+research:
+  fresh_literature: true
+  fresh_hypotheses: true
+  require_torch_cuda: true
+  literature_scout: true
+  hypothesis_generation: true
+  candidate_implementation: true
+  experimental_evaluation: true
+  research_critique: true
+  adaptive_next_experiment: true
+  synthetic_anomalies_allowed: true
+  official_test_access: false
+  real_development_feedback: true
+  feedback_cpu_timeout_seconds: 600
+tracking:
+  sqlite: true
+  mlflow: true
+  dashboard: true
+security:
+  execution_mode: personal_bwrap
+  operator_accepts_shared_uid_risk: false

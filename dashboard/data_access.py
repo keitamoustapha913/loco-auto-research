@@ -243,3 +243,19 @@ def tracking_health():
             return 'Connected' if response.status == 200 else 'Unhealthy'
     except Exception:
         return "Offline"
+
+
+def real_feedback_summaries():
+    result = rows("SELECT e.run_id,e.payload_json,r.candidate_id FROM events e JOIN runs r ON r.run_id=e.run_id WHERE e.kind='REAL_DEVELOPMENT_FEEDBACK' ORDER BY e.id DESC LIMIT 100")
+    summaries = []
+    seen = set()
+    for row in result:
+        if row['run_id'] in seen: continue
+        seen.add(row['run_id'])
+        try:
+            summary = json.loads(row['payload_json'])
+            summary.update(run_id=row['run_id'],candidate_id=row['candidate_id'])
+            summaries.append(summary)
+        except (ValueError,TypeError):
+            continue
+    return summaries

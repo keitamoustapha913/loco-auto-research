@@ -464,6 +464,14 @@ def main(argv=None):
         sub = research_sub.add_parser(name)
         if name == 'start':
             sub.add_argument('--config', help='operator-owned bounded autonomy YAML')
+    feedback_parser = commands.add_parser('feedback')
+    feedback_sub = feedback_parser.add_subparsers(dest='feedback_action', required=True)
+    feedback_sub.add_parser('import')
+    feedback_sub.add_parser('status')
+    sub = feedback_sub.add_parser('evaluate')
+    sub.add_argument('--run-id', required=True)
+    sub.add_argument('--timeout-seconds', type=int, default=600)
+    sub.add_argument('--accept-shared-uid-risk', action='store_true')
     args = parser.parse_args(argv)
     try:
         runtime, ledger = load_settings()
@@ -486,6 +494,18 @@ def main(argv=None):
             outcome = smoke(runtime, ledger, args.dataset, args.device)
             print(json.dumps(outcome, indent=2))
             return 0 if outcome['status'] == 'COMPLETED' else 1
+        elif args.command == 'feedback':
+            from benchmark.feedback_data import import_development, verify_import, imported_root
+            if args.feedback_action == 'import':
+                report = import_development(runtime)
+                print(json.dumps({'split_id': report['split_id'], 'counts': report['summary']}, indent=2))
+            elif args.feedback_action == 'status':
+                report = verify_import(imported_root(runtime))
+                print(json.dumps({'split_id': report['split_id'], 'counts': report['summary']}, indent=2))
+            else:
+                from orchestrator.development_feedback import evaluate_run
+                print(json.dumps(evaluate_run(runtime, StateStore(ledger), args.run_id,
+                    timeout=args.timeout_seconds, personal_mode_authorized=args.accept_shared_uid_risk), indent=2))
         elif args.command == 'research':
             print(json.dumps(research_command(args.research_action, runtime, ledger,
                                               getattr(args, 'config', None)), indent=2, default=str))

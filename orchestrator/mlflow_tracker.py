@@ -145,6 +145,24 @@ def _sync_locked(store: StateStore, tracking_uri=None, max_events=100):
                 checkpoint = artifact_dir / 'checkpoint' / 'model.pt'
                 if checkpoint.is_file() and not checkpoint.is_symlink() and checkpoint.resolve().is_relative_to(allowed_root):
                     client.log_artifact(mlflow_run_id, str(checkpoint), artifact_path='checkpoint')
+            feedback = data.get('feedback')
+            if feedback:
+                client.set_tag(mlflow_run_id, 'evaluation.real_development_label', feedback['label'])
+                client.set_tag(mlflow_run_id, 'evaluation.real_split_id', feedback['split_id'])
+                client.set_tag(mlflow_run_id, 'evaluation.real_evaluator_version', feedback['evaluator_version'])
+                client.set_tag(mlflow_run_id, 'evaluation.real_checkpoint_sha256', feedback['checkpoint_sha256'])
+                client.set_tag(mlflow_run_id, 'evaluation.real_localization_status', feedback['localization_status'])
+                client.set_tag(mlflow_run_id, 'learning.real_anomaly_fitting', 'forbidden')
+                for key, value in feedback['metrics'].items():
+                    client.log_metric(mlflow_run_id, key, float(value))
+                feedback_dir = Path(feedback['artifact_dir'])
+                expected = allowed_root / 'feedback' / feedback['evaluation_id']
+                if feedback_dir.is_symlink() or feedback_dir.resolve() != expected.resolve() or not expected.resolve().is_relative_to(allowed_root):
+                    raise ValueError('feedback artifact path escapes originating job')
+                for filename in ('summary.json', 'case_scores.json', 'heatmap_0.png', 'heatmap_47.png', 'heatmap_118.png'):
+                    path = feedback_dir / filename
+                    if path.is_file() and not path.is_symlink():
+                        client.log_artifact(mlflow_run_id, str(path), artifact_path='real_development/' + feedback['evaluation_id'])
             # Do not terminate MLflow record before all outbox events are processed.
             if data["status"] in {"COMPLETED", "FAILED", "TIMED_OUT", "CANCELLED", "OOM", "INTERRUPTED"}:
                 client.set_terminated(mlflow_run_id, status="FINISHED" if data["status"] == "COMPLETED" else "FAILED")

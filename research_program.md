@@ -20,3 +20,6 @@ Normal-good false-positive controls, synthetic held-out localization proxy, edit
 
 ## Immediate milestone
 Three scientifically distinct *independently proposed* candidate hypotheses; smoke-test and, if allowed by budget, pilot them sequentially; record MLflow and dashboard evidence; produce a justified next hypothesis. No claims of already completing this milestone.
+
+## Approved real-development feedback
+The pinned custom split in `configs/development_feedback.json` may be evaluated by the trusted inference-only worker. Aggregate scores may guide method selection. Learning, normalization and threshold calibration remain normal-only; development anomalies and masks never enter fitting. Report these scores as custom-split development feedback, not full official benchmark results. An unavailable reference localization score is missing evidence, not a proxy replacement. The final holdout remains off-server and outside this research loop.

@@ -150,7 +150,13 @@ def run(module_file, manifest_file, config, output):
     device = config.get("device", "cpu")
     mod = load_candidate(module_file)
     training_started = time.perf_counter()
-    checkpoint_meta = mod.train(config, manifest_file, output / "checkpoint")
+    # Candidate learning receives only train/good; validation is used later by the runner.
+    training_manifest = dict(manifest, images=[e for e in manifest['images'] if e['split'] == 'train/good'])
+    if not training_manifest['images']:
+        raise ValueError('normal training images required')
+    training_manifest_file = output / 'training_good_manifest.json'
+    training_manifest_file.write_text(json.dumps(training_manifest, sort_keys=True))
+    checkpoint_meta = mod.train(config, training_manifest_file, output / "checkpoint")
     training_duration_seconds = time.perf_counter() - training_started
     predictor = mod.load(output / "checkpoint" / "checkpoint_manifest.json", device=device)
     valid_paths = [p for p, entry in zip(paths, manifest["images"]) if entry["split"] == "validation/good"]
@@ -269,7 +275,10 @@ def run(module_file, manifest_file, config, output):
         save_heatmaps(output, normal[0], synthetic[0], all_pred_synth[0], masks[0], original_image=original)
     import sys
     generator_fingerprint = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-    provenance = {"protocol_version": "2.0", "metric_evaluator_version": EVALUATOR_VERSION,
+    provenance = {"training_input_policy": "train/good only; real development images and masks never mounted",
+                  "training_images": len(training_manifest['images']),
+                  "training_manifest_fingerprint": manifest_fingerprint(training_manifest),
+                  "protocol_version": "2.0", "metric_evaluator_version": EVALUATOR_VERSION,
                   "evaluation": evaluation, "python_version": sys.version.split()[0],
                   "development_calibration_count": len(calibrate_paths), "normal_assessment_count": len(score_paths),
                   "dependencies_pyproject_sha256": sha256_file(Path(__file__).resolve().parents[1] / "pyproject.toml"),

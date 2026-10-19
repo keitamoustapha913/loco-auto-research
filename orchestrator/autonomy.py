@@ -86,6 +86,12 @@ def preflight(config, runtime, *, require_authorization=True, verify_hashes=True
         raise ValueError("campaign manifest contains an unauthorized category")
     if not any(entry["split"] == "train/good" for entry in manifest["images"]) or not any(entry["split"] == "validation/good" for entry in manifest["images"]):
         raise ValueError("normal training and validation splits required")
+    if config['research'].get('real_development_feedback'):
+        from benchmark.feedback_data import verify_import, imported_root
+        verify_import(imported_root(runtime))
+        seconds = config['research'].get('feedback_cpu_timeout_seconds', 600)
+        if not isinstance(seconds, int) or not 1 <= seconds <= 900:
+            raise ValueError('feedback CPU limit must be within 1..900 seconds')
     return {"manifest_path": manifest_path, "fingerprint": manifest_fingerprint(manifest), "images": len(manifest["images"])}
 
 
@@ -259,7 +265,7 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
                   "must actually train a PyTorch model on CUDA and infer on CUDA, with estimated_gpu_minutes "
                   "strictly greater than zero and at most five. No CPU-only screening proposals. Do not "
                   "prescribe one architecture; propose scientifically distinct mechanisms. Only normal "
-                  "juice_bottle images are currently authorized; a one-category pilot cannot establish "
+                  "juice_bottle images are authorized for model learning; a one-category pilot cannot establish "
                   "claims across all five LOCO categories. Use only installed "
                   "PyTorch and NumPy, no external weights or new dependencies. Primary literature leads: "
                   "EfficientAD https://arxiv.org/abs/2303.14535, CSAD https://arxiv.org/abs/2408.15628, "
@@ -389,15 +395,27 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
         if run["status"] != "COMPLETED":
             raise RuntimeError(f"experiment {rid} ended {run['status']}: {run['error']}")
         await_authorized_stage(campaigns, campaign_id, finishing=True)
+        if research.get('real_development_feedback'):
+            from orchestrator.development_feedback import evaluate_run
+            row = campaigns.get(campaign_id)
+            remaining_wall = int(row['created_at'] + config['limits']['max_wall_hours'] * 3600 - time.time())
+            if remaining_wall <= 0:
+                raise CampaignHalted('wall-time budget reached before real-development feedback')
+            feedback = evaluate_run(runtime, store, rid,
+                timeout=min(research.get('feedback_cpu_timeout_seconds', 600), remaining_wall),
+                personal_mode_authorized=True,
+                cancel=lambda: campaigns.get(campaign_id)['status'] == 'STOPPING')
+            campaigns.event(campaign_id, 'REAL_DEVELOPMENT_FEEDBACK', run_id=rid, summary=feedback)
+        await_authorized_stage(campaigns, campaign_id, finishing=True)
         provenance_file = Path(runtime) / 'jobs' / rid / 'run_manifest.json'
         provenance = json.loads(provenance_file.read_text()) if provenance_file.is_file() and provenance_file.stat().st_size < 100_000 else {}
-        prompt = ("Critique this immutable measured synthetic development run. Evaluate shortcuts, "
+        prompt = ("Critique this immutable measured development run. Separate synthetic proxies from any appended real-development feedback. Evaluate shortcuts, "
                   "normal false positives, generator gaps, latency, memory, reproducibility and whether "
                   "the hypothesis was supported. Never claim official LOCO performance. "
                   "The trusted runner enforces finite aligned [B,1,H,W] maps and disjoint normal "
                   "calibration/assessment images. gpu_seconds measures exclusive GPU slot wall time, "
                   "not CUDA kernel time; zero peak VRAM gives no evidence of GPU computation. "
-                  "This does not establish real anomaly generalization. "
+                  "Synthetic results alone do not establish real anomaly generalization; custom development detection alone does not establish logical localization. "
                   f"Run: {json.dumps(run, default=str)} Provenance: {json.dumps(provenance)} "
                   f"Hypothesis: {json.dumps(detail)}")
         review = budgeted_invoke(store, "critic", REPO, REPO / "schemas" / "review.schema.json",

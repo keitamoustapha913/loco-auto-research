@@ -4,7 +4,7 @@ import plotly.express as px
 import streamlit as st
 
 from dashboard.components import page_intro, run_details
-from dashboard.data_access import allowed_preview, heatmap_sample, latest_multiseed_comparison, list_runs
+from dashboard.data_access import real_feedback_summaries, allowed_preview, heatmap_sample, latest_multiseed_comparison, list_runs
 from dashboard.presentation import (
     INFRASTRUCTURE, METRICS, classify_run, comparable_research_runs,
     experiment_rows, format_metric, metric_value, research_runs, research_summary, run_label,
@@ -18,6 +18,20 @@ models_tab, heatmaps_tab, compare_tab = st.tabs(["Models", "Heatmaps", "Compare"
 
 with models_tab:
     st.caption(f"{summary['evaluated']} research models evaluated. {summary['infrastructure_completed']} infrastructure tests completed.")
+    feedback = real_feedback_summaries()
+    if feedback:
+        st.subheader('Real-anomaly development feedback')
+        st.caption('LOCO custom-split development feedback — not official full-test results. Normal-only learning and threshold calibration.')
+        st.dataframe([{'Candidate': f['candidate_id'],
+                       'Logical image AUROC': f['metrics'].get('dev_real/logical_image_auroc'),
+                       'Structural image AUROC': f['metrics'].get('dev_real/structural_image_auroc'),
+                       'Normal false alarms': f"{int(f['metrics']['dev_real/normal_false_positives'])}/{int(f['metrics']['dev_real/normal_images'])}",
+                       'Localization': f['localization_status']} for f in feedback],
+                      hide_index=True, width='stretch')
+        with st.expander('Development split and evaluation limits'):
+            st.write(feedback[0]['split_id'])
+            st.write(feedback[0]['localization_blocker'])
+            st.caption('Full-resolution heatmaps and checkpoint hashes are retained with each evaluation. No final-holdout results are available.')
     search, filter_col = st.columns([3, 1])
     query = search.text_input("Search models or hypotheses", placeholder="Candidate or hypothesis", key="models_search").strip().lower()
     show_tests = filter_col.toggle("Show infrastructure tests", value=False)

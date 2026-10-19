@@ -58,6 +58,15 @@ def budgeted_invoke(store, role, repo_root, schema, prompt, campaign=None, **kwa
         kwargs['timeout'] = min(int(kwargs.get('timeout', 180)), remaining)
         campaigns.reserve_codex_call(campaign_id)
         campaigns.event(campaign_id, 'AGENT_STARTED', role=role)
+    if role in {'researcher', 'critic'}:
+        from orchestrator.development_feedback import latest_summary
+        feedback = [latest_summary(store, r['run_id']) for r in store.list_runs(30)]
+        feedback = [x for x in feedback if x][:5]
+        if feedback:
+            prompt += ('\nAuthorized real-development feedback follows. Use aggregate evidence to select methods, '
+                       'but never use anomaly images/masks to fit model weights, normalization or thresholds. '
+                       'Custom split, not official full-test performance. Missing AU-sPRO is unavailable, not zero. '
+                       + json.dumps(feedback))
     store.reserve_codex_call(role)
     try:
         result = invoke(role, repo_root, schema, prompt, **kwargs)

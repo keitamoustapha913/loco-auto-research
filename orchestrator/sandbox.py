@@ -57,7 +57,7 @@ def command(repo_root, candidate_file, data_root, output_dir, inner_command, use
             '--ro-bind', model.parent, '/candidate']
     for name in BENCHMARK_FILES:
         args += ['--ro-bind', repo / 'benchmark' / name, '/lab/benchmark/' + name]
-    for name in ('__init__.py', 'run_candidate.py', 'stage7_eval.py', 'stage7_texture_eval.py', 'stage8_eval.py'):
+    for name in ('__init__.py', 'run_candidate.py', 'stage7_eval.py', 'stage7_texture_eval.py', 'stage8_eval.py', 'feedback_infer.py'):
         args += ['--ro-bind', repo / 'scripts' / name, '/lab/scripts/' + name]
     if case_dir is not None:
         cases = Path(case_dir).resolve(strict=True)
@@ -66,7 +66,7 @@ def command(repo_root, candidate_file, data_root, output_dir, inner_command, use
         args += ['--dir', '/cases', '--ro-bind', cases, '/cases']
     args += ['--ro-bind', repo / 'pyproject.toml', '/lab/pyproject.toml']
     for name, path in (input_files or {}).items():
-        if name not in {'config.json', 'good_manifest.json', 'checkpoint_manifest.json', 'model.pt'}:
+        if name not in {'config.json', 'good_manifest.json', 'checkpoint_manifest.json', 'model.pt', 'image.png'}:
             raise ValueError('unapproved sandbox input name')
         args += ['--ro-bind', Path(path).resolve(strict=True), '/inputs/' + name]
     if use_gpu:

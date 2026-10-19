@@ -3,8 +3,8 @@
 Read `RESEARCH_CHARTER.md` and `research_program.md` before any research action. These are human-owned and cannot be altered by implementer agents. Your task is to discover which approach works, **not** to implement a predetermined architecture.
 
 Rules:
-1. Never access, copy, search for, or describe official LOCO test images, masks or anomaly labels. An independent account owns them.
-2. Only good training/validation images and synthetic corruptions of authorized good images are available. State the provenance of external pretrained weights and code.
+1. Never request or access final-holdout images, masks, listings or private manifests. Only the trusted evaluator may read the pinned, operator-authorized development partition; agents receive aggregate evaluation summaries.
+2. Model learning uses train/good only. Real development anomalies are evaluation-only: no weight, feature-bank, normalization or threshold fitting. Aggregate feedback may guide method selection. State the provenance of external pretrained weights and code.
 3. Only edit your candidate's worktree. Do not alter benchmark code, policies, tracking DB, dashboard, controller, or any shared evaluation protocol.
 4. Do not use per-image training feature banks or reference-image nearest-neighbor retrieval at inference.
 5. Every proposal must be falsifiable and provide costs, a baseline, plausible shortcut risks and a validation plan.
