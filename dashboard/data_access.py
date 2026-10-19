@@ -285,5 +285,16 @@ def real_heatmap_sample(summary, index, opacity=.4):
     scaled = np.clip((score-score.min())/max(float(np.ptp(score)),1e-12),0,1)
     color = np.stack([scaled*255,scaled*60,(1-scaled)*100],axis=-1)
     overlay = Image.fromarray(np.uint8(np.asarray(original)*(1-opacity)+color*opacity))
-    return {'original':original,'overlay':overlay,'category':entry['category'],
-            'score':cases[index]['image_score'],'size':original.size}
+    # Display-only union; independent mask/defect instances remain untouched for scoring.
+    masks = []
+    for record in entry['masks']:
+        path = root/record['path']
+        if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()) or sha256_file(path)!=record['sha256']:
+            raise ValueError('unsafe or changed ground truth')
+        mask = np.asarray(Image.open(path))
+        if mask.shape != score.shape: raise ValueError('unaligned ground truth')
+        masks.append(mask)
+    union = np.logical_or.reduce([m > 0 for m in masks]) if masks else np.zeros(score.shape,dtype=bool)
+    return {'original':original,'overlay':overlay,'heatmap':Image.fromarray(np.uint8(color)),
+            'ground_truth':Image.fromarray(np.uint8(union)*255),'mask_count':len(masks),
+            'category':entry['category'],'score':cases[index]['image_score'],'size':original.size}

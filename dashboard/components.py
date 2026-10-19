@@ -49,3 +49,20 @@ def run_details(run: dict, *, compact=False):
         url = get_mlflow_url(run)
         if url:
             st.link_button("Open this run in MLflow", url)
+
+
+def development_result_card(feedback):
+    from dashboard.presentation import development_card_metrics
+    st.subheader(feedback['candidate_id'].replace('_',' ').title())
+    st.caption('Development · Real anomalies · Custom LOCO split, not official full-test results')
+    values = development_card_metrics(feedback)
+    for offset in range(0,len(values),3):
+        for column,(label,value) in zip(st.columns(3),values[offset:offset+3]):
+            column.metric(label,value)
+    st.caption('Localization: compatible AU-sPRO at 5% FPR; original-scorer equivalence unverified. Pixel AP is supplementary.')
+    with st.expander('Measurement details'):
+        st.write('Evaluator:',feedback['evaluator_version'])
+        st.write('Split:',feedback['split_id'])
+        st.write('Run:',feedback['run_id'])
+        st.write('Threshold:',feedback['metrics'].get('dev_real/normal_only_threshold','Unavailable'))
+        st.write('Inference protocol:',feedback.get('measurement_protocol','See recorded evaluation provenance'))

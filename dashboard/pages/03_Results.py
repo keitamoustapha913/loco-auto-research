@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from dashboard.components import page_intro, run_details
+from dashboard.components import page_intro, run_details, development_result_card
 from dashboard.data_access import real_feedback_summaries, real_heatmap_sample, allowed_preview, heatmap_sample, latest_multiseed_comparison, list_runs
 from dashboard.presentation import (
     INFRASTRUCTURE, METRICS, classify_run, comparable_research_runs,
@@ -21,42 +21,45 @@ with models_tab:
     feedback = real_feedback_summaries()
     if feedback:
         st.subheader('Real-anomaly development feedback')
-        st.caption('LOCO custom-split development feedback — not official full-test results. Normal-only learning and threshold calibration.')
-        st.dataframe([{'Candidate': f['candidate_id'],
-                       'Logical image AUROC': f['metrics'].get('dev_real/logical_image_auroc'),
-                       'Structural image AUROC': f['metrics'].get('dev_real/structural_image_auroc'),
-                       'Normal false alarms': f"{int(f['metrics']['dev_real/normal_false_positives'])}/{int(f['metrics']['dev_real/normal_images'])}",
-                       'Logical AU-sPRO @5% (compatible)': f['metrics'].get('dev_real/logical_au_spro_0_05_compatible'),
-                       'Structural AU-sPRO @5% (compatible)': f['metrics'].get('dev_real/structural_au_spro_0_05_compatible'),
-                       'Localization status': f['localization_status']} for f in feedback],
-                      hide_index=True, width='stretch')
-        with st.expander('Development split and evaluation limits'):
-            st.write(feedback[0]['split_id'])
-            st.write(feedback[0]['localization_blocker'])
-            st.write('CPU efficiency (real development)', {k:v for k,v in feedback[0]['metrics'].items() if any(t in k for t in ('inference_e2e','parameters','serialized','rss'))})
-            st.caption('Full-resolution heatmaps and checkpoint hashes are retained with each evaluation. No final-holdout results are available.')
-    search, filter_col = st.columns([3, 1])
-    query = search.text_input("Search models or hypotheses", placeholder="Candidate or hypothesis", key="models_search").strip().lower()
-    show_tests = filter_col.toggle("Show infrastructure tests", value=False)
-    default_ids = {r["run_id"] for r in research_runs(runs)}
-    filtered = [r for r in runs if (show_tests or r["run_id"] in default_ids) and
-                (not query or query in str(r.get("candidate_id", "")).lower() or query in str(r.get("hypothesis_id", "")).lower())]
-    if not filtered:
-        if not runs:
-            st.info("No experiments have been recorded yet.")
-        elif not show_tests and summary["evaluated"] == 0:
-            st.info("No research model has been evaluated yet. Turn on ‘Show infrastructure tests’ to inspect the verified toy runs.")
+        chosen_card = st.selectbox('Candidate result',range(len(feedback)),
+            format_func=lambda i: run_label(next((r for r in runs if r['run_id']==feedback[i]['run_id']),feedback[i]),include_date=True))
+        selected_feedback = feedback[chosen_card]
+        with st.container(border=True):
+            development_result_card(selected_feedback)
+            st.write('**Localization preview**')
+            sample_index = st.number_input('Development sample',0,164,47,1,key='card_sample')
+            try:
+                preview = real_heatmap_sample(selected_feedback,int(sample_index))
+                for column,key,label in zip(st.columns(3),('original','heatmap','ground_truth'),
+                                             ('Original image','Predicted heatmap','Ground truth')):
+                    column.image(preview[key],caption=label,width='stretch')
+                st.caption(f"{preview['category'].replace('_',' ').title()} · {preview['mask_count']} annotation masks. Ground truth union is for display only; sPRO retains separate regions. Heatmap colors are per-image scaled.")
+            except (OSError,ValueError,KeyError):
+                st.info('Localization preview unavailable or failed integrity checks.')
+        st.caption('Codex’s next decision and supporting evidence are recorded separately on Research.')
+    with st.expander('Experiment history and technical details',expanded=not bool(feedback)):
+        search, filter_col = st.columns([3, 1])
+        query = search.text_input("Search models or hypotheses", placeholder="Candidate or hypothesis", key="models_search").strip().lower()
+        show_tests = filter_col.toggle("Show infrastructure tests", value=False)
+        default_ids = {r["run_id"] for r in research_runs(runs)}
+        filtered = [r for r in runs if (show_tests or r["run_id"] in default_ids) and
+                    (not query or query in str(r.get("candidate_id", "")).lower() or query in str(r.get("hypothesis_id", "")).lower())]
+        if not filtered:
+            if not runs:
+                st.info("No experiments have been recorded yet.")
+            elif not show_tests and summary["evaluated"] == 0:
+                st.info("No research model has been evaluated yet. Turn on ‘Show infrastructure tests’ to inspect the verified toy runs.")
+            else:
+                st.info("No runs match this search.")
         else:
-            st.info("No runs match this search.")
-    else:
-        table = experiment_rows(filtered)
-        visible = [{k: row[k] for k in ("Model", "Type", "Status", "Synthetic localization AUROC", "Latency (p95)", "GPU slot time", "Date")} for row in table]
-        st.dataframe(visible, hide_index=True, width="stretch", height=min(360, 38 * (len(visible) + 1)),
-                     column_config={"Synthetic localization AUROC": st.column_config.TextColumn(help=METRICS["dev_synthetic/pixel_auroc"][1]),
-                                    "Latency (p95)": st.column_config.TextColumn(help=METRICS["inference/e2e_ms_p95"][1])})
-        run_by_id = {r["run_id"]: r for r in filtered}
-        selected = st.selectbox("Experiment details", list(run_by_id), format_func=lambda rid: run_label(run_by_id[rid], include_date=True))
-        run_details(run_by_id[selected])
+            table = experiment_rows(filtered)
+            visible = [{k: row[k] for k in ("Model", "Type", "Status", "Synthetic localization AUROC", "Latency (p95)", "GPU slot time", "Date")} for row in table]
+            st.dataframe(visible, hide_index=True, width="stretch", height=min(360, 38 * (len(visible) + 1)),
+                         column_config={"Synthetic localization AUROC": st.column_config.TextColumn(help=METRICS["dev_synthetic/pixel_auroc"][1]),
+                                        "Latency (p95)": st.column_config.TextColumn(help=METRICS["inference/e2e_ms_p95"][1])})
+            run_by_id = {r["run_id"]: r for r in filtered}
+            selected = st.selectbox("Experiment details", list(run_by_id), format_func=lambda rid: run_label(run_by_id[rid], include_date=True))
+            run_details(run_by_id[selected])
 
 with heatmaps_tab:
     if feedback:

@@ -302,3 +302,36 @@ def test_campaign_automatically_evaluates_before_critique(tmp_path,monkeypatch):
     autonomy.run_cycle(store,campaigns,cid,tmp_path)
     assert order==['training','feedback','critic']
     assert campaigns.get(cid)['next_hypothesis']=='evidence-followup:fixture_h:investigate'
+
+
+def test_result_card_uses_real_values_and_explicit_missing_measurements():
+    from dashboard.presentation import development_card_metrics
+    summary={'inference_device':'cpu','metrics':{'dev_real/logical_image_auroc':.50644,
+             'dev_real/normal_false_positives':1,'dev_real/normal_images':47,
+             'dev_real/inference_e2e_ms_p95':90.955,'dev_real/parameters':3420,
+             'dev_synthetic/pixel_ap':.99,'inference/peak_vram_mib':123}}
+    values=dict(development_card_metrics(summary))
+    assert values['Logical AUROC']=='0.51'
+    assert values['Logical pixel AP']=='Unavailable'
+    assert values['Normal false positives']=='1 / 47'
+    assert values['Inference p95 · CPU']=='91.0 ms'
+    assert values['Peak inference VRAM']=='Unavailable · CPU'
+
+
+def test_real_preview_ground_truth_is_verified_display_only(tmp_path,monkeypatch):
+    from benchmark.data_guard import sha256_file
+    from dashboard.data_access import real_heatmap_sample
+    incoming=tmp_path/'incoming/juice_bottle_dev_v1';incoming.mkdir(parents=True)
+    manifest,approval=package(incoming);monkeypatch.setattr(fd,'approval',lambda:approval)
+    fd.import_development(tmp_path)
+    output=tmp_path/'jobs/fixture/feedback/eval';(output/'case_0001').mkdir(parents=True)
+    path=output/'case_0001/map.npy';np.save(path,np.zeros((1600,800),dtype=np.float32))
+    (output/'case_scores.json').write_text(json.dumps([{},dict(map_sha256=sha256_file(path),image_score=0.)]))
+    monkeypatch.setenv('LOCO_RUNTIME',str(tmp_path))
+    sample=real_heatmap_sample({'run_id':'fixture','evaluation_id':'eval'},1)
+    assert sample['mask_count']==2
+    assert sample['original'].size==sample['heatmap'].size==sample['ground_truth'].size==(800,1600)
+    assert np.asarray(sample['ground_truth']).min()==255
+    target=fd.imported_root(tmp_path)/manifest['images'][1]['masks'][0]['path']
+    target.unlink();target.symlink_to(incoming/'dev-manifest.json')
+    with pytest.raises(ValueError,match='ground truth'): real_heatmap_sample({'run_id':'fixture','evaluation_id':'eval'},1)

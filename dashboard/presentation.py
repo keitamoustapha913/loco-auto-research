@@ -162,3 +162,26 @@ def autonomy_state(flags: dict, paused: bool) -> tuple[str, str]:
     if paused:
         return "Paused", "The approved research queue is paused."
     return "Authorized", "Approved research may run within the configured limits."
+
+
+def development_card_metrics(feedback):
+    """Only measured real-development values; never borrow synthetic/GPU figures."""
+    import math
+    m = feedback.get('metrics', {})
+    def number(key, suffix='', digits=2):
+        value = m.get('dev_real/' + key)
+        if not isinstance(value, (int,float)) or not math.isfinite(value): return 'Unavailable'
+        return f'{value:,.{digits}f}{suffix}'
+    fp, total = m.get('dev_real/normal_false_positives'), m.get('dev_real/normal_images')
+    device = feedback.get('inference_device', 'cpu').upper()
+    return [
+        ('Logical AUROC', number('logical_image_auroc')),
+        ('Logical AU-sPRO', number('logical_au_spro_0_05_compatible')),
+        ('Logical pixel AP', number('logical_pixel_ap_pooled')),
+        ('Structural AUROC', number('structural_image_auroc')),
+        ('Structural localization', number('structural_au_spro_0_05_compatible')),
+        ('Normal false positives', f'{int(fp)} / {int(total)}' if fp is not None and total is not None else 'Unavailable'),
+        (f'Inference p95 · {device}', number('inference_e2e_ms_p95',' ms',1)),
+        ('Parameters', number('parameters','',0)),
+        ('Peak inference VRAM', number('peak_cuda_inference_mib',' MiB',1) if device.startswith('CUDA') else 'Unavailable · CPU'),
+    ]
