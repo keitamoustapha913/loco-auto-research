@@ -259,3 +259,31 @@ def real_feedback_summaries():
         except (ValueError,TypeError):
             continue
     return summaries
+
+
+def real_heatmap_sample(summary, index, opacity=.4):
+    """Read-only development viewer: pinned image plus validated full-size map."""
+    import numpy as np
+    from benchmark.feedback_data import imported_root, schema
+    from benchmark.data_guard import sha256_file
+    root = imported_root(runtime_root())
+    manifest = json.loads((root/'dev-manifest.json').read_text()); schema(manifest)
+    if not isinstance(index,int) or not 0 <= index < len(manifest['images']): raise ValueError('invalid sample index')
+    entry = manifest['images'][index]
+    image_path = root/entry['path']
+    output = runtime_root()/'jobs'/summary['run_id']/'feedback'/summary['evaluation_id']
+    map_path = output/f'case_{index:04d}'/'map.npy'
+    if (not output.resolve().is_relative_to(runtime_root()/'jobs') or map_path.is_symlink() or
+        not map_path.resolve().is_relative_to(output.resolve()) or
+        not image_path.resolve().is_relative_to(root.resolve()) or sha256_file(image_path)!=entry['sha256']):
+        raise ValueError('unsafe development artifact')
+    cases = json.loads((output/'case_scores.json').read_text())
+    if sha256_file(map_path) != cases[index]['map_sha256']: raise ValueError('heatmap hash changed')
+    score = np.load(map_path,allow_pickle=False)
+    original = Image.open(image_path).convert('RGB')
+    if score.shape != (original.height,original.width) or not np.isfinite(score).all(): raise ValueError('unaligned map')
+    scaled = np.clip((score-score.min())/max(float(np.ptp(score)),1e-12),0,1)
+    color = np.stack([scaled*255,scaled*60,(1-scaled)*100],axis=-1)
+    overlay = Image.fromarray(np.uint8(np.asarray(original)*(1-opacity)+color*opacity))
+    return {'original':original,'overlay':overlay,'category':entry['category'],
+            'score':cases[index]['image_score'],'size':original.size}

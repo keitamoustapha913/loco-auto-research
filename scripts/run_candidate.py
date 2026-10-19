@@ -164,102 +164,131 @@ def run(module_file, manifest_file, config, output):
     calibrate_paths, score_paths = split_validation_paths(valid_paths)
     calibration = np.stack([load_image(p, size) for p in calibrate_paths])
     normal = np.stack([load_image(p, size) for p in score_paths])
-    corrupt, masks = zip(*(synthetic_corruption(im, i + 5000) for i, im in enumerate(normal)))
-    synthetic = np.stack(corrupt)
-    all_pred_normal, all_pred_synth, all_pred_cal = [], [], []
-    for array, store in ((calibration, all_pred_cal), (normal, all_pred_normal), (synthetic, all_pred_synth)):
-        for im in array:
+    synthetic_enabled = config.get('synthetic_evaluation', True)
+    if synthetic_enabled:
+        corrupt, masks = zip(*(synthetic_corruption(im, i + 5000) for i, im in enumerate(normal)))
+        synthetic = np.stack(corrupt)
+        all_pred_normal, all_pred_synth, all_pred_cal = [], [], []
+        for array, store in ((calibration, all_pred_cal), (normal, all_pred_normal), (synthetic, all_pred_synth)):
+            for im in array:
+                response = predictor.predict(im[None])
+                maps, _ = validate_prediction(response, (1, 3, size, size))
+                store.append(maps[0, 0])
+        all_pred_cal = np.stack(all_pred_cal)
+        all_pred_normal = np.stack(all_pred_normal)
+        all_pred_synth = np.stack(all_pred_synth)
+        metrics, evaluation = evaluate_dev_v2(all_pred_normal, all_pred_synth, np.stack(masks),
+                                               calibration_maps=all_pred_cal)
+        if not np.isfinite(metrics['dev_synthetic/pixel_ap']):
+            raise ValueError('primary generator yielded no positive synthetic pixels')
+        metrics['training/duration_seconds'] = float(training_duration_seconds)
+        metrics["dev_synthetic/preview_anomaly_score"] = float(np.max(all_pred_synth[0]))
+        alternate, alternate_masks = zip(*(alternate_corruption(im, i + 7000) for i, im in enumerate(normal)))
+        alternate_maps = []
+        for im in alternate:
             response = predictor.predict(im[None])
             maps, _ = validate_prediction(response, (1, 3, size, size))
-            store.append(maps[0, 0])
-    all_pred_cal = np.stack(all_pred_cal)
-    all_pred_normal = np.stack(all_pred_normal)
-    all_pred_synth = np.stack(all_pred_synth)
-    metrics, evaluation = evaluate_dev_v2(all_pred_normal, all_pred_synth, np.stack(masks),
-                                           calibration_maps=all_pred_cal)
-    if not np.isfinite(metrics['dev_synthetic/pixel_ap']):
-        raise ValueError('primary generator yielded no positive synthetic pixels')
-    metrics['training/duration_seconds'] = float(training_duration_seconds)
-    metrics["dev_synthetic/preview_anomaly_score"] = float(np.max(all_pred_synth[0]))
-    alternate, alternate_masks = zip(*(alternate_corruption(im, i + 7000) for i, im in enumerate(normal)))
-    alternate_maps = []
-    for im in alternate:
-        response = predictor.predict(im[None])
-        maps, _ = validate_prediction(response, (1, 3, size, size))
-        alternate_maps.append(maps[0, 0])
-    alternate_auroc = pixel_auroc(np.stack(alternate_maps), np.stack(alternate_masks))
-    metrics['dev_synthetic/alternate_pixel_auroc'] = float(alternate_auroc)
-    alternate_ap = pixel_ap_report(np.stack(alternate_maps), np.stack(alternate_masks))
-    if not np.isfinite(alternate_ap['pooled']):
-        raise ValueError('alternate generator yielded no positive synthetic pixels')
-    metrics['dev_synthetic/alternate_pixel_ap'] = alternate_ap['pooled']
-    metrics['dev_synthetic/alternate_pixel_ap_macro_positive_images'] = alternate_ap['macro_positive_images']
-    metrics['dev_synthetic/generator_gap'] = float(metrics['dev_synthetic/pixel_auroc'] - alternate_auroc)
-    paired = [paired_patch_edits(normal[i], normal[(i ^ 1) if (i ^ 1) < len(normal) else i - 1], seed=i + 9000)
-              for i in range(len(normal))]
-    relocated, matched_controls, photometric_controls, matched_masks = zip(*paired)
-    paired_maps, control_scores, photometric_scores = [], [], []
-    for altered, control, photometric in zip(relocated, matched_controls, photometric_controls):
-        prediction = predictor.predict(altered[None])
-        maps, _ = validate_prediction(prediction, (1, 3, size, size))
-        paired_maps.append(maps[0, 0])
-        control_prediction = predictor.predict(control[None])
-        _, scores = validate_prediction(control_prediction, (1, 3, size, size))
-        control_scores.append(float(scores[0]))
-        photometric_prediction = predictor.predict(photometric[None])
-        _, scores = validate_prediction(photometric_prediction, (1, 3, size, size))
-        photometric_scores.append(float(scores[0]))
-    paired_maps = np.stack(paired_maps)
-    matched_masks = np.stack(matched_masks)
-    metrics['dev_synthetic/relocated_pixel_auroc'] = pixel_auroc(paired_maps, matched_masks)
-    relocated_ap = pixel_ap_report(paired_maps, matched_masks)
-    if not np.isfinite(relocated_ap['pooled']):
-        raise ValueError('copy-insertion generator yielded no positive synthetic pixels')
-    metrics['dev_synthetic/relocated_pixel_ap'] = relocated_ap['pooled']
-    metrics['dev_synthetic/relocated_pixel_ap_macro_positive_images'] = relocated_ap['macro_positive_images']
-    normal_threshold = metrics["normal/threshold"]
-    metrics['robustness/artifact_matched_good_fpr'] = float(np.mean(np.asarray(control_scores) > normal_threshold))
-    metrics['robustness/photometric_good_fpr'] = float(np.mean(np.asarray(photometric_scores) > normal_threshold))
-    metrics['robustness/artifact_matched_good_false_positives'] = int(np.count_nonzero(np.asarray(control_scores) > normal_threshold))
-    metrics['robustness/photometric_good_false_positives'] = int(np.count_nonzero(np.asarray(photometric_scores) > normal_threshold))
-    case_metrics = []
-    for index in range(len(normal)):
-        case_metrics.append({
-            'image_index': index, 'donor_pair_cluster': index // 2,
-            'primary_pixel_ap': pixel_ap_report(
-                all_pred_synth[index:index + 1], np.asarray(masks)[index:index + 1])['pooled'],
-            'alternate_pixel_ap': pixel_ap_report(
-                np.asarray(alternate_maps)[index:index + 1], np.asarray(alternate_masks)[index:index + 1])['pooled'],
-            'relocated_pixel_ap': pixel_ap_report(
-                paired_maps[index:index + 1], matched_masks[index:index + 1])['pooled'],
-            'primary_positive_pixels': int(np.asarray(masks)[index].sum()),
-            'alternate_positive_pixels': int(np.asarray(alternate_masks)[index].sum()),
-            'copy_insertion_positive_pixels': int(matched_masks[index].sum()),
-            'normal_alarm': bool(np.max(all_pred_normal[index]) > normal_threshold),
-            'matched_control_alarm': bool(control_scores[index] > normal_threshold),
-            'photometric_control_alarm': bool(photometric_scores[index] > normal_threshold),
-        })
-    (output / 'development_case_metrics.json').write_text(json.dumps({
-        'schema_version': '2.0', 'metric_evaluator_version': EVALUATOR_VERSION,
-        'metric_status': 'SYNTHETIC_DEVELOPMENT_PROXY_ONLY',
-        'cases': case_metrics}, sort_keys=True, indent=2))
-    # Appearance edits that maintain the fixture's object layout test sensitivity
-    # to superficial edits; these are not a substitute for real logical controls.
-    edited_good = np.clip(normal * 0.93 + 0.03, 0, 1)
-    edited_scores = []
-    for im in edited_good:
-        result = predictor.predict(im[None])
-        _, scores = validate_prediction(result, (1, 3, size, size))
-        edited_scores.append(float(scores[0]))
-    metrics["robustness/edited_good_fpr"] = float(np.mean(np.asarray(edited_scores) > normal_threshold))
-    metrics["robustness/edited_good_false_positives"] = int(np.count_nonzero(np.asarray(edited_scores) > normal_threshold))
-    metrics.update(benchmark_predict(predictor, normal[:1], device=device, warmup=2, repeats=8))
-    try:
-        region_proxy = synthetic_region_pro_proxy(all_pred_synth, np.stack(masks), steps=20)
-        if np.isfinite(region_proxy):
-            metrics["dev_synthetic/region_pro_proxy_NOT_OFFICIAL"] = region_proxy
-    except RuntimeError:
-        pass
+            alternate_maps.append(maps[0, 0])
+        alternate_auroc = pixel_auroc(np.stack(alternate_maps), np.stack(alternate_masks))
+        metrics['dev_synthetic/alternate_pixel_auroc'] = float(alternate_auroc)
+        alternate_ap = pixel_ap_report(np.stack(alternate_maps), np.stack(alternate_masks))
+        if not np.isfinite(alternate_ap['pooled']):
+            raise ValueError('alternate generator yielded no positive synthetic pixels')
+        metrics['dev_synthetic/alternate_pixel_ap'] = alternate_ap['pooled']
+        metrics['dev_synthetic/alternate_pixel_ap_macro_positive_images'] = alternate_ap['macro_positive_images']
+        metrics['dev_synthetic/generator_gap'] = float(metrics['dev_synthetic/pixel_auroc'] - alternate_auroc)
+        paired = [paired_patch_edits(normal[i], normal[(i ^ 1) if (i ^ 1) < len(normal) else i - 1], seed=i + 9000)
+                  for i in range(len(normal))]
+        relocated, matched_controls, photometric_controls, matched_masks = zip(*paired)
+        paired_maps, control_scores, photometric_scores = [], [], []
+        for altered, control, photometric in zip(relocated, matched_controls, photometric_controls):
+            prediction = predictor.predict(altered[None])
+            maps, _ = validate_prediction(prediction, (1, 3, size, size))
+            paired_maps.append(maps[0, 0])
+            control_prediction = predictor.predict(control[None])
+            _, scores = validate_prediction(control_prediction, (1, 3, size, size))
+            control_scores.append(float(scores[0]))
+            photometric_prediction = predictor.predict(photometric[None])
+            _, scores = validate_prediction(photometric_prediction, (1, 3, size, size))
+            photometric_scores.append(float(scores[0]))
+        paired_maps = np.stack(paired_maps)
+        matched_masks = np.stack(matched_masks)
+        metrics['dev_synthetic/relocated_pixel_auroc'] = pixel_auroc(paired_maps, matched_masks)
+        relocated_ap = pixel_ap_report(paired_maps, matched_masks)
+        if not np.isfinite(relocated_ap['pooled']):
+            raise ValueError('copy-insertion generator yielded no positive synthetic pixels')
+        metrics['dev_synthetic/relocated_pixel_ap'] = relocated_ap['pooled']
+        metrics['dev_synthetic/relocated_pixel_ap_macro_positive_images'] = relocated_ap['macro_positive_images']
+        normal_threshold = metrics["normal/threshold"]
+        metrics['robustness/artifact_matched_good_fpr'] = float(np.mean(np.asarray(control_scores) > normal_threshold))
+        metrics['robustness/photometric_good_fpr'] = float(np.mean(np.asarray(photometric_scores) > normal_threshold))
+        metrics['robustness/artifact_matched_good_false_positives'] = int(np.count_nonzero(np.asarray(control_scores) > normal_threshold))
+        metrics['robustness/photometric_good_false_positives'] = int(np.count_nonzero(np.asarray(photometric_scores) > normal_threshold))
+        case_metrics = []
+        for index in range(len(normal)):
+            case_metrics.append({
+                'image_index': index, 'donor_pair_cluster': index // 2,
+                'primary_pixel_ap': pixel_ap_report(
+                    all_pred_synth[index:index + 1], np.asarray(masks)[index:index + 1])['pooled'],
+                'alternate_pixel_ap': pixel_ap_report(
+                    np.asarray(alternate_maps)[index:index + 1], np.asarray(alternate_masks)[index:index + 1])['pooled'],
+                'relocated_pixel_ap': pixel_ap_report(
+                    paired_maps[index:index + 1], matched_masks[index:index + 1])['pooled'],
+                'primary_positive_pixels': int(np.asarray(masks)[index].sum()),
+                'alternate_positive_pixels': int(np.asarray(alternate_masks)[index].sum()),
+                'copy_insertion_positive_pixels': int(matched_masks[index].sum()),
+                'normal_alarm': bool(np.max(all_pred_normal[index]) > normal_threshold),
+                'matched_control_alarm': bool(control_scores[index] > normal_threshold),
+                'photometric_control_alarm': bool(photometric_scores[index] > normal_threshold),
+            })
+        (output / 'development_case_metrics.json').write_text(json.dumps({
+            'schema_version': '2.0', 'metric_evaluator_version': EVALUATOR_VERSION,
+            'metric_status': 'SYNTHETIC_DEVELOPMENT_PROXY_ONLY',
+            'cases': case_metrics}, sort_keys=True, indent=2))
+        # Appearance edits that maintain the fixture's object layout test sensitivity
+        # to superficial edits; these are not a substitute for real logical controls.
+        edited_good = np.clip(normal * 0.93 + 0.03, 0, 1)
+        edited_scores = []
+        for im in edited_good:
+            result = predictor.predict(im[None])
+            _, scores = validate_prediction(result, (1, 3, size, size))
+            edited_scores.append(float(scores[0]))
+        metrics["robustness/edited_good_fpr"] = float(np.mean(np.asarray(edited_scores) > normal_threshold))
+        metrics["robustness/edited_good_false_positives"] = int(np.count_nonzero(np.asarray(edited_scores) > normal_threshold))
+        metrics.update(benchmark_predict(predictor, normal[:1], device=device, warmup=2, repeats=8))
+        try:
+            region_proxy = synthetic_region_pro_proxy(all_pred_synth, np.stack(masks), steps=20)
+            if np.isfinite(region_proxy):
+                metrics["dev_synthetic/region_pro_proxy_NOT_OFFICIAL"] = region_proxy
+        except RuntimeError:
+            pass
+    else:
+        import torch
+        from benchmark.metrics_v2 import calibrate_image_threshold, image_false_positive_report
+        from scripts.feedback_infer import state_digest
+        frozen_state = state_digest(predictor)
+        with torch.inference_mode():
+            def scores_for(images):
+                return [float(validate_prediction(predictor.predict(im[None]), (1,3,size,size))[0].max()) for im in images]
+            calibrated = calibrate_image_threshold(scores_for(calibration))
+            assessed = image_false_positive_report(scores_for(normal), calibrated['threshold'])
+            metrics = {'normal/threshold':calibrated['threshold'],
+                       'normal/image_fpr_at_threshold':assessed['image_fpr'],
+                       'normal/image_false_positives':assessed['false_positives'],
+                       'normal/image_assessed':assessed['images_assessed'],
+                       'normal/calibration_images':calibrated['calibration_images'],
+                       'normal/calibration_false_positives':calibrated['calibration_false_positives'],
+                       'training/duration_seconds':training_duration_seconds}
+            with Image.open(score_paths[0]) as source:
+                geometry = source.size
+            metrics.update(benchmark_predict(predictor, normal[:1], device=device, warmup=2, repeats=8,
+                preprocess=lambda _:load_image(score_paths[0],size)[None],
+                postprocess=lambda result:restore_anomaly_map(validate_prediction(result,(1,3,size,size))[0][0,0],geometry)))
+        if frozen_state != state_digest(predictor):
+            raise ValueError('predictor state changed during normal calibration/evaluation')
+        evaluation = {'threshold_calibration':calibrated,'normal_assessment':assessed,
+                      'inference_protocol':'batch one; decode/resize/prediction/full-resolution restore; 2 warmups, 8 repeats',
+                      'device':device,'synthetic_evaluation':False}
     checkpoint = output / "checkpoint" / "model.pt"
     metrics["inference/checkpoint_mib"] = checkpoint.stat().st_size / 2**20
     try:
@@ -267,12 +296,14 @@ def run(module_file, manifest_file, config, output):
         model = getattr(predictor, "net", None)
         if model is not None:
             metrics["inference/parameters"] = sum(p.numel() for p in model.parameters())
+            metrics["inference/trainable_parameters"] = sum(p.numel() for p in model.parameters() if p.requires_grad)
     except ImportError:
         pass
     with Image.open(score_paths[0]) as source:
         original = source.convert('RGB')
         original_size = original.size
-        save_heatmaps(output, normal[0], synthetic[0], all_pred_synth[0], masks[0], original_image=original)
+        if synthetic_enabled:
+            save_heatmaps(output, normal[0], synthetic[0], all_pred_synth[0], masks[0], original_image=original)
     import sys
     generator_fingerprint = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     provenance = {"training_input_policy": "train/good only; real development images and masks never mounted",
@@ -288,13 +319,17 @@ def run(module_file, manifest_file, config, output):
                   "image_count_normal_validation": len(valid_paths), "device": device, "size": size,
                   "preview_original_width": original_size[0], "preview_original_height": original_size[1],
                   "artifact_hashes": {filename: sha256_file(output / filename) for filename in
-                      ("normal_preview.png", "synthetic_input.png", "synthetic_mask.png", "synthetic_heatmap.png", "synthetic_overlay.png", "development_case_metrics.json")},
+                      ("normal_preview.png", "synthetic_input.png", "synthetic_mask.png", "synthetic_heatmap.png", "synthetic_overlay.png", "development_case_metrics.json") if (output / filename).is_file()},
                   "artifact_control_status": "same-location donor edit is not certified logically valid; mild photometric edit preserves layout",
                   "synthetic_generator_protocol": "white_patch_v1, target_only_copy_insertion_v1, feathered_target_only_copy_insertion_v1",
                   "synthetic_mask_semantics": "edited target footprint only; source remains present; no missing-object localization label",
                   "synthetic_generator_source_sha256": generator_fingerprint,
                   "calibration_path_sha256": hashlib.sha256('\n'.join(str(p) for p in calibrate_paths).encode()).hexdigest(),
                   "assessment_path_sha256": hashlib.sha256('\n'.join(str(p) for p in score_paths).encode()).hexdigest()}
+    if not synthetic_enabled:
+        provenance['metric_status'] = 'NORMAL_ONLY_CALIBRATION_AND_EFFICIENCY'
+        for key in list(provenance):
+            if key.startswith('synthetic_') or key == 'artifact_control_status': provenance.pop(key)
     (output / "run_manifest.json").write_text(json.dumps(provenance, indent=2))
     return {"metrics": {k: float(v) for k,v in metrics.items()}, "provenance": provenance}
 
@@ -306,7 +341,7 @@ def main():
     args = parser.parse_args()
     output = run(Path(args.module), Path(args.manifest), json.loads(Path(args.config).read_text()), Path(args.output))
     Path(args.result).write_text(json.dumps(output, indent=2))
-    print(json.dumps({"metric_kind": "synthetic_proxy", "metrics": output["metrics"]}))
+    print(json.dumps({"metric_kind": output["provenance"]["metric_status"], "metrics": output["metrics"]}))
 
 if __name__ == "__main__":
     main()

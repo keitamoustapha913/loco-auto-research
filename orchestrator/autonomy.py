@@ -267,11 +267,10 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
                   "prescribe one architecture; propose scientifically distinct mechanisms. Only normal "
                   "juice_bottle images are authorized for model learning; a one-category pilot cannot establish "
                   "claims across all five LOCO categories. Use only installed "
-                  "PyTorch and NumPy, no external weights or new dependencies. Primary literature leads: "
-                  "EfficientAD https://arxiv.org/abs/2303.14535, CSAD https://arxiv.org/abs/2408.15628, "
-                  "MuDeNet https://doi.org/10.1016/j.inffus.2026.104214. Cite precisely and distinguish "
-                  "source claims from proposed ideas. "
-                  "new_dependencies must be []. All metrics are development proxies, not official LOCO "
+                  "Use the installed environment; external weights or dependencies require approval. "
+                  "Select methods from the research charter, verified literature and measured evidence. "
+                  "Do not assume a preferred architecture. "
+                  "new_dependencies must be []. Distinguish real-development feedback from synthetic proxies, not official LOCO "
                   "results. Literature: " + json.dumps(leads) + " Prior evidence: " + json.dumps(evidence))
         generated = add_research_proposals(store, prompt, campaign=context, personal_mode=True,
                                            require_gpu_pilot=bool(research.get('require_torch_cuda')))
@@ -381,7 +380,8 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
         rid = queue_candidate(store, hypothesis_id, hypothesis_id, "juice_bottle",
                               "pilot" if research.get('require_torch_cuda') else "smoke", "cuda",
                               manifest_path, seconds=min(300, seconds), personal_mode_authorized=True,
-                              campaign_id=campaign_id, campaign_name=config['campaign']['name'])
+                              campaign_id=campaign_id, campaign_name=config['campaign']['name'],
+                              synthetic_evaluation=research.get('synthetic_diagnostics', not research.get('real_development_feedback', False)))
         campaigns.attach_run(campaign_id, rid)
         campaigns.event(campaign_id, "EXPERIMENT_QUEUED", run_id=rid)
         outcome = run_worker_once(store, manifest_path, runtime, personal_mode_authorized=True,
@@ -427,12 +427,15 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
         store.transition(rid, "REVIEWED")
         action = review["recommended_next_action"]
         if action == 'reject':
-            store.transition(rid, 'REJECTED', reason='Critic rejected development proxy evidence')
+            store.transition(rid, 'REJECTED', reason='Critic rejected development evidence')
         elif action == 'promote_for_review':
             from orchestrator.decision_engine import eligible
-            eligible_for_review, eligibility_reason = eligible(store.get_run(rid))
+            eligibility_run = dict(store.get_run(rid))
+            if research.get('real_development_feedback'):
+                eligibility_run['real_feedback'] = feedback
+            eligible_for_review, eligibility_reason = eligible(eligibility_run)
             if eligible_for_review:
-                store.transition(rid, 'PROMOTED', reason='Human review requested; no official benchmark claim')
+                store.transition(rid, 'PROMOTED', reason='Further research warranted by measured evidence; no final benchmark claim')
             else:
                 campaigns.event(campaign_id, 'PROMOTION_WITHHELD', run_id=rid, reason=eligibility_reason)
         from orchestrator.mlflow_tracker import enqueue_run_tracking

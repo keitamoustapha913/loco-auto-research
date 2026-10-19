@@ -446,6 +446,9 @@ def research_summary(campaigns, row, process, report=False):
                                                'gpu_seconds', 'error', 'mlflow_run_id')},
                            'development_metrics': json.loads(r['metrics_json'])}
                           for r in campaigns.runs(row['id'])]
+        from orchestrator.development_feedback import latest_summary
+        for run in result['runs']:
+            run['real_development_feedback'] = latest_summary(campaigns.store, run['run_id'])
         result['events'] = campaigns.events(row['id'], 30)
     return result
 

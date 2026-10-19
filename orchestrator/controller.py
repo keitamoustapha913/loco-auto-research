@@ -60,8 +60,12 @@ def budgeted_invoke(store, role, repo_root, schema, prompt, campaign=None, **kwa
         campaigns.event(campaign_id, 'AGENT_STARTED', role=role)
     if role in {'researcher', 'critic'}:
         from orchestrator.development_feedback import latest_summary
-        feedback = [latest_summary(store, r['run_id']) for r in store.list_runs(30)]
-        feedback = [x for x in feedback if x][:5]
+        feedback = []
+        for r in store.list_runs(30):
+            summary = latest_summary(store, r['run_id'])
+            if summary:
+                feedback.append(dict(summary, run_id=r['run_id'], candidate_id=r['candidate_id'], hypothesis_id=r['hypothesis_id']))
+        feedback = feedback[:5]
         if feedback:
             prompt += ('\nAuthorized real-development feedback follows. Use aggregate evidence to select methods, '
                        'but never use anomaly images/masks to fit model weights, normalization or thresholds. '
@@ -215,7 +219,7 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
 
 def queue_candidate(store, hypothesis_id, candidate_id, category, stage, device, manifest_path, seconds=300,
                     personal_mode_authorized=False, campaign_id=None, campaign_name=None,
-                    context_arm=None, seed=None):
+                    context_arm=None, seed=None, synthetic_evaluation=True):
     from benchmark.data_guard import load_manifest, manifest_fingerprint
     from orchestrator.experiment_runner import candidate_file, sha256
     if candidate_id != "toy_normal_ae" and not personal_mode_authorized and os.getenv("LOCO_SANDBOX_VERIFIED") != "1":
@@ -230,7 +234,7 @@ def queue_candidate(store, hypothesis_id, candidate_id, category, stage, device,
         raise ValueError('seed is restricted to the predeclared masked-context study seeds')
     cfg = {"device": device, "size": 128, "epochs": 1, "seed": 7 if seed is None else seed,
            "timeout_seconds": timeout, "category": category, "model_sha256": sha256(module),
-           "metric_evaluator_version": "development-v2.0"}
+           "metric_evaluator_version": "development-v2.0", "synthetic_evaluation": bool(synthetic_evaluation)}
     if context_arm is not None:
         if candidate_id != 'masked_context_ablation' or context_arm not in {'local', 'global', 'combined', 'neither', 'spatial'}:
             raise ValueError('context_arm is only available for the reviewed masked-context ablation')

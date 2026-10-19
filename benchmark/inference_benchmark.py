@@ -18,6 +18,10 @@ def benchmark_predict(predictor, images, device="cpu", warmup=3, repeats=15, pre
     """preprocess/postprocess are measured inside e2e timer; cannot claim device-copy timing absent a copy."""
     if len(images) != 1 or repeats <= 0 or warmup < 0:
         raise ValueError("expect batch-one, positive repeats and nonnegative warmup")
+    if str(device).startswith('cuda'):
+        import torch
+        if not torch.cuda.is_available(): raise RuntimeError('CUDA timing requested but unavailable')
+        torch.cuda.reset_peak_memory_stats(device)
     model_ms, total_ms = [], []
     for iteration in range(warmup + repeats):
         _sync(device)
@@ -28,8 +32,8 @@ def benchmark_predict(predictor, images, device="cpu", warmup=3, repeats=15, pre
         out = predictor.predict(x)
         _sync(device)
         t2 = time.perf_counter()
+        validate_prediction(out, tuple(x.shape))
         out = postprocess(out) if postprocess else out
-        validate_prediction(out, tuple(images.shape))
         _sync(device)
         t3 = time.perf_counter()
         if iteration >= warmup:

@@ -155,6 +155,7 @@ def _sync_locked(store: StateStore, tracking_uri=None, max_events=100):
                 client.set_tag(mlflow_run_id, 'learning.real_anomaly_fitting', 'forbidden')
                 for key, value in feedback['metrics'].items():
                     client.log_metric(mlflow_run_id, key, float(value))
+                    client.log_metric(mlflow_run_id, 'evaluation_versions/' + feedback['evaluator_version'] + '/' + key, float(value))
                 feedback_dir = Path(feedback['artifact_dir'])
                 expected = allowed_root / 'feedback' / feedback['evaluation_id']
                 if feedback_dir.is_symlink() or feedback_dir.resolve() != expected.resolve() or not expected.resolve().is_relative_to(allowed_root):

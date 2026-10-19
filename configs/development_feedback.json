@@ -5,7 +5,8 @@
   "archive_sha256": "cdd465e98b2a8ea6b3645c7a6b7a4244106ccc253f6cd551eec9f3296fd7b8cd",
   "normal_training_only": true,
   "feedback_use": "aggregate_method_selection_only",
-  "reference_localization_status": "blocked_official_download_http_404",
+  "reference_localization_status": "compatible_development_implementation_original_equivalence_unverified",
   "official_scorer_url": "https://www.mydrive.ch/shares/48245/a4e9922c5efa93f57b6a0ff9f5c6b969/download/430648014-1646847095/mvtec_loco_ad_evaluation.tar.xz",
-  "manifest_canonical_sha256": "7ef0b34f4b282679da089ef2bb5f85aa670ec0c810ab3aff614d7b80abc588cb"
+  "manifest_canonical_sha256": "7ef0b34f4b282679da089ef2bb5f85aa670ec0c810ab3aff614d7b80abc588cb",
+  "localization_definition": "https://doi.org/10.1007/s11263-022-01578-9"
 }

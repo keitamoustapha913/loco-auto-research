@@ -1,15 +1,11 @@
-.PHONY: install test demo mlflow dashboard status worker
+.PHONY: install test start status stop
 install:
-	python -m pip install -e '.[all]'
+	uv sync --extra all
 test:
-	python -m pytest -q
-demo:
-	python -m scripts.demo_run
-mlflow:
-	bash scripts/start_mlflow.sh
-dashboard:
-	streamlit run dashboard/app.py --server.address 127.0.0.1 --server.port 8501
+	uv run --extra all pytest
+start:
+	uv run --extra all loco-lab start
 status:
-	python -m orchestrator.controller status
-worker:
-	python -m orchestrator.controller worker-once
+	uv run --extra all loco-lab status
+stop:
+	uv run --extra all loco-lab stop

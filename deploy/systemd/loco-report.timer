@@ -1,8 +1,0 @@
-[Unit]
-Description=Daily local research report
-[Timer]
-OnCalendar=daily
-Persistent=true
-Unit=loco-report.service
-[Install]
-WantedBy=timers.target

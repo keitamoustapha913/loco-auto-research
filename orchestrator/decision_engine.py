@@ -8,6 +8,14 @@ REQUIRED = ("normal/image_fpr_at_threshold", "dev_synthetic/pixel_auroc", "infer
 def eligible(run, max_latency_ms=20.0, max_normal_fpr=0.10):
     if run.get("status") not in ("COMPLETED", "REVIEWED", "PROMOTED"):
         return False, "run not completed"
+    if run.get('real_feedback'):
+        feedback = run['real_feedback']
+        required = ('dev_real/logical_image_auroc', 'dev_real/structural_image_auroc',
+                    'dev_real/logical_au_spro_0_05_compatible', 'dev_real/structural_au_spro_0_05_compatible')
+        import math
+        if not all(k in feedback['metrics'] and math.isfinite(feedback['metrics'][k]) for k in required):
+            return False, 'incomplete real-development evidence'
+        return True, 'measured real-development evidence available for adaptive research; not final evaluation'
     metrics = json.loads(run.get("metrics_json", "{}"))
     if any(k not in metrics for k in REQUIRED):
         return False, "missing required development proxies"

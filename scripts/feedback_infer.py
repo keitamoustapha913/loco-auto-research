@@ -62,6 +62,8 @@ def infer_one(module, checkpoint, image_path, size, output):
     modules = modules_of(predictor)
     if not modules:
         raise ValueError('audited inference requires an exposed torch Module on the predictor')
+    parameters={id(p):p for net in modules for p in net.parameters()}
+    trainable_parameters=sum(p.numel() for p in parameters.values() if p.requires_grad)
     for net in modules:
         net.eval(); net.requires_grad_(False)
     before = state_digest(predictor)
@@ -84,7 +86,10 @@ def infer_one(module, checkpoint, image_path, size, output):
     np.save(output/'map.npy',full.astype(np.float32),allow_pickle=False)
     parameters={id(p):p.numel() for net in modules for p in net.parameters()}
     (output/'inference.json').write_text(json.dumps({'image_score':score,'e2e_ms':elapsed*1000,
-        'parameters':sum(parameters.values()),'process_peak_rss_mib':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024,
+        'parameters':sum(parameters.values()),'trainable_parameters_before_freeze':trainable_parameters,
+        'trainable_parameters_during_inference':0,'serialized_model_bytes':(checkpoint.parent/'model.pt').stat().st_size,
+        'measurement_protocol':'batch one, fresh process, first inference; image decode/resize/predict/map restore; excludes model load and process startup',
+        'process_peak_rss_mib':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024,
         'state_before_sha256':before,'state_after_sha256':state_digest(predictor),
         'inference_mode':True,'device':'cpu','width':original_size[0],'height':original_size[1]}))
 

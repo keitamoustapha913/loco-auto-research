@@ -5,13 +5,14 @@ import json
 import os
 from pathlib import Path
 import signal
+import sys
 import subprocess
 import time
 import numpy as np
 from PIL import Image
 from benchmark.data_guard import sha256_file, load_manifest, manifest_fingerprint
 from benchmark.feedback_data import LABEL, imported_root, verify_import
-from benchmark.feedback_metrics import VERSION, LOCALIZATION_BLOCKER, detection_metrics
+from benchmark.feedback_metrics import VERSION, LOCALIZATION_STATUS, detection_metrics
 from orchestrator.experiment_runner import candidate_file
 from orchestrator.sandbox import command as sandbox_command
 
@@ -50,6 +51,27 @@ def validate_worker_outputs(folder, width, height):
             not path.resolve(strict=True).is_relative_to(folder.resolve(strict=True)) or
             path.stat().st_size > cap):
             raise ValueError('unsafe or oversized inference artifact')
+
+
+
+def run_bounded(command, log_path, seconds, cancel=None):
+    """Both inference and trusted scoring obey cancellation and a hard deadline."""
+    if seconds <= 0: raise TimeoutError('evaluation wall limit reached')
+    with Path(log_path).open('wb') as log:
+        process = subprocess.Popen(command,cwd=REPO,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
+                                   stdout=log,stderr=log,start_new_session=True)
+        deadline=time.monotonic()+seconds
+        try:
+            while process.poll() is None:
+                if time.monotonic() >= deadline: raise TimeoutError('bounded evaluation stage deadline reached')
+                if cancel and cancel(): raise RuntimeError('feedback cancelled')
+                time.sleep(.05)
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid,signal.SIGKILL)
+                process.wait()
+        if process.returncode:
+            raise RuntimeError(f'evaluation stage failed with exit {process.returncode}; inspect {log_path.name}')
 
 
 def evaluate_run(runtime,store,run_id,*,timeout=600,cancel=None,personal_mode_authorized=False):
@@ -111,23 +133,7 @@ def _evaluate(runtime,store,run_id,timeout,cancel):
                 ['-m','scripts.feedback_infer','--size',str(provenance['size'])],use_gpu=False,
                 input_files={'model.pt':checkpoint,'checkpoint_manifest.json':checkpoint_meta,
                              'image.png':data_root/entry['path']})
-            with (folder/'worker.log').open('wb') as log:
-                process=subprocess.Popen(command,cwd=REPO,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
-                                         stdout=log,stderr=log,start_new_session=True)
-                deadline=time.monotonic()+min(30,remaining)
-                try:
-                    while process.poll() is None:
-                        if time.monotonic()>=deadline: raise TimeoutError('single-image inference deadline reached')
-                        if cancel and cancel(): raise RuntimeError('feedback cancelled')
-                        time.sleep(.05)
-                finally:
-                    if process.poll() is None:
-                        os.killpg(process.pid,signal.SIGTERM)
-                        try: process.wait(timeout=2)
-                        except subprocess.TimeoutExpired:
-                            os.killpg(process.pid,signal.SIGKILL); process.wait()
-            if process.returncode:
-                raise RuntimeError(f'inference worker failed on opaque case {index}, exit {process.returncode}; inspect worker log')
+            run_bounded(command, folder/'worker.log', min(30,remaining), cancel)
             validate_worker_outputs(folder, entry['width'], entry['height'])
             result=json.loads((folder/'inference.json').read_text())
             heatmap=np.load(folder/'map.npy',allow_pickle=False)
@@ -142,10 +148,22 @@ def _evaluate(runtime,store,run_id,timeout,cancel):
                 Image.fromarray(rgb).save(output/f'heatmap_{index}.png')
         if any(sha256_file(Path(path))!=value for path,value in before.items()):
             raise ValueError('immutable candidate/checkpoint/provenance changed')
+        def check():
+            if time.monotonic()-started >= timeout: raise TimeoutError('evaluation wall limit reached')
+            if cancel and cancel(): raise RuntimeError('feedback cancelled')
         metrics=detection_metrics(rows,threshold)
+        run_bounded([sys.executable,'-m','benchmark.feedback_metrics','--data-root',str(data_root),
+                     '--maps',str(output),'--result',str(output/'localization.json')],
+                    output/'scorer.log',timeout-(time.monotonic()-started),cancel)
+        metrics.update(json.loads((output/'localization.json').read_text()))
         parameters={r['parameters'] for r in rows}
         if len(parameters)!=1: raise ValueError('model capacity changed between images')
-        metrics.update({'dev_real/inference_e2e_ms_p95':float(np.percentile([r['e2e_ms'] for r in rows],95)),
+        metrics.update({'dev_real/inference_e2e_ms_p50':float(np.percentile([r['e2e_ms'] for r in rows],50)),
+                        'dev_real/trainable_parameters_before_freeze':rows[0]['trainable_parameters_before_freeze'],
+                        'dev_real/trainable_parameters_during_inference':0,
+                        'dev_real/serialized_model_bytes':checkpoint.stat().st_size,
+                        'dev_real/training_gpu_slot_seconds':run['gpu_seconds'],
+                        'dev_real/inference_e2e_ms_p95':float(np.percentile([r['e2e_ms'] for r in rows],95)),
                         'dev_real/parameters':parameters.pop(),
                         'dev_real/peak_cpu_rss_mib':max(r['process_peak_rss_mib'] for r in rows),
                         'dev_real/evaluation_wall_seconds':time.monotonic()-started,
@@ -157,8 +175,10 @@ def _evaluate(runtime,store,run_id,timeout,cancel):
                  'learning_policy':'335 train/good only; no development anomaly fitting, normalization or calibration',
                  'inference_isolation':'one opaque image per fresh no-network CPU Bubblewrap process; no masks, no peer images; shared host UID residual risk',
                  'checkpoint_unchanged':True,'metrics':metrics,'counts':manifest['summary'],
-                 'localization_status':'unavailable','localization_blocker':LOCALIZATION_BLOCKER,
-                 'artifact_dir':str(output),'status':'DETECTION_COMPLETE_LOCALIZATION_BLOCKED'}
+                 'inference_device':'cpu','measurement_protocol':rows[0]['measurement_protocol'],
+                 'cuda_inference_memory_status':'unavailable: CPU inference; no CUDA measurement',
+                 'localization_status':LOCALIZATION_STATUS,'localization_blocker':'Official download still HTTP 404; compatible scorer uses published definition, not verified original-code equivalence.',
+                 'artifact_dir':str(output),'status':'COMPLETE_COMPATIBLE_DEVELOPMENT'}
         (output/'case_scores.json').write_text(json.dumps(rows,sort_keys=True,indent=2))
         (output/'summary.json').write_text(json.dumps(summary,sort_keys=True,indent=2))
         record_summary(store,run_id,summary)
