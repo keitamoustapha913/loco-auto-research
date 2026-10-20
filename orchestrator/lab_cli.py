@@ -443,7 +443,18 @@ def research_summary(campaigns, row, process, report=False):
               'current_hypothesis': row['current_hypothesis'],
               'next_hypothesis': row['next_hypothesis'], 'active_run_id': row['active_run_id'],
               'reason': row['reason'], 'consecutive_failures': row['consecutive_failures']}
-    result['codex_budget'] = campaigns.call_budget(row['id'])
+    config = json.loads(row['config_json'])
+    from orchestrator.campaign_config import time_based
+    if time_based(config):
+        result['research_duration_seconds'] = usage['wall_seconds']
+        result['research_seconds_remaining'] = max(0,config['limits']['research_hours']*3600-usage['wall_seconds'])
+        result['training_seconds_per_experiment'] = config['limits']['training_minutes_per_experiment']*60
+        result['start_from'] = config['campaign']['start_from']
+        result['actual_training_seconds'] = sum(json.loads(r['metrics_json']).get('training/duration_seconds',0) for r in campaigns.runs(row['id']))
+        result['technical_accounting'] = {'usage':dict(usage), 'codex_budget':campaigns.call_budget(row['id'])}
+        result['usage'] = {k:v for k,v in usage.items() if k not in {'gpu_seconds','codex_calls'}}
+    else:
+        result['codex_budget'] = campaigns.call_budget(row['id'])
     from orchestrator.model_registry import progress, status_summary
     result['cumulative_research'] = progress(campaigns.store) if report else status_summary(campaigns.store)
     with campaigns.store.connect() as con:
@@ -453,13 +464,18 @@ def research_summary(campaigns, row, process, report=False):
         result['experiment_plan'] = plan if report else {key:plan[key] for key in
             ('plan_id','status','expected_jobs','recorded_jobs','problems')}
     if report:
-        result['limits'] = json.loads(row['config_json'])['limits']
+        limits = config['limits']
+        result['limits'] = ({k:limits[k] for k in ('research_hours','training_minutes_per_experiment')}
+                            if time_based(config) else limits)
+        if time_based(config): result['technical_accounting']['limits'] = limits
         result['runs'] = [{**{k: r[k] for k in ('run_id', 'hypothesis_id', 'candidate_id', 'status',
                                                'gpu_seconds', 'error', 'mlflow_run_id')},
                            'development_metrics': json.loads(r['metrics_json'])}
                           for r in campaigns.runs(row['id'])]
         from orchestrator.development_feedback import latest_summary
         for run in result['runs']:
+            run['actual_training_seconds'] = run['development_metrics'].get('training/duration_seconds')
+            if time_based(config): run['technical_accounting'] = {'gpu_seconds':run.pop('gpu_seconds')}
             run['real_development_feedback'] = latest_summary(campaigns.store, run['run_id'])
         result['events'] = campaigns.events(row['id'], 30)
     return result

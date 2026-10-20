@@ -17,6 +17,47 @@ from benchmark.metrics_v2 import EVALUATOR_VERSION, pixel_ap_report, pixel_auroc
 from benchmark.inference_benchmark import benchmark_predict
 
 
+def train_measured(module, config, manifest, output):
+    """Separate measured learning from import, validation and inference overhead."""
+    import signal
+    device = str(config.get('device', 'cpu'))
+    if device.startswith('cuda'):
+        import torch
+        torch.cuda.synchronize()
+    budget = config.get('training_budget_seconds')
+    started = time.perf_counter()
+    audit_path = Path(output).parent/'training_timing.json'
+    timing = {'started_at':time.time(), 'status':'RUNNING', 'budget_seconds':budget,
+              'protocol':'train-call-with-device-synchronization-v1'}
+    audit_path.write_text(json.dumps(timing))
+    previous_handler = None
+    previous_timer = None
+    if budget is not None:
+        if isinstance(budget,bool) or not np.isfinite(budget) or budget <= 0:
+            raise ValueError('invalid trusted training deadline')
+        def expired(signum, frame):
+            raise TimeoutError('training-time budget exceeded')
+        previous_handler = signal.signal(signal.SIGALRM, expired)
+        previous_timer = signal.setitimer(signal.ITIMER_REAL, float(budget))
+    try:
+        metadata = module.train(config, manifest, output)
+        if device.startswith('cuda'): torch.cuda.synchronize()
+        timing['status'] = 'COMPLETED'
+        return metadata, time.perf_counter()-started
+    except BaseException:
+        timing['status'] = 'FAILED'
+        raise
+    finally:
+        elapsed = time.perf_counter()-started
+        if budget is not None:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous_handler)
+            if previous_timer[0]:
+                signal.setitimer(signal.ITIMER_REAL, max(.000001,previous_timer[0]-elapsed),previous_timer[1])
+        timing['duration_seconds'] = elapsed
+        audit_path.write_text(json.dumps(timing))
+
+
 def load_image(path, size):
     im = Image.open(path).convert("RGB").resize((size, size), Image.Resampling.BILINEAR)
     return np.asarray(im, dtype=np.float32).transpose(2, 0, 1).copy() / 255
@@ -149,7 +190,6 @@ def run(module_file, manifest_file, config, output):
     size = int(config.get("size", 64))
     device = config.get("device", "cpu")
     mod = load_candidate(module_file)
-    training_started = time.perf_counter()
     # Candidate learning receives only train/good; validation is used later by the runner.
     training_manifest = dict(manifest, images=[e for e in manifest['images'] if e['split'] == 'train/good'])
     if not training_manifest['images']:
@@ -172,10 +212,9 @@ def run(module_file, manifest_file, config, output):
         torch.manual_seed(config['seed'])
         if str(device).startswith('cuda'): torch.cuda.manual_seed_all(config['seed'])
         try:
-            checkpoint_meta = mod.train(config, training_manifest_file, output / 'checkpoint')
+            checkpoint_meta, training_duration_seconds = train_measured(mod, config, training_manifest_file, output / 'checkpoint')
         finally:
             hook.remove()
-        training_duration_seconds = time.perf_counter() - training_started
         metadata = json.loads((output/'checkpoint/checkpoint_manifest.json').read_text())
         training_audit = metadata.get('training_audit', {})
         for name in ('optimizer_updates', 'source_exposures', 'seed'):
@@ -192,8 +231,7 @@ def run(module_file, manifest_file, config, output):
                               optimizer_classes=sorted(set(observed)),
                               exposure_measurement_source='candidate instrumented; not an OS-enforced counter')
     else:
-        checkpoint_meta = mod.train(config, training_manifest_file, output / 'checkpoint')
-        training_duration_seconds = time.perf_counter() - training_started
+        checkpoint_meta, training_duration_seconds = train_measured(mod, config, training_manifest_file, output / 'checkpoint')
     learning_frozen_files = {p.name: sha256_file(p) for p in (output/'checkpoint').iterdir()
                              if p.name in {'model.pt','checkpoint_manifest.json'}}
     predictor = load_predictor(mod, output / 'checkpoint/checkpoint_manifest.json', device,

@@ -28,7 +28,12 @@ def gpu_lock(runtime=None):
 
 
 def claim_next(store: StateStore, max_duration=1800, expected_run_id=None):
-    enforce(store, next_gpu_seconds=max_duration)
+    campaign_id = None
+    if expected_run_id:
+        import json
+        expected = store.get_run(expected_run_id)
+        if expected: campaign_id = json.loads(expected['config_json']).get('campaign_id')
+    enforce(store, next_gpu_seconds=max_duration, campaign_id=campaign_id)
     with store.connect() as con:
         con.execute("BEGIN IMMEDIATE")
         active = con.execute("SELECT COUNT(*) AS n FROM runs WHERE status='RUNNING'").fetchone()["n"]

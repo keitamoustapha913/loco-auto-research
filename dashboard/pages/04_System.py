@@ -52,9 +52,7 @@ def live_system():
     st.write(f"**{state}** · {reason}")
     if campaign:
         limits = campaign.get('config', {}).get('limits', {})
-        st.write(f"**Campaign:** {campaign['status'].replace('_', ' ').title()} · "
-                 f"{campaign['usage']['gpu_seconds_live']/3600:.2f} / {limits.get('max_gpu_hours', 0):.2f} GPU h · "
-                 f"{campaign['codex_calls']} / {limits.get('max_codex_calls', '—')} calls")
+        st.write(f"**Campaign:** {campaign['status'].replace('_', ' ').title()}")
     if queue_paused():
         st.caption("The research queue is paused by the trusted controller.")
 
@@ -69,7 +67,8 @@ def live_system():
             st.caption("No infrastructure test recorded.")
 
     with st.expander("Limits, tooling, and tracking errors"):
-        st.write(f"Approved GPU budget: {os.getenv('LOCO_GPU_BUDGET_HOURS', '4')} h")
+        if campaign: st.json({'limits':campaign.get('config',{}).get('limits',{}),'usage':campaign['usage'],'codex_calls':campaign['codex_calls']})
+        st.caption('Legacy environment ceilings apply only to legacy configurations and standalone infrastructure commands.')
         st.write(f"Job timeout: {os.getenv('LOCO_JOB_TIMEOUT_SECONDS', '1800')} s")
         st.write(f"Codex CLI: {'Available' if shutil.which('codex') else 'Unavailable'}")
         for error in tracking_errors():

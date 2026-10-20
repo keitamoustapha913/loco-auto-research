@@ -48,6 +48,7 @@ def laboratory(tmp_path, monkeypatch):
     (tmp_path/'good_manifest.json').write_text(json.dumps(build_manifest(tmp_path/'good')))
     store=StateStore(tmp_path/'controller/experiments.sqlite');campaigns=CampaignState(store)
     cfg=load_campaign_config(REPO/'configs/autonomy.yaml');cfg['research']['real_development_feedback']=False
+    cfg['campaign']['start_from']='new'
     cfg['limits']['max_experiments']=20
     cid=campaigns.create(cfg);store.add_proposal({'hypothesis_id':'fixture'})
     monkeypatch.setenv('LOCO_RUNTIME',str(tmp_path));monkeypatch.setenv('LOCO_LEDGER',str(store.path))

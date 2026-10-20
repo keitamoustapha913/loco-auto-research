@@ -5,6 +5,7 @@ import time
 
 import streamlit as st
 
+from dashboard.campaign_timing import campaign_training_seconds
 from dashboard.components import page_intro
 from dashboard.cumulative import progress_card
 from dashboard.data_access import cumulative_progress
@@ -61,9 +62,9 @@ def live_home():
     if autonomous:
         limits = autonomous.get('config', {}).get('limits', {})
         used = autonomous['usage']
-        st.caption(f"Campaign: {autonomous['name']} · {used['experiments']} / {limits.get('max_experiments', '—')} experiments · "
-                   f"{autonomous['codex_calls']} / {limits.get('max_codex_calls', '—')} Codex calls · "
-                   f"{used['gpu_seconds_live']/3600:.2f} / {limits.get('max_gpu_hours', 0):.2f} campaign GPU slot hours")
+        elapsed = (autonomous.get('ended_at') or time.time())-autonomous['created_at']
+        actual_training = campaign_training_seconds(autonomous,runs)
+        st.caption(f"Campaign: {autonomous['name']} · Research elapsed {format_duration(elapsed)} · Measured training {format_duration(actual_training)}")
         if autonomous.get('current_hypothesis'):
             label = 'Current hypothesis' if autonomous['status'] in {'RUNNING', 'PAUSED', 'STOPPING'} else 'Last hypothesis'
             st.write(f"**{label}:** {autonomous['current_hypothesis'].replace('_', ' ')}")
@@ -76,9 +77,12 @@ def live_home():
     b.metric("Infrastructure tests", summary["infrastructure_completed"], help="Completed toy or fixture runs used to verify the laboratory.")
     c.metric("GPU", gpu.get("name", "Unavailable").replace("NVIDIA GeForce ", "") if gpu.get("available") else "Unavailable",
              help=f"{gpu.get('memory_used_mib', 0):,} / {gpu.get('memory_total_mib', 0):,} MiB in use" if gpu.get("available") else None)
-    consumed = ledger_summary()["gpu_seconds"] / 3600
-    budget = float(os.getenv("LOCO_GPU_BUDGET_HOURS", "4"))
-    d.metric("GPU budget remaining", f"{max(0, budget - consumed):.2f} h", help=f"{consumed:.2f} of {budget:.2f} approved exclusive GPU slot hours charged across all runs.")
+    if autonomous:
+        hours = autonomous.get('config',{}).get('limits',{}).get('research_hours', autonomous.get('config',{}).get('limits',{}).get('max_wall_hours',0))
+        elapsed = (autonomous.get('ended_at') or time.time())-autonomous['created_at']
+        d.metric("Research time remaining",format_duration(max(0,hours*3600-elapsed)))
+    else:
+        d.metric("Research time remaining", "No campaign")
 
     progress_card(cumulative_progress())
 

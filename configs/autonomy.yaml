@@ -1,16 +1,12 @@
 campaign:
-  name: juice-bottle-autoresearch
+  name: juice-bottle-research
   dataset: juice_bottle
   mode: autonomous
   gpu_device: cuda
+  start_from: previous_best
 limits:
-  max_gpu_hours: 4
-  max_wall_hours: 12
-  max_experiments: 8
-  max_codex_calls: 30
-  max_job_seconds: 1800
-  max_consecutive_failures: 3
-  max_parallel_gpu_jobs: 1
+  research_hours: 4
+  training_minutes_per_experiment: 15
 research:
   synthetic_diagnostics: false
   real_development_feedback: true

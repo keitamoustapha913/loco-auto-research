@@ -26,6 +26,7 @@ def fresh():
 def campaign(tmp_path,limit=8):
     store=StateStore(tmp_path/'ledger.sqlite');campaigns=CampaignState(store)
     config=load_campaign_config(Path(__file__).parents[1]/'configs/autonomy.yaml')
+    config['campaign']['start_from']='new'
     config['limits']['max_codex_calls']=limit
     cid=campaigns.create(config)
     return store,campaigns,cid

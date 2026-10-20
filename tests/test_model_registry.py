@@ -25,7 +25,7 @@ def lab(tmp_path):
         subprocess.run(['git','-C',str(repo),*args],check=True,capture_output=True)
     commit=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
     store=StateStore(tmp_path/'controller/experiments.sqlite');campaigns=CampaignState(store)
-    cfg=load_campaign_config(registry.REPO/'configs/autonomy.yaml');cfg['limits']['max_experiments']=30
+    cfg=load_campaign_config(registry.REPO/'configs/autonomy.yaml');cfg['campaign']['start_from']='new';cfg['limits']['max_experiments']=30
     cid=campaigns.create(cfg)
     store.add_proposal({'hypothesis_id':'fixture'})
 

@@ -38,6 +38,10 @@ def await_authorized_stage(campaigns, campaign_id, finishing=False):
                 raise CampaignHalted(reason)
             return
         if row['status'] == 'PAUSED':
+            from orchestrator.campaign_config import remaining_wall
+            if remaining_wall(row,time.time()) <= 0:
+                campaigns.set_status(campaign_id,'LIMIT_REACHED','wall-time budget reached')
+                raise CampaignHalted('wall-time budget reached')
             time.sleep(1)
             continue
         raise CampaignHalted(row['reason'] or row['status'])
@@ -46,16 +50,21 @@ def await_authorized_stage(campaigns, campaign_id, finishing=False):
 def load_campaign_config(path=None):
     source = Path(path or REPO / "configs" / "autonomy.yaml").resolve(strict=True)
     config = yaml.safe_load(source.read_text())
-    if not isinstance(config, dict) or not all(k in config for k in ("campaign", "limits", "research", "tracking", "security")):
-        raise ValueError("invalid autonomy configuration")
+    if not isinstance(config, dict) or not all(k in config for k in ('campaign','limits')):
+        raise ValueError('invalid autonomy configuration')
+    defaults=yaml.safe_load((REPO/'configs/autonomy.yaml').read_text())
+    for section in ('research','tracking','security'):
+        config[section]=dict(defaults[section], **config.get(section,{}))
+    if 'research_hours' in config['limits'] and set(config['limits'])-{'research_hours','training_minutes_per_experiment'}:
+        raise ValueError('do not mix time settings with legacy campaign limits')
+    from orchestrator.campaign_config import normalize, time_based
+    config = normalize(config)
     campaign, limits = config["campaign"], config["limits"]
     if campaign.get("mode") != "autonomous" or campaign.get("dataset") != "juice_bottle" or campaign.get("gpu_device") != "cuda":
         raise ValueError("campaign must use the approved juice_bottle CUDA development setup")
-    if not all(isinstance(limits.get(k), (int, float)) and not isinstance(limits.get(k), bool) and limits[k] > 0 for k in REQUIRED_LIMITS):
-        raise ValueError("campaign limits must be positive numbers")
     if limits["max_parallel_gpu_jobs"] != 1:
         raise ValueError("one RTX 4090 requires exclusive GPU scheduling")
-    if limits["max_gpu_hours"] > float(os.getenv("LOCO_GPU_BUDGET_HOURS", "4")) or limits["max_job_seconds"] > int(os.getenv("LOCO_JOB_TIMEOUT_SECONDS", "1800")) or limits["max_codex_calls"] > int(os.getenv("LOCO_CODEX_MAX_CALLS", "30")):
+    if not time_based(config) and (limits["max_gpu_hours"] > float(os.getenv("LOCO_GPU_BUDGET_HOURS", "4")) or limits["max_job_seconds"] > int(os.getenv("LOCO_JOB_TIMEOUT_SECONDS", "1800")) or limits["max_codex_calls"] > int(os.getenv("LOCO_CODEX_MAX_CALLS", "30"))):
         raise ValueError("campaign limits exceed existing operator resource ceilings")
     if config["research"].get("official_test_access") is not False or config["research"].get("synthetic_anomalies_allowed") is not True:
         raise ValueError("official test data must remain excluded")
@@ -104,11 +113,12 @@ def stop_reason(campaigns, campaign_id):
         return row["status"], row["reason"]
     if used["wall_seconds"] >= limits["max_wall_hours"] * 3600:
         return "LIMIT_REACHED", "wall-time budget reached"
-    if used["gpu_seconds"] >= limits["max_gpu_hours"] * 3600:
+    from orchestrator.campaign_config import time_based
+    if not time_based(json.loads(row["config_json"])) and used["gpu_seconds"] >= limits["max_gpu_hours"] * 3600:
         return "LIMIT_REACHED", "GPU-time budget reached"
-    if used["experiments"] >= limits["max_experiments"]:
+    if limits["max_experiments"] is not None and used["experiments"] >= limits["max_experiments"]:
         return "LIMIT_REACHED", "experiment count reached"
-    if used["codex_calls"] >= limits["max_codex_calls"]:
+    if limits["max_codex_calls"] is not None and used["codex_calls"] >= limits["max_codex_calls"]:
         return "BUDGET_EXHAUSTED", "campaign Codex-call budget exhausted"
     global_budget = campaigns.call_budget(campaign_id)['global']
     if global_budget['remaining'] == 0:
@@ -403,7 +413,10 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
         store.set_hypothesis_status(hypothesis_id, 'INCOMPLETE' if result['status']=='INCOMPLETE' else 'COMPLETED')
         await_authorized_stage(campaigns, campaign_id, finishing=True)
         review_plan(store, campaigns, campaign_id, plan, result)
-    except CampaignHalted:
+    except CampaignHalted as exc:
+        if detail.get('experiment_plan') and result is None:
+            record_result(store,campaigns,campaign_id,detail['experiment_plan'],campaigns.runs(campaign_id),runtime,str(exc))
+            store.set_hypothesis_status(hypothesis_id,'INCOMPLETE')
         return
     except CodexBudgetExhausted:
         raise
@@ -418,6 +431,17 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
         campaigns.update(campaign_id, consecutive_failures=failures, active_run_id='')
         campaigns.event(campaign_id, 'ATTEMPT_FAILED', hypothesis_id=hypothesis_id, error=str(exc))
         raise
+
+
+def close_unfinished_comparisons(store, campaigns, campaign_id, runtime, reason):
+    from orchestrator.experiment_plan import plan_history,record_result
+    with store.connect() as con:
+        published={json.loads(r[0])['result']['plan_sha256'] for r in con.execute(
+            "SELECT payload_json FROM campaign_events WHERE campaign_id=? AND kind='EXPERIMENT_PLAN_RESULT'",(campaign_id,))}
+    for entry in plan_history(campaigns,campaign_id):
+        if entry['plan_sha256'] not in published:
+            record_result(store,campaigns,campaign_id,entry['plan'],campaigns.runs(campaign_id),runtime,reason)
+            store.set_hypothesis_status(entry['plan']['hypothesis_id'],'INCOMPLETE')
 
 
 def run_forever(campaign_id: str, runtime: Path, ledger: Path, idle_seconds=2):
@@ -438,15 +462,25 @@ def run_forever(campaign_id: str, runtime: Path, ledger: Path, idle_seconds=2):
             campaigns.set_status(campaign_id, "STOPPED", "operator stop")
             return
         if row["status"] == "PAUSED":
+            from orchestrator.campaign_config import remaining_wall
+            if remaining_wall(row,time.time()) <= 0:
+                campaigns.set_status(campaign_id,"LIMIT_REACHED","wall-time budget reached")
+                return
             time.sleep(idle_seconds)
             continue
         state, reason = stop_reason(campaigns, campaign_id)
         if state:
+            close_unfinished_comparisons(store,campaigns,campaign_id,runtime,reason)
             campaigns.set_status(campaign_id, state, reason)
             return
         failures_before = campaigns.get(campaign_id)["consecutive_failures"]
         try:
             run_cycle(store, campaigns, campaign_id, runtime)
+        except CampaignHalted as exc:
+            close_unfinished_comparisons(store,campaigns,campaign_id,runtime,str(exc))
+            if campaigns.get(campaign_id)['status'] not in TERMINAL:
+                campaigns.set_status(campaign_id,'LIMIT_REACHED',str(exc))
+            return
         except CodexBudgetExhausted as exc:
             campaigns.set_status(campaign_id, 'BUDGET_EXHAUSTED', str(exc))
             return

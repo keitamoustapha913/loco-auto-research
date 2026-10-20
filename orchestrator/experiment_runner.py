@@ -58,6 +58,22 @@ def verify_candidate_source(path):
     return {'source_sha256': sha256(path), 'protocol_symbols': sorted(functions | methods)}
 
 
+def read_training_timing(path):
+    """Bound reads from candidate-writable audit artifacts."""
+    import math
+    path=Path(path)
+    if not path.is_file() or path.is_symlink() or path.stat().st_size>4096: return {}
+    try:
+        value=json.loads(path.read_text())
+        if not isinstance(value,dict) or value.get('status') not in {'RUNNING','COMPLETED','FAILED'}: return {}
+        for field in ('started_at','duration_seconds'):
+            number=value.get(field)
+            if field=='duration_seconds' and number is None:continue
+            if isinstance(number,bool) or not isinstance(number,(int,float)) or not math.isfinite(number) or number<0:return {}
+        return value
+    except (OSError,ValueError):return {}
+
+
 def probe_candidate_interface(repo_root, module_file, good_root, runtime, candidate_id):
     """Import untrusted code only inside the no-network CPU sandbox before GPU queueing."""
     from orchestrator.sandbox import command as sandbox_command
@@ -184,7 +200,7 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
             pinned_source=bool(config.get('frozen_baseline')), diagnostic_file=diagnostic_file)
         # Bubblewrap clears its environment; no controller or Codex secrets enter.
         environment = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}
-    timeout = min(max_job_seconds(), int(config.get("timeout_seconds", max_job_seconds())))
+    timeout = min(max_job_seconds(config), int(config.get("timeout_seconds", max_job_seconds(config))))
     stages = []
     if config.get('cuda_smoke_required'):
         if not config.get('device', '').startswith('cuda'):
@@ -219,6 +235,12 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
                     if cancel and cancel():
                         status = "CANCELLED"
                         break
+                    timing_file = job_dir / 'training_timing.json'
+                    if stage == 'pilot' and config.get('training_budget_seconds') and timing_file.is_file() and not timing_file.is_symlink():
+                        timing = read_training_timing(timing_file)
+                        if timing.get('status') == 'RUNNING' and time.time()-timing['started_at'] >= config['training_budget_seconds']:
+                            status = 'TIMED_OUT'
+                            break
                     if time.monotonic() >= stage_deadline:
                         status = "TIMED_OUT"
                         break
@@ -249,6 +271,8 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
     if status == "FAILED":
         error_log = job_dir / ('cuda_smoke_stderr.log' if failed_stage == 'cuda_smoke' else 'stderr.log')
         err_tail = error_log.read_bytes()[-20000:].lower()
+        if b"training-time budget exceeded" in err_tail:
+            status = "TIMED_OUT"
         if b"out of memory" in err_tail or b"cuda error: out of memory" in err_tail:
             status = "OOM"
     try:
@@ -280,6 +304,11 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
             store.transition(run["run_id"], "COMPLETED", expect="RUNNING")
         else:
             charged = elapsed if config.get("device", "cpu").startswith("cuda") else 0
+            timing_file = job_dir/'training_timing.json'
+            timing=read_training_timing(timing_file)
+            if timing:
+                duration=timing.get('duration_seconds',max(0,time.time()-timing['started_at']))
+                store.set_run_result(run['run_id'], {'training/duration_seconds':duration}, gpu_seconds=charged, artifact_dir=str(job_dir))
             if failed_stage == 'cuda_smoke':
                 store.set_run_result(run['run_id'], {'validation/cuda_smoke_passed': 0,
                     'validation/cuda_smoke_seconds': smoke_seconds}, gpu_seconds=charged, artifact_dir=str(job_dir))

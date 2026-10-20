@@ -18,7 +18,8 @@ REPO = Path(__file__).resolve().parents[1]
 def setup_campaign(tmp_path, calls=8):
     store = StateStore(tmp_path / 'ledger.sqlite')
     campaigns = CampaignState(store)
-    config = yaml.safe_load((REPO / 'configs/autonomy.yaml').read_text())
+    from legacy_campaign import legacy_config
+    config = legacy_config()
     config['limits']['max_codex_calls'] = calls
     return store, campaigns, campaigns.create(config)
 

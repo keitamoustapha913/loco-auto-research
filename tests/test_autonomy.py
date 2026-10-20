@@ -15,7 +15,8 @@ REPO = Path(__file__).resolve().parents[1]
 
 
 def config():
-    return load_campaign_config(REPO / 'configs' / 'autonomy.yaml')
+    from legacy_campaign import legacy_config
+    return legacy_config()
 
 
 def test_campaign_persistence_and_call_budget(tmp_path):

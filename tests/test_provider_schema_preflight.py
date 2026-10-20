@@ -104,7 +104,7 @@ def test_literal_values_are_not_mistaken_for_schema_features():
 def test_preflight_rejection_never_charges_or_retries_agent_call(tmp_path,monkeypatch,campaign_mode):
     store=StateStore(tmp_path/'ledger.sqlite');campaign=None
     if campaign_mode:
-        campaigns=CampaignState(store);cid=campaigns.create(load_campaign_config(REPO/'configs/autonomy.yaml'))
+        campaigns=CampaignState(store);config=load_campaign_config(REPO/'configs/autonomy.yaml');config['campaign']['start_from']='new';cid=campaigns.create(config)
         campaign=(campaigns,cid)
     # This goes through the actual researcher schema-generation code path.
     schema=generated();schema['$defs']['proposal']['properties']['research_question']['pattern']='(?!bad)'

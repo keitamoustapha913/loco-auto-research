@@ -151,7 +151,7 @@ def _sync_locked(store: StateStore, tracking_uri=None, max_events=100):
                     client.log_dict(mlflow_run_id,model,'retention/model_record.json')
             if artifact_dir.is_dir():
                 # Allowlisted output types only. Never upload raw source images or test masks.
-                for filename in ("measurement.json", "run_manifest.json", "training_audit.json", "plan_comparison.json", "development_case_metrics.json", "stage6_comparison.json", "normal_preview.png", "synthetic_input.png", "synthetic_mask.png", "synthetic_heatmap.png", "synthetic_overlay.png", "cuda_smoke_stdout.log", "cuda_smoke_stderr.log", "cuda_smoke/summary.json"):
+                for filename in ("measurement.json", "run_manifest.json", "training_audit.json", "training_timing.json", "plan_comparison.json", "development_case_metrics.json", "stage6_comparison.json", "normal_preview.png", "synthetic_input.png", "synthetic_mask.png", "synthetic_heatmap.png", "synthetic_overlay.png", "cuda_smoke_stdout.log", "cuda_smoke_stderr.log", "cuda_smoke/summary.json"):
                     item_path = artifact_dir / filename
                     if (item_path.is_file() and not item_path.is_symlink()
                             and item_path.resolve().is_relative_to(artifact_dir.resolve())):

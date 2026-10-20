@@ -58,6 +58,13 @@ class CampaignState:
         return dict(row) if row else None
 
     def create(self, config):
+        from orchestrator.campaign_config import normalize
+        if 'configuration_version' not in config and 'research_hours' in config['limits']:
+            config = normalize(config)
+        context = None
+        if config['campaign'].get('start_from'):
+            from orchestrator.campaign_config import starting_context, time_based
+            context = starting_context(self.store, config, strict=time_based(config))
         now = time.time()
         campaign_id = str(uuid.uuid4())
         baseline_gpu = self.store.total_gpu_seconds()
@@ -72,6 +79,9 @@ class CampaignState:
                          baseline_gpu, baseline_calls))
             con.execute("INSERT INTO campaign_events(campaign_id,time,kind,payload_json) VALUES(?,?,?,?)",
                         (campaign_id, now, "STARTED", "{}"))
+            if context is not None:
+                con.execute('INSERT INTO campaign_events(campaign_id,time,kind,payload_json) VALUES(?,?,?,?)',
+                            (campaign_id,now,'STARTING_CONTEXT',json.dumps(context,sort_keys=True)))
         return campaign_id
 
     def set_status(self, campaign_id, status, reason=""):
@@ -114,20 +124,22 @@ class CampaignState:
     def call_budget(self, campaign_id):
         import os
         row = self.get(campaign_id)
-        maximum = int(json.loads(row['config_json'])['limits']['max_codex_calls'])
+        config = json.loads(row['config_json'])
+        maximum = config['limits']['max_codex_calls']
         with self.store.connect() as con:
             counts = dict(con.execute('SELECT kind,COUNT(*) FROM campaign_events WHERE campaign_id=? GROUP BY kind', (campaign_id,)).fetchall())
         global_used = self.store.codex_call_count()
-        global_limit = int(os.getenv('LOCO_CODEX_MAX_CALLS', '30'))
+        from orchestrator.campaign_config import time_based
+        global_limit = None if time_based(config) else int(os.getenv('LOCO_CODEX_MAX_CALLS', '30'))
         return {
             'campaign': {'used': row['codex_calls'], 'limit': maximum,
-                         'remaining': max(0, maximum-row['codex_calls']),
+                         'remaining': None if maximum is None else max(0, maximum-row['codex_calls']),
                          'completed': counts.get('AGENT_COMPLETED', 0),
                          'failed_invocations': counts.get('AGENT_FAILED', 0),
                          'accounting': 'admitted calls; includes failed/interrupted invocations' if counts.get('CODEX_CALL_ADMITTED') or not row['codex_calls'] else 'legacy reservations; may include blocked requests, preserved unchanged'},
             'global': {'used': global_used, 'limit': global_limit,
-                       'remaining': max(0, global_limit-global_used),
-                       'scope': 'all historical ledger calls', 'source': 'LOCO_CODEX_MAX_CALLS (default 30)'},
+                       'remaining': None if global_limit is None else max(0, global_limit-global_used),
+                       'scope': 'all historical ledger calls', 'source': 'audit only for elapsed-time campaigns' if global_limit is None else 'LOCO_CODEX_MAX_CALLS (default 30)'},
         }
 
     def attach_run(self, campaign_id, run_id):

@@ -111,7 +111,7 @@ class StateStore:
                 if not campaign or campaign['status']!='RUNNING':
                     raise RuntimeError('campaign is not running at planned job admission')
                 used = con.execute('SELECT COUNT(*) FROM campaign_runs WHERE campaign_id=?',(planned_campaign,)).fetchone()[0]
-                if used >= json.loads(campaign['config_json'])['limits']['max_experiments']:
+                if (maximum := json.loads(campaign['config_json'])['limits']['max_experiments']) is not None and used >= maximum:
                     from orchestrator.budgets import BudgetExceeded
                     raise BudgetExceeded('campaign experiment count reached at atomic admission')
             con.execute("INSERT INTO runs(run_id,hypothesis_id,candidate_id,category,stage,status,created_at,updated_at,config_json,git_sha,manifest_sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -204,18 +204,27 @@ class StateStore:
         change neither counter. The historical global ceiling is unchanged.
         """
         from orchestrator.budgets import CodexBudgetExhausted
-        max_calls = int(os.getenv("LOCO_CODEX_MAX_CALLS", "30"))
+        max_calls = None
+        elapsed_campaign = False
         with self.connect() as con:
             con.execute("BEGIN IMMEDIATE")
             if campaign_id is not None:
                 row = con.execute('SELECT * FROM campaigns WHERE id=?', (campaign_id,)).fetchone()
                 if not row or row['status'] != 'RUNNING':
                     raise RuntimeError('campaign is not running')
-                maximum = int(json.loads(row['config_json'])['limits']['max_codex_calls'])
-                if row['codex_calls'] >= maximum:
+                config = json.loads(row['config_json'])
+                from orchestrator.campaign_config import time_based
+                if time_based(config):
+                    if time.time() >= row['created_at'] + config['limits']['max_wall_hours']*3600:
+                        raise CodexBudgetExhausted('research duration exhausted before Codex call')
+                    elapsed_campaign = True
+                maximum = config['limits']['max_codex_calls']
+                if maximum is not None and row['codex_calls'] >= maximum:
                     raise CodexBudgetExhausted(f"campaign Codex-call budget exhausted ({row['codex_calls']}/{maximum})")
+            if not elapsed_campaign:
+                max_calls = int(os.getenv("LOCO_CODEX_MAX_CALLS", "30"))
             count = con.execute("SELECT COUNT(*) AS n FROM events WHERE kind='CODEX_CALL'").fetchone()["n"]
-            if count >= max_calls:
+            if max_calls is not None and count >= max_calls:
                 raise CodexBudgetExhausted(f"global Codex call budget exhausted ({count}/{max_calls}); LOCO_CODEX_MAX_CALLS")
             now = time.time()
             con.execute("INSERT INTO events(run_id,time,kind,payload_json) VALUES(NULL,?,?,?)", (now, "CODEX_CALL", json.dumps({"role": role, "count": count+1, "campaign_id": campaign_id})))

@@ -24,12 +24,14 @@ REPO = Path(__file__).resolve().parents[1]
 def run_worker_once(store, manifest_path, runtime, personal_mode_authorized=False, cancel=None,
                     expected_run_id=None):
     with gpu_lock(runtime):
-        duration = max_job_seconds()
         if expected_run_id:
             expected = store.get_run(expected_run_id)
             if not expected or expected['status'] != 'QUEUED':
                 raise ValueError('expected campaign job is not queued')
-            duration = min(duration, int(json.loads(expected['config_json']).get('timeout_seconds', duration)))
+            expected_config = json.loads(expected['config_json'])
+            duration = min(max_job_seconds(expected_config), int(expected_config.get('timeout_seconds', max_job_seconds(expected_config))))
+        else:
+            duration = max_job_seconds()
         job = claim_next(store, max_duration=duration, expected_run_id=expected_run_id)
         if not job:
             return {"status": "IDLE"}
@@ -96,8 +98,27 @@ def _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=None,
         campaigns, campaign_id = campaign
         row = campaigns.get(campaign_id)
         limits = json.loads(row['config_json'])['limits']
+        config = json.loads(row['config_json'])
+        from orchestrator.campaign_config import time_based
+        if time_based(config):
+            context = next((json.loads(e['payload_json']) for e in campaigns.events(campaign_id, 10000)
+                            if e['kind']=='STARTING_CONTEXT'), {})
+            prompt += '\nOperator starting context (references, never automatic weight reuse): '+json.dumps(context)
+            prompt += (f"\nDesired training time per model: {limits['training_minutes_per_experiment']*60:g} seconds. "
+                       "Choose model, optimizer steps/epochs and exposures to make scientifically useful use of that allowance; "
+                       "do not copy a historical short schedule by default. Justify estimated training time and any shorter "
+                       "schedule in evaluation_plan. Training time excludes validation, smoke checks and scoring. "
+                       "The plan job timeout must include its estimated smoke, import and validation overhead, separate from training. "
+                       "Preserve all declared arms, seeds and controls; never stretch or truncate a frozen plan.")
         remaining = int(row['created_at'] + limits['max_wall_hours'] * 3600 - __import__('time').time())
-        if remaining < 10:
+        if time_based(config):
+            reserve = 50 if role=='implementer' else 0  # 20s import probe + 30s mandatory CPU tests
+            if remaining < reserve+10:
+                from orchestrator.autonomy import CampaignHalted
+                campaigns.set_status(campaign_id,'LIMIT_REACHED','insufficient research duration for '+role+' and required validation')
+                raise CampaignHalted('insufficient research duration for '+role+' and required validation')
+            remaining -= reserve
+        elif remaining < 10:
             raise RuntimeError('campaign wall-time budget exhausted before Codex call')
         kwargs['timeout'] = min(int(kwargs.get('timeout', 180)), remaining)
         recent_failures = [e for e in campaigns.events(campaign_id,100)
@@ -289,10 +310,10 @@ def add_research_proposals(store, prompt, count=3, campaign=None, personal_mode=
         campaigns, cid = campaign
         limits = json.loads(campaigns.get(cid)['config_json'])['limits']
         usage = campaigns.usage(cid)
-        remaining = {'max_jobs':limits['max_experiments']-usage['experiments'],
-                     'max_gpu_seconds':limits['max_gpu_hours']*3600-usage['gpu_seconds'],
-                     'max_wall_seconds':limits['max_wall_hours']*3600-usage['wall_seconds'],
-                     'max_job_seconds':limits['max_job_seconds']}
+        wall = max(0, limits['max_wall_hours']*3600-usage['wall_seconds'])
+        remaining = {'max_jobs': (max(0, int(wall)) if limits['max_experiments'] is None else limits['max_experiments']-usage['experiments']),
+                     'max_gpu_seconds':min(wall, limits['max_gpu_hours']*3600-usage['gpu_seconds']),
+                     'max_wall_seconds':wall, 'max_job_seconds':limits['max_job_seconds']}
         instruction += '\nRemaining ceilings for ONE comparison (not spending targets): '+json.dumps(remaining)
     def request(feedback, attempt):
         output = budgeted_invoke(store, "researcher", REPO, schema, instruction + feedback, timeout=240,
@@ -312,6 +333,11 @@ def add_research_proposals(store, prompt, count=3, campaign=None, personal_mode=
             for reference in plan['baselines']: verify_baseline(store, reference, REPO)
             if campaign and any(plan['resource_budget'][key] > allowance for key,allowance in remaining.items()):
                 raise ValueError('proposed comparison exceeds remaining authorized campaign allowance')
+            if campaign:
+                from orchestrator.campaign_config import time_based, plan_seconds
+                configuration=json.loads(campaigns.get(cid)['config_json'])
+                if time_based(configuration) and plan_seconds(plan,configuration)>remaining['max_wall_seconds']:
+                    raise ValueError('complete comparison including frozen evaluation and critique cannot fit remaining research duration')
         return output['proposals']
     _, proposals, _ = _with_agent_correction(store, campaign, 'researcher', request, validate)
     for proposal in proposals:
@@ -388,6 +414,13 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
     if not row:
         raise KeyError(hypothesis_id)
     proposal = json.loads(row["proposal_json"])
+    if campaign:
+        from orchestrator.campaign_config import time_based, plan_seconds, remaining_wall
+        campaign_row=campaign[0].get(campaign[1]);configuration=json.loads(campaign_row['config_json'])
+        if time_based(configuration) and remaining_wall(campaign_row,__import__('time').time()) < plan_seconds(proposal['experiment_plan'],configuration)+60:
+            from orchestrator.autonomy import CampaignHalted
+            campaign[0].set_status(campaign[1],'LIMIT_REACHED','insufficient research duration to implement and execute complete plan')
+            raise CampaignHalted('insufficient research duration to implement and execute complete plan')
     if repair_feedback is None:
         tree = create_candidate_worktree(REPO, hypothesis_id)
     else:
@@ -397,7 +430,7 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
     allowed_file = tree / "candidates" / hypothesis_id / "model.py"
     schema = REPO / "schemas" / "implementation.schema.json"
     instruction = (
-        f"Write a minimal, falsifiable pilot implementation of hypothesis {hypothesis_id} "
+        f"Implement the exact declared scientific experiment for hypothesis {hypothesis_id} "
         f"NOW as the module candidates/{hypothesis_id}/model.py "
         "inside your assigned worktree. The fixed trusted runner calls "
         "train(config: dict, allowed_train_manifest: Path, output_dir: Path), then "
@@ -441,8 +474,19 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
     import subprocess
     from orchestrator.experiment_runner import verify_candidate_source
     def request(feedback, attempt):
+        timeout = 600
+        if campaign:
+            from orchestrator.campaign_config import time_based, plan_seconds, remaining_wall
+            row=campaign[0].get(campaign[1]);configuration=json.loads(row['config_json'])
+            if time_based(configuration):
+                needed=plan_seconds(proposal['experiment_plan'],configuration)+50
+                timeout=min(timeout,int(remaining_wall(row,__import__('time').time())-needed))
+                if timeout < 10:
+                    from orchestrator.autonomy import CampaignHalted
+                    campaign[0].set_status(campaign[1],'LIMIT_REACHED','insufficient research duration to implement and execute complete plan')
+                    raise CampaignHalted('insufficient research duration to implement and execute complete plan')
         response = budgeted_invoke(store, "implementer", REPO, schema, instruction + feedback,
-                                   timeout=600, worktree=tree, campaign=campaign, personal_mode=personal_mode,
+                                   timeout=timeout, worktree=tree, campaign=campaign, personal_mode=personal_mode,
                                    evidence_run_ids=[b['run_id'] for b in proposal.get('experiment_plan',{}).get('baselines',[])])
         _validation_event(store, campaign, 'IMPLEMENTER_RESPONSE', 'implementer',
                           hypothesis_id=hypothesis_id, attempt=attempt+1, response=response['response'])
@@ -512,8 +556,15 @@ def queue_candidate(store, hypothesis_id, candidate_id, category, stage, device,
     manifest, paths = load_manifest(manifest_path)
     if not any(item["category"] == category for item in manifest["images"]):
         raise ValueError("category absent from authorized good-only manifest")
-    enforce(store, next_gpu_seconds=seconds if device == "cuda" else 0)
-    timeout = min(int(seconds), max_job_seconds())
+    from orchestrator.campaign_config import time_based
+    campaign_config = None
+    if campaign_id:
+        from orchestrator.campaign_state import CampaignState
+        campaign_row = CampaignState(store).get(campaign_id)
+        if not campaign_row: raise ValueError('unknown campaign')
+        campaign_config = json.loads(campaign_row['config_json'])
+    enforce(store, next_gpu_seconds=seconds if device == "cuda" else 0, campaign_id=campaign_id)
+    timeout = min(int(seconds), campaign_config['limits']['max_job_seconds'] if campaign_config and time_based(campaign_config) else max_job_seconds())
     if effective_config is None and seed is not None and (candidate_id != 'masked_context_ablation' or seed not in {7, 17, 29}):
         raise ValueError('seed is restricted to the predeclared masked-context study seeds')
     cfg = {"device": device, "size": 128, "epochs": 1, "seed": 7 if seed is None else seed,
@@ -538,6 +589,9 @@ def queue_candidate(store, hypothesis_id, candidate_id, category, stage, device,
         if campaign_name:
             cfg["campaign_name"] = campaign_name
         cfg["execution_mode"] = "personal_bwrap" if personal_mode_authorized else "isolated"
+    if campaign_config and time_based(campaign_config):
+        cfg['campaign_configuration_version'] = campaign_config['configuration_version']
+        cfg['training_budget_seconds'] = campaign_config['limits']['training_minutes_per_experiment']*60
     candidate_tree = REPO / "candidates" / "worktrees" / candidate_id
     if frozen:
         git_sha = origin['git_sha']

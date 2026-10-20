@@ -2,6 +2,7 @@
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from dashboard.campaign_timing import campaign_timing_card, training_seconds
 from dashboard.cumulative import progress_card
 from dashboard.data_access import cumulative_progress
 
@@ -16,6 +17,7 @@ from orchestrator.decision_engine import pareto_frontier
 page_intro("Results", "Measured runs and development previews. Synthetic proxies are never official LOCO scores.")
 progress_card(cumulative_progress())
 runs = list_runs(500)
+campaign_timing_card(None, runs)
 summary = research_summary(runs)
 models_tab, heatmaps_tab, compare_tab = st.tabs(["Models", "Heatmaps", "Compare"])
 
@@ -29,6 +31,9 @@ with models_tab:
         selected_feedback = feedback[chosen_card]
         with st.container(border=True):
             development_result_card(selected_feedback)
+            selected_run=next((r for r in runs if r['run_id']==selected_feedback['run_id']),{})
+            duration=training_seconds(selected_run)
+            st.metric('Training duration', 'Unavailable' if duration is None else f'{duration:.1f} s')
             st.write('**Localization preview**')
             sample_index = st.number_input('Development sample',0,164,47,1,key='card_sample')
             try:
@@ -56,7 +61,7 @@ with models_tab:
                 st.info("No runs match this search.")
         else:
             table = experiment_rows(filtered)
-            visible = [{k: row[k] for k in ("Model", "Type", "Status", "Synthetic localization AUROC", "Latency (p95)", "GPU slot time", "Date")} for row in table]
+            visible = [{k: row[k] for k in ("Model", "Type", "Status", "Synthetic localization AUROC", "Latency (p95)", "Date")} for row in table]
             st.dataframe(visible, hide_index=True, width="stretch", height=min(360, 38 * (len(visible) + 1)),
                          column_config={"Synthetic localization AUROC": st.column_config.TextColumn(help=METRICS["dev_synthetic/pixel_auroc"][1]),
                                         "Latency (p95)": st.column_config.TextColumn(help=METRICS["inference/e2e_ms_p95"][1])})

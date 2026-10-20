@@ -22,7 +22,7 @@ VERSION = 'experiment-plan-v1.0'
 RESERVED = {'device', 'seed', 'category', 'timeout_seconds', 'model_sha256', 'campaign_id',
             'campaign_name', 'execution_mode', 'metric_evaluator_version', 'synthetic_evaluation',
             'cuda_smoke_required', 'inference', 'diagnostics', 'frozen_baseline', 'execution_kind', 'diagnostic_provider',
-            'trusted_source_sha256','data_pin','baseline_effective_configuration'}
+            'trusted_source_sha256','data_pin','baseline_effective_configuration','training_budget_seconds','campaign_configuration_version'}
 REQUIRED_TRAINING_POSITIVE = ('steps', 'batch_size', 'size', 'expected_source_exposures')
 MATCHED_TRAINING_CONTROLS = REQUIRED_TRAINING_POSITIVE + ('expected_optimizer_updates',)
 
@@ -515,11 +515,14 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
         usage = campaigns.usage(campaign_id)
         existing = [r for r in campaigns.runs(campaign_id) if json.loads(r['config_json']).get('plan_sha256') == digest(plan)]
         remaining_cells = len(cells(plan)) - len(existing)
-        if (remaining_cells + usage['experiments'] > limits['max_experiments'] or
+        if ((limits['max_experiments'] is not None and remaining_cells + usage['experiments'] > limits['max_experiments']) or
             budget['max_job_seconds'] > limits['max_job_seconds'] or
             budget['max_gpu_seconds'] > limits['max_gpu_hours']*3600 or
             budget['max_wall_seconds'] > limits['max_wall_hours']*3600):
             raise ValueError('scientific plan exceeds authorized campaign ceilings; no defaults substituted')
+        from orchestrator.campaign_config import time_based, plan_seconds
+        if time_based(cfg) and plan_seconds(plan,cfg) > limits['max_wall_hours']*3600-usage['wall_seconds']:
+            raise BudgetExceeded('complete frozen comparison plus evaluation and critique cannot fit remaining research duration')
         train_arms = [a for a in plan['arms'] if a['execution'] == 'train']
         module = candidate_file(controller.REPO, plan['hypothesis_id']) if train_arms or plan['diagnostics'] else None
         source_hash = sha256(module) if module else ''
@@ -529,7 +532,7 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
                          'benchmark/train_adapter.py','benchmark/feedback_metrics.py','benchmark/feedback_data.py',
                          'schemas/experiment_plan.schema.json','configs/development_feedback.json']
         trusted_files += ['orchestrator/model_registry.py','configs/champion_policy.json',
-                          'orchestrator/state_store.py','orchestrator/campaign_state.py','orchestrator/budgets.py',
+                          'orchestrator/campaign_config.py','orchestrator/state_store.py','orchestrator/campaign_state.py','orchestrator/budgets.py',
                           'orchestrator/gpu_queue.py','orchestrator/codex_runner.py','orchestrator/codex_sandbox.py',
                           'benchmark/data_guard.py','benchmark/validation.py','benchmark/metrics_v2.py',
                           'benchmark/metrics.py','benchmark/inference_benchmark.py','pyproject.toml',
@@ -576,7 +579,7 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
                                  budget['max_wall_seconds']-(time.time()-record['registered_at']))
             if min(remaining_gpu, remaining_wall) < budget['max_job_seconds']:
                 raise BudgetExceeded('insufficient authorized time for the exact planned job allowance')
-            enforce(store, next_gpu_seconds=budget['max_job_seconds'], runtime=runtime)
+            enforce(store, next_gpu_seconds=budget['max_job_seconds'], runtime=runtime, campaign_id=campaign_id)
             effective = training_settings(plan, arm)
             verify_inputs()
             effective.update(seed=seed, inference=arm['inference'], diagnostics=plan['diagnostics'],
@@ -635,6 +638,9 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
             verify_inputs()
     except (CampaignHalted, BudgetExceeded) as exc:
         error = str(exc)
+        from orchestrator.campaign_config import time_based
+        if time_based(cfg) and campaigns.get(campaign_id)['status']=='RUNNING':
+            campaigns.set_status(campaign_id,'LIMIT_REACHED',error)
     except PermissionError as exc:
         record_result(store, campaigns, campaign_id, plan, campaigns.runs(campaign_id), runtime, str(exc))
         raise

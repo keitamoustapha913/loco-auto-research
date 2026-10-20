@@ -12,22 +12,64 @@ uv run --extra all loco-lab start
 uv run --extra all loco-lab research start --config APPROVED_CONFIG
 ```
 
-`APPROVED_CONFIG` is a private operator-owned campaign YAML with reviewed budgets and explicit
-shared-UID Bubblewrap risk acceptance. Templates remain **unauthorized**. Startup does not grant
-campaign authorization. `configs/autonomy_real_feedback.yaml` proposes two serialized jobs,
-120 seconds each, four GPU-slot minutes, one wall hour and eight Codex calls.
+`APPROVED_CONFIG` is a private operator-owned YAML with the existing dataset,
+research, tracking and security settings. The normal template is `configs/autonomy.yaml`;
+it remains **unauthorized**. Service startup never authorizes research.
 
-Codex calls have two separate ceilings: the campaign YAML's `max_codex_calls`
-and the lifetime ledger allowance `LOCO_CODEX_MAX_CALLS` (default 30). A new
-campaign does not reset the global allowance. `loco-lab research status` shows
-both counts, limits and remaining allowances, plus completed and failed agent
-invocations. Both reservations are admitted atomically; a rejected request
-consumes neither allowance and stops the worker as `BUDGET_EXHAUSTED`, without
-retrying or counting a research failure. Admitted calls remain charged on CLI
-failure or worker crash; a crash between admission and invocation is retained
-conservatively rather than refunded or replayed. Historical reservation counts
-are preserved and explicitly labeled legacy where they may include blocked
-requests. Changing an operator ceiling requires separate authorization.
+The only research budget choices are elapsed campaign time and desired training time per model:
+
+```yaml
+campaign:
+  name: juice-bottle-research
+  dataset: juice_bottle
+  mode: autonomous
+  gpu_device: cuda
+  start_from: previous_best  # or new
+limits:
+  research_hours: 4
+  training_minutes_per_experiment: 15
+```
+
+Keep the existing `research`, `tracking` and `security` sections in your private
+configuration. Omitted sections inherit the safe template defaults; shared-UID
+Bubblewrap risk acceptance remains false unless explicitly authorized by the operator.
+
+- **Research hours** count all elapsed time: agents, implementation, training, CPU
+  evaluation, critique, waiting and pauses. Restart/resume does not reset the clock.
+  Each independently authorized new campaign receives its own clock.
+- **Training minutes** are the learning allowance, including candidate training-data
+  loading and CUDA synchronization, excluding smoke checks, calibration and evaluation.
+  Codex chooses steps, epochs and exposures and must justify its estimated training
+  duration or a shorter schedule. This is a ceiling/target, not fabricated training time:
+  convergence or a justified experiment can finish earlier. Actual duration is recorded.
+- **Previous best** verifies eligible retained references for the same dataset and
+  supplies accumulated evidence. Incompatible evaluation cohorts stay separate.
+  Missing eligible references cause a clear error; choose `new` for an independent
+  start. Weights are reused only when explicitly requested by a validated plan.
+- **New** creates independent campaign state without replacing retained models,
+  deleting history or automatically starting from their weights. Past findings remain
+  available as scientific evidence.
+
+The existing scheduler serializes jobs. Trusted code enforces separate training and
+whole-job deadlines, reserves time for complete comparisons, normal-only CPU feedback
+and critique, and stops rather than reducing arms, seeds or training settings. Frozen
+scientific plans retain their original schedules and resource ceilings. Incomplete work
+stays INCOMPLETE and cannot support promotion. Three consecutive operational failures
+still stop a campaign; disk limits, sandbox gates and bounded repairs remain in force.
+
+**Migration:** replace the entire old `limits` block with the two fields above; do
+not mix formats. Existing seven-limit authorizations are still accepted **as legacy
+bounded studies**, with their explicit limits and global ceilings unchanged. They are
+never silently expanded or rewritten. New time-based campaigns neither require nor
+consume the lifetime allowances in `LOCO_GPU_BUDGET_HOURS`,
+`LOCO_JOB_TIMEOUT_SECONDS` or `LOCO_CODEX_MAX_CALLS`; historical counters are preserved
+for auditing. Those environment variables still govern legacy/standalone commands.
+No environment-file edit is required for a new-format campaign.
+
+Home, Results and campaign reports show elapsed research and measured training time.
+Technical GPU-slot/call counters remain available in System diagnostics and ledger
+records. Training timing protocol is recorded in `training_timing.json`, including
+failed/time-limited learning attempts, and synchronized through the existing outbox.
 
 Within that authorization, Codex investigates, implements, trains on good images, receives
 frozen-model real-development measurements, critiques and selects its next experiment.

@@ -43,6 +43,7 @@ def test_second_arm_comes_from_saved_measured_decision(tmp_path):
     from orchestrator.autonomy import load_campaign_config
     from pathlib import Path
     cfg = load_campaign_config(Path(__file__).resolve().parents[1] / 'configs' / 'autonomy.yaml')
+    cfg['campaign']['start_from']='new'
     cfg['research']['study'] = 'masked_context_ablation'
     cid = campaigns.create(cfg)
     prior = {'run_id': 'measured-combined', 'status': 'REVIEWED',
