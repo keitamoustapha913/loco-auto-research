@@ -1,0 +1,190 @@
+"""Agent contract and trusted static admission share controller-owned rules.
+
+No candidate import/execution, inferred historical defaults or scientific rewrites.
+"""
+from __future__ import annotations
+
+import ast
+import copy
+import json
+import re
+from pathlib import Path
+
+
+class PlanningValidationError(ValueError):
+    def __init__(self, issues):
+        self.issues=issues
+        super().__init__('Scientific plan rejected: '+json.dumps(issues,sort_keys=True))
+
+
+def setting_pattern():
+    from orchestrator.experiment_plan import RESERVED
+    return r'^(?!plan_)(?!(?:'+ '|'.join(re.escape(k) for k in sorted(RESERVED))+r')$)\S+$'
+
+
+def local_issues(plan):
+    """Semantic key/value checks independent of any candidate implementation."""
+    from orchestrator.experiment_plan import RESERVED,training_settings
+    issues=[]
+    for arm in plan['arms']:
+        settings=training_settings(plan,arm)
+        bad=sorted(k for k in settings if k in RESERVED or k.startswith('plan_'))
+        if bad:issues.append({'code':'RESERVED_TRAINING_FIELDS','arm':arm['arm_id'],'fields':bad,
+            'message':'Remove controller-owned keys from scientific settings; the controller supplies them.'})
+        missing=[k for k in plan['controlled_variables'] if k not in settings]
+        if missing:issues.append({'code':'CONTROLLED_VARIABLE_KEYS','arm':arm['arm_id'],'keys':missing,
+            'available_keys':sorted(k for k in settings if k not in RESERVED and not k.startswith('plan_')),
+            'message':'Use actual declared setting keys, with matching values in every arm, not prose.'})
+    for key in plan['controlled_variables']:
+        values=[training_settings(plan,a).get(key) for a in plan['arms']]
+        if all(key in training_settings(plan,a) for a in plan['arms']) and any(v!=values[0] for v in values[1:]):
+            issues.append({'code':'CONTROLLED_VARIABLE_VALUES','key':key,'values':values,'message':'A declared controlled value differs between arms.'})
+    return issues
+
+
+def baseline_capability(store, reference, repo_root):
+    from orchestrator.experiment_plan import verify_baseline,REQUIRED_TRAINING_POSITIVE
+    source,row=verify_baseline(store,reference,repo_root)
+    configuration=json.loads(row['config_json'])
+    tree=ast.parse(source)
+    load=next((n for n in tree.body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name=='load'),None)
+    # Match train_adapter.load_predictor: **kwargs alone is not acknowledgement.
+    named=bool(load and 'inference_config' in [a.arg for a in load.args.args+load.args.kwonlyargs])
+    provenance_path=Path(row['artifact_dir'])/'run_manifest.json'
+    provenance=json.loads(provenance_path.read_text())
+    audit=provenance.get('training_audit',{})
+    replication=all(k in configuration for k in REQUIRED_TRAINING_POSITIVE+('expected_optimizer_updates',)) and all(k in audit for k in ('seed','optimizer_updates','source_exposures'))
+    return {'reference':reference,'configuration':configuration,'recorded_inference':configuration.get('inference',{}),
+            'named_inference_config_parameter':named,'requires_exact_inference':True,
+            'replication_audit_evidence_available':replication,
+            'replication_note':'Exact source/configuration may be proposed for additional seeds; implementation validation still applies.' if replication else 'Missing explicit training settings/audit; do not invent defaults or claim matched seed replication.'}
+
+
+def evidence_classification(plan, rows=None):
+    """Trusted eligibility ceiling; completion, measured matching and policy follow."""
+    from orchestrator.experiment_plan import MATCHED_TRAINING_CONTROLS,digest
+    from orchestrator.model_registry import SPRO,AP,FPR,LATENCY,PARAMETERS,MEMORY,policy
+    reasons=[]
+    if plan['kind']!='controlled_comparison':reasons.append('Agent requested exploratory evidence; no automatic upgrade.')
+    if len(plan['arms'])<2:reasons.append('At least two arms are required.')
+    if len(plan['seeds'])<policy()['minimum_seeds']:reasons.append('Insufficient independent training seeds.')
+    if any(a.get('fixed_checkpoint_seed') is not None for a in plan['arms']):
+        reasons.append('Single frozen training seed is exploratory, not independent baseline seed replication.')
+    if not set(MATCHED_TRAINING_CONTROLS)<=set(plan['controlled_variables']):
+        reasons.append('Training settings/exposures/optimizer updates are not all declared matched controls.')
+    requested={r['key'] for r in plan['required_measurements'] if r['source']=='real'}
+    if not {SPRO,AP,FPR,LATENCY,PARAMETERS,MEMORY}<=requested:reasons.append('Required real-localization and deployment endpoints are not preregistered.')
+    if not plan['completion_criteria']:reasons.append('Predeclared acceptance/completion criteria are missing.')
+    if rows is not None:
+        for arm in plan['arms']:
+            selected=[r for r in rows if json.loads(r['config_json']).get('plan_sha256')==digest(plan) and json.loads(r['config_json']).get('plan_arm')==arm['arm_id']]
+            configs=[json.loads(r['config_json']) for r in selected]
+            if len({c.get('seed') for c in configs})!=len(plan['seeds']):reasons.append('Recorded independent training seeds do not cover an arm.')
+            for c in configs:
+                original=c.get('baseline_effective_configuration',c)
+                if any(k not in original or original[k]!=dict(plan['training'],**arm['training_overrides']).get(k) for k in MATCHED_TRAINING_CONTROLS):
+                    reasons.append('Recorded baseline learning configuration does not match controlled training.')
+    return {'promotion_eligible':not reasons,'evidence_level':'CONTROLLED' if not reasons else 'EXPLORATORY',
+            'reasons':list(dict.fromkeys(reasons)),
+            'message':'Eligibility ceiling only; complete measured evidence, independent checkpoints, integrity and policy still required.'}
+
+
+def inspect_plan(plan, store=None, repo_root=None):
+    """Collect all previously observed failure classes, without modifying input."""
+    from orchestrator.experiment_plan import REPO,validate_plan
+    from jsonschema import validate, ValidationError
+    try:
+        validate(plan,json.loads((REPO/'schemas/experiment_plan.schema.json').read_text()))
+    except ValidationError as exc:
+        return {'valid':False,'errors':[{'code':'PLAN_SCHEMA','message':exc.message,'path':list(exc.path)}],
+                'notices':[],'scientific_eligibility':{'promotion_eligible':False},'baseline_capabilities':{}}
+    issues=local_issues(plan)
+    try:validate_plan(plan)
+    except PlanningValidationError:pass
+    except Exception as exc:issues.append({'code':'PLAN_CONTRACT','message':str(exc)})
+    capabilities={}
+    if store is not None:
+        for ref in plan['baselines']:
+            try:capabilities[ref['baseline_id']]=baseline_capability(store,ref,repo_root or REPO)
+            except Exception as exc:issues.append({'code':'BASELINE_INTEGRITY','baseline_id':ref['baseline_id'],'message':str(exc)})
+        for arm in plan['arms']:
+            if not arm['baseline_by_seed']:continue
+            for bid in set(arm['baseline_by_seed'].values()):
+                cap=capabilities.get(bid)
+                if not cap:continue
+                if arm['inference']!=cap['recorded_inference']:
+                    issues.append({'code':'BASELINE_INFERENCE_NOT_EXACT','arm':arm['arm_id'],'baseline_id':bid,
+                        'expected':cap['recorded_inference'],'requested':arm['inference'],
+                        'message':'Historical frozen arms must use the exact recorded inference configuration.'})
+                if arm['inference'] and not cap['named_inference_config_parameter']:
+                    issues.append({'code':'UNSUPPORTED_BASELINE_INFERENCE_CONFIG','arm':arm['arm_id'],'baseline_id':bid,
+                        'message':'Recorded load() has no named inference_config parameter; no new settings can be passed.'})
+                for key in set(plan['controlled_variables'])|{'size'}:
+                    expected=cap['configuration'].get(key)
+                    requested=dict(plan['training'],**arm['training_overrides']).get(key)
+                    if key not in cap['configuration'] or expected!=requested:
+                        issues.append({'code':'UNVERIFIABLE_BASELINE_CONTROL','arm':arm['arm_id'],'baseline_id':bid,'key':key,
+                            'expected':expected,'requested':requested,'message':'Cannot assert matching unrecorded or different historical values.'})
+    classification=evidence_classification(plan)
+    if issues:
+        classification.update(promotion_eligible=False,evidence_level='EXPLORATORY')
+        classification['reasons'].append('Semantic admission failed; no execution or promotion permitted.')
+    notices=[] if classification['promotion_eligible'] else [{'code':'NONPROMOTABLE_EVIDENCE_LEVEL',**classification}]
+    return {'valid':not issues,'errors':issues,'notices':notices,'scientific_eligibility':classification,
+            'baseline_capabilities':capabilities}
+
+
+def admit_plan(plan, store, repo_root=None):
+    report=inspect_plan(plan,store,repo_root)
+    if report['errors']:raise PlanningValidationError(report['errors'])
+    return report
+
+
+def planning_instructions(capabilities=()):
+    from orchestrator.experiment_plan import RESERVED,REQUIRED_TRAINING_POSITIVE,MATCHED_TRAINING_CONTROLS
+    return json.dumps({'contract':'controller-planning-v2','controller_owned_fields':sorted(RESERVED),
+        'controller_owned_prefix':'plan_','required_positive_training_keys':list(REQUIRED_TRAINING_POSITIVE),
+        'required_nonnegative_training_key':'expected_optimizer_updates',
+        'controlled_variables':'Names of real training keys, not sentences. Values must be declared, equal across arms and recorded in every frozen baseline.',
+        'matched_training_controls_for_confirmation':list(MATCHED_TRAINING_CONTROLS),
+        'frozen_inference':'Copy recorded_inference exactly; {} encodes [] in wire settings. Never invent loader options.',
+        'fixed_checkpoint':'Declare the actual fixed seed; pairing indices are not independent baseline training. Such comparisons are exploratory and cannot confirm a champion.',
+        'evidence_level':'Agent kind is intent only. Trusted admission/completion derives eligibility; text cannot authorize promotion.',
+        'scientific_changes':'Invalid scientific settings must be revised by the agent, never automatically stripped, defaulted or reinterpreted.',
+        'frozen_baselines':list(capabilities)},sort_keys=True)
+
+
+def constrain_output_schema(schema, capabilities=()):
+    """Generate wire constraints from the same rules used by admission."""
+    result=copy.deepcopy(schema)
+    def visit(node):
+        if not isinstance(node,dict):return
+        props=node.get('properties',{})
+        if {'training','controlled_variables','arms','seeds'}<=props.keys():
+            pair=props['training'].get('items',{})
+            if pair.get('properties',{}).get('name') is not None:
+                pair['properties']['name']['pattern']=setting_pattern()
+                props['controlled_variables']['items']['pattern']=setting_pattern()
+                props['controlled_variables']['description']='Actual common training setting key names, with equal recorded values; never prose.'
+                arm=props['arms']['items']
+                arm['properties']['training_overrides']['items']['properties']['name']['pattern']=setting_pattern()
+                if capabilities:
+                    train=copy.deepcopy(arm);frozen=copy.deepcopy(arm)
+                    train['properties']['execution']={'const':'train','type':'string'}
+                    frozen['properties']['execution']={'const':'frozen','type':'string'}
+                    choices=[]
+                    for cap in capabilities:
+                        wire=[{'name':k,'value_json':json.dumps(v,sort_keys=True)} for k,v in cap['recorded_inference'].items()]
+                        if wire not in choices:choices.append(wire)
+                    frozen['properties']['inference']['enum']=choices
+                    # source_arm_id interventions use newly implemented predictor
+                    # contracts, so historical constraints apply when that ID is empty.
+                    frozen['properties']['source_arm_id']={'type':'string','const':''}
+                    dependent=copy.deepcopy(arm);dependent['properties']['execution']={'const':'frozen','type':'string'}
+                    dependent['properties']['source_arm_id']['minLength']=1
+                    props['arms']['items']={'anyOf':[train,frozen,dependent]}
+            return
+        for name in ('properties','$defs','definitions'):
+            for child in node.get(name,{}).values():visit(child)
+    visit(result)
+    return result

@@ -20,7 +20,7 @@ def lab(tmp_path):
     repo=tmp_path/'repo';repo.mkdir()
     for name in ('baseline','challenger'):
         folder=repo/'candidates'/name;folder.mkdir(parents=True)
-        (folder/'model.py').write_text('# artificial '+name+'\n')
+        (folder/'model.py').write_text('# artificial '+name+'\ndef load(checkpoint_manifest, device="cpu", inference_config=None):\n    raise RuntimeError("fixture only; never executed")\n')
     for args in (['init','-q'],['add','.'],['-c','user.name=Fixture','-c','user.email=fixture@localhost','commit','-qm','fixture']):
         subprocess.run(['git','-C',str(repo),*args],check=True,capture_output=True)
     commit=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
@@ -307,11 +307,11 @@ def test_exact_frozen_multimethod_matrix_executes_and_promotes(lab,monkeypatch,t
     monkeypatch.setattr(controller,'run_worker_once',worker)
     monkeypatch.setattr(development_feedback,'evaluate_run',lambda runtime,s,rid,**kw:latest_summary(s,rid))
     result=execute_plan(store,c,cid,tmp_path,p)
-    assert result['status']=='COMPLETE_CONTROLLED',result['problems']
+    assert result['status']==('COMPLETE_EXPLORATORY' if fixed else 'COMPLETE_CONTROLLED'),result['problems']
     assert len(c.runs(cid))==6
     d=registry.consider_comparison(store,c,cid,p,result,repo)
-    assert d[0]['status']=='PROMOTED',d
-    assert registry.progress(store)['cohorts'][0]['champion']['candidate_id']=='challenger'
+    assert d[0]['status']==('RETAIN_CHAMPION' if fixed else 'PROMOTED'),d
+    assert registry.progress(store)['cohorts'][0]['champion']['candidate_id']==('baseline' if fixed else 'challenger')
     if fixed:
         assert [cell['training_seed'] for cell in result['cells'][:3]]==[3,3,3]
         assert [cell['seed'] for cell in result['cells'][:3]]==list(seeds)

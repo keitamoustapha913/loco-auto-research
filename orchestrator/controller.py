@@ -49,6 +49,7 @@ def run_worker_once(store, manifest_path, runtime, personal_mode_authorized=Fals
 
 def _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=None, **kwargs):
     requested = kwargs.pop('evidence_run_ids', ())
+    capabilities=[]
     if kwargs.get('personal_mode') and role in {'researcher','implementer','critic'}:
         from orchestrator.model_registry import initialize, recover_comparisons, scientific_memory, canonical
         initialize(store,repo_root)
@@ -72,6 +73,11 @@ def _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=None,
                    'An exploratory record score is not a confirmed improvement. Current retained heads: '+
                    json.dumps([{k:c[k] for k in ('cohort_id','state','champion')} for c in memory['cohorts']]))
         kwargs['reference_files']=files
+        if role=='researcher':
+            from orchestrator.planning_contract import baseline_capability
+            for item in evidence:
+                ref=item.get('frozen_reference')
+                if ref:capabilities.append(baseline_capability(store,ref,repo_root))
         if evidence:
             # Full evidence is mounted read-only. Repeating every configuration,
             # critique and feedback block here needlessly exhausts agent context.
@@ -110,13 +116,24 @@ def _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=None,
                        'but never use anomaly images/masks to fit model weights, normalization or thresholds. '
                        'Custom split, not official full-test performance. Missing AU-sPRO is unavailable, not zero. '
                        + json.dumps(feedback))
+    if role=='researcher':
+        from orchestrator.planning_contract import planning_instructions
+        prompt += '\nTRUSTED EXECUTABLE PLANNING CONTRACT:\n'+planning_instructions(capabilities)
     if campaign:
         campaigns.reserve_codex_call(campaign_id, role)
         campaigns.event(campaign_id, 'AGENT_STARTED', role=role)
     else:
         store.reserve_codex_call(role)
     try:
-        result = invoke(role, repo_root, schema, prompt, **kwargs)
+        if role=='researcher' and schema is not None:
+            import tempfile
+            from orchestrator.planning_contract import constrain_output_schema
+            with tempfile.TemporaryDirectory(prefix='loco-planning-contract-') as folder:
+                generated=Path(folder)/'schema.json'
+                generated.write_text(json.dumps(constrain_output_schema(json.loads(Path(schema).read_text()),capabilities)))
+                result=invoke(role,repo_root,generated,prompt,**kwargs)
+        else:
+            result = invoke(role, repo_root, schema, prompt, **kwargs)
     except Exception as exc:
         if campaign:
             campaigns.event(campaign_id, 'AGENT_FAILED', role=role, error=str(exc))
@@ -174,10 +191,12 @@ def _validate_research_proposals(store, proposals, count, require_gpu_pilot):
             raise ValueError(f"duplicate research proposal: {proposal['hypothesis_id']}; "
                              f"matches {duplicate['hypothesis_id']}: {duplicate.get('claim', '')} "
                              f"Controlled change: {duplicate.get('controlled_change', '')}")
-        from orchestrator.experiment_plan import validate_plan
         if 'experiment_plan' not in proposal:
             raise ValueError('structured experiment_plan required for newly generated hypotheses')
-        validate_plan(proposal['experiment_plan'], proposal['hypothesis_id'])
+        if proposal['experiment_plan'].get('hypothesis_id')!=proposal['hypothesis_id']:
+            raise ValueError('plan hypothesis identity differs from its proposal')
+        from orchestrator.planning_contract import admit_plan
+        admit_plan(proposal['experiment_plan'],store,REPO)
         prior.append(proposal)
 
 
@@ -466,6 +485,14 @@ def queue_candidate(store, hypothesis_id, candidate_id, category, stage, device,
         raise ValueError('structured experiment plan must use loco-lab research; refusing default queue settings')
     if candidate_id != "toy_normal_ae" and not personal_mode_authorized and os.getenv("LOCO_SANDBOX_VERIFIED") != "1":
         raise PermissionError("Operator must verify OS isolation before queueing untrusted candidates")
+    if effective_config is not None and effective_config.get('plan_sha256'):
+        from orchestrator.planning_contract import admit_plan
+        with store.connect() as con:
+            registered=con.execute("SELECT payload_json FROM campaign_events WHERE campaign_id=? AND kind='EXPERIMENT_PLAN_REGISTERED'",
+                                   (campaign_id,)).fetchall()
+        record=next((json.loads(r[0]) for r in registered if json.loads(r[0])['plan_sha256']==effective_config['plan_sha256']),None)
+        if record is None:raise ValueError('planned queue admission requires a registered validated protocol')
+        admit_plan(record['plan'],store,REPO)
     frozen = (effective_config or {}).get('frozen_baseline')
     if frozen:
         from orchestrator.experiment_plan import verify_baseline

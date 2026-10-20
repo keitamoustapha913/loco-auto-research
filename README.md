@@ -244,10 +244,9 @@ The initial conservative policy requires:
 
 - At least three fixed challenger training seeds and the exact retained checkpoint
   among the baseline evaluations. A baseline can have matched independent training
-  seeds, or explicitly declare `fixed_checkpoint_seed` for a single frozen incumbent.
-  In the latter case the actual baseline seed stays fixed; plan seeds identify the
-  challenger pairings, never fabricated independent baseline training. Pin original
-  source, checkpoint and configuration references.
+  seeds for confirmed promotion. An explicitly declared `fixed_checkpoint_seed`
+  remains an exploratory comparison: pairing indices never fabricate independent
+  baseline training. Pin original source, checkpoint and configuration references.
 - Identical development samples, split, evaluator, normal-training fingerprint,
   inference device, timing protocol and threshold-calibration protocol.
 - Positive logical AU-sPRO@5% **and** pixel-AP differences in every paired seed,
@@ -270,8 +269,8 @@ it. Promotion decisions and explicit trusted-operator rollback (`model_registry.
 are append-only; older checkpoints and promotion evidence remain available.
 
 The fixed-incumbent option makes legacy single-seed checkpoints usable without
-modifying their code or inventing audit hooks. Such a promotion is conditional on
-that particular frozen baseline. Baseline seed variation remains unknown; the
+modifying their code or inventing audit hooks. These comparisons cannot confirm
+champion promotion under policy v2. Baseline seed variation remains unknown; the
 critic cannot make a causal method/architecture claim. Original training settings
 are retained, and unequal training budgets must not be listed as controlled.
 
@@ -314,3 +313,30 @@ retention events. Research attempts leave it flat until a supported promotion;
 operator rollbacks are explicitly identified. The chart starts when retention
 tracking began, with exploratory points in gray. Historical record scores are
 not backfilled as verified promotions; one recorded incumbent appears as one point.
+
+### Trusted scientific planning interface
+
+`orchestrator/planning_contract.py` derives the researcher prompt and constrained
+response schema from the same reserved settings and training requirements used
+by trusted admission. Controller-owned fields (including device/category/seed)
+never belong in agent training settings. `controlled_variables` contains actual
+setting keys, with equal declared values and verifiable historical values.
+
+The researcher receives exact frozen configurations, recorded inference options
+and a static loader-signature assessment. A legacy loader without an explicit
+`inference_config` argument requires its recorded empty inference configuration;
+settings cannot be invented from a historical model name. Authentic multi-seed
+references can support a controlled comparison; unrecorded historical training
+settings are never filled from current defaults. Candidate implementation must
+still pass the existing interface and audit checks before execution.
+
+Full semantic checks run before proposal acceptance, registration and GPU queue
+admission. Errors name their code, arm, baseline and offending keys/values. The
+existing bounded correction mechanism returns these errors to the researcher;
+trusted code never changes the submitted science. A valid exploratory plan may
+execute within a separately authorized campaign but cannot confirm promotion.
+`COMPLETE_CONTROLLED` describes exact execution coverage; the separate trusted
+`scientific_eligibility` gate additionally requires matched training controls,
+independent seeds and preregistered real-localization/deployment endpoints. Missing
+work remains `INCOMPLETE`. Measured matching, immutable baseline integrity, paired
+uncertainty and the frozen promotion policy remain necessary after admission.

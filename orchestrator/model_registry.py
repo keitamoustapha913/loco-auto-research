@@ -248,6 +248,9 @@ def consider_comparison(store, campaigns, campaign_id, plan, result, repo_root=R
         if existing:
             decisions.append(existing);continue
         reason=[];intervals={};chosen=None;incumbent=None;head=None;cid=None;fixed_incumbent=False
+        from orchestrator.planning_contract import evidence_classification
+        eligibility=evidence_classification(plan,rows)
+        if not eligibility['promotion_eligible']:reason.extend(eligibility['reasons'])
         if result['status']!='COMPLETE_CONTROLLED' or actual['status']!='COMPLETE_CONTROLLED': reason.append('comparison incomplete or exploratory')
         if context.get('policy_sha256')!=canonical(rules):reason.append('promotion policy absent or changed since registration')
         if len(plan['seeds'])<rules['minimum_seeds']:reason.append('insufficient independent training seeds')
@@ -282,12 +285,11 @@ def consider_comparison(store, campaigns, campaign_id, plan, result, repo_root=R
                             b['configuration'].get('inference',{})!=incumbent['configuration'].get('inference',{})):
                             reason.append('baseline is not the exact incumbent method/configuration')
                     fixed_seed=next(a for a in plan['arms'] if a['arm_id']==plan['baseline_arm_id']).get('fixed_checkpoint_seed')
-                    fixed_incumbent=(fixed_seed is not None and rules['allow_declared_fixed_incumbent'] and
+                    fixed_incumbent=(fixed_seed is not None and
                         all(b['reference']['checkpoint_sha256']==incumbent['reference']['checkpoint_sha256'] for _,b in pairs))
                     # Explicit repeated inference of one fixed incumbent is a
                     # conditional model comparison, never baseline seed replication.
                     for side in (0,1):
-                        if side==1 and fixed_incumbent:continue
                         if len({p[side]['reference']['checkpoint_sha256'] for p in pairs})<len(plan['seeds']):
                             reason.append('repeated checkpoint is not independent seed replication')
                     for a,b in pairs:

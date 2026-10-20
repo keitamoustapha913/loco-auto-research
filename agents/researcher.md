@@ -24,3 +24,17 @@ fixed_checkpoint_seed and pin that same reference in each challenger pairing.
 Its actual training seed remains unchanged. This tests improvement over that
 specific frozen model, not superiority between training-method distributions.
 Do not claim matched training budgets unless the historical evidence supports it.
+
+## Executable planning contract
+Follow the generated TRUSTED EXECUTABLE PLANNING CONTRACT in the task. Its
+controller-owned keys are forbidden in training/overrides; device, category and
+seed are supplied by trusted execution. Use actual setting names in
+controlled_variables, never prose. Declare equal values in every arm and verify
+them in each historical baseline configuration. Unrecorded values are unknown.
+Use the supplied exact recorded_inference for frozen baselines; do not invent
+options for a loader that cannot accept inference_config. If independent matched
+seeds cannot be reproduced from authentic source/configuration, propose an
+explicitly exploratory comparison. Repeated inference of one fixed checkpoint
+cannot support confirmed champion promotion. Agent kind/acceptance prose cannot
+set trusted eligibility. Return a corrected complete plan on semantic rejection;
+do not remove scientifically necessary controls merely to pass validation.

@@ -21,7 +21,10 @@ REPO = Path(__file__).resolve().parents[1]
 VERSION = 'experiment-plan-v1.0'
 RESERVED = {'device', 'seed', 'category', 'timeout_seconds', 'model_sha256', 'campaign_id',
             'campaign_name', 'execution_mode', 'metric_evaluator_version', 'synthetic_evaluation',
-            'cuda_smoke_required', 'inference', 'diagnostics', 'frozen_baseline', 'execution_kind', 'diagnostic_provider'}
+            'cuda_smoke_required', 'inference', 'diagnostics', 'frozen_baseline', 'execution_kind', 'diagnostic_provider',
+            'trusted_source_sha256','data_pin','baseline_effective_configuration'}
+REQUIRED_TRAINING_POSITIVE = ('steps', 'batch_size', 'size', 'expected_source_exposures')
+MATCHED_TRAINING_CONTROLS = REQUIRED_TRAINING_POSITIVE + ('expected_optimizer_updates',)
 
 
 def decode_agent_plan(plan):
@@ -66,6 +69,9 @@ def training_seed(arm, pair_seed):
 def validate_plan(plan, hypothesis_id=None):
     validate(plan, json.loads((REPO / 'schemas/experiment_plan.schema.json').read_text()))
     digest(plan)  # Reject NaN/infinity even inside extensible settings.
+    from orchestrator.planning_contract import local_issues, PlanningValidationError
+    issues=local_issues(plan)
+    if issues:raise PlanningValidationError(issues)
     if hypothesis_id is not None and plan['hypothesis_id'] != hypothesis_id:
         raise ValueError('plan hypothesis identity differs from its proposal')
     ids = [a['arm_id'] for a in plan['arms']]
@@ -92,7 +98,7 @@ def validate_plan(plan, hypothesis_id=None):
             if arm.get('fixed_checkpoint_seed') is not None:raise ValueError('training arm cannot pretend to be a fixed checkpoint')
             if arm['source_arm_id'] or arm['baseline_by_seed']:
                 raise ValueError('training arm cannot silently load a baseline')
-            for name in ('steps', 'batch_size', 'size', 'expected_source_exposures'):
+            for name in REQUIRED_TRAINING_POSITIVE:
                 if isinstance(settings.get(name), bool) or not isinstance(settings.get(name), int) or settings[name] < 1:
                     raise ValueError(f'explicit positive training {name} required')
             updates = settings.get('expected_optimizer_updates')
@@ -151,9 +157,7 @@ def cell_run_id(campaign_id, plan, arm_id, seed):
 
 
 def register_plan(store, campaigns, campaign_id, plan):
-    validate_plan(plan)
-    with store.connect() as con:
-        con.execute('BEGIN IMMEDIATE')
+    def existing(con):
         rows = con.execute("SELECT payload_json FROM campaign_events WHERE campaign_id=? AND kind='EXPERIMENT_PLAN_REGISTERED'",
                            (campaign_id,)).fetchall()
         for row in rows:
@@ -162,6 +166,18 @@ def register_plan(store, campaigns, campaign_id, plan):
                 if prior['plan_sha256'] != digest(plan):
                     raise ValueError('registered scientific protocol is immutable')
                 return prior
+    # Historical publications remain readable under their original policy.
+    # execute_plan revalidates before any new work, after checking publication.
+    with store.connect() as con:
+        prior=existing(con)
+    if prior:return prior
+    from orchestrator.planning_contract import admit_plan
+    from orchestrator import controller
+    admit_plan(plan,store,controller.REPO)
+    with store.connect() as con:
+        con.execute('BEGIN IMMEDIATE')
+        prior=existing(con)
+        if prior:return prior
         from orchestrator.model_registry import plan_context
         record = {'plan': plan, 'plan_sha256': digest(plan), 'registered_at': time.time(), 'version': VERSION,
                   'promotion_context': plan_context(store)}
@@ -395,9 +411,15 @@ def comparison_result(plan, runs, feedback=None):
                 intervals.append(dict(interval,comparison_id=comparison['comparison_id'],training_seed=seed))
             except (KeyError,ValueError,TypeError,OSError) as exc:
                 problems.append(f"paired comparison {comparison['comparison_id']} seed {seed}: {exc}")
-    return {'plan_id': plan['plan_id'], 'hypothesis_id': plan['hypothesis_id'],
+    from orchestrator.planning_contract import evidence_classification
+    eligibility=evidence_classification(plan, runs)
+    if problems:
+        eligibility.update(promotion_eligible=False,evidence_level='INCOMPLETE')
+        eligibility['reasons'].append('Requested execution or measured evidence is incomplete.')
+    fixed=any(a.get('fixed_checkpoint_seed') is not None for a in plan['arms'])
+    return {'scientific_eligibility':eligibility, 'plan_id': plan['plan_id'], 'hypothesis_id': plan['hypothesis_id'],
             'plan_sha256': digest(plan), 'version': VERSION, 'kind': plan['kind'],
-            'status': 'INCOMPLETE' if problems else ('COMPLETE_CONTROLLED' if plan['kind'] == 'controlled_comparison' else 'COMPLETE_EXPLORATORY'),
+            'status': 'INCOMPLETE' if problems else ('COMPLETE_CONTROLLED' if plan['kind'] == 'controlled_comparison' and not fixed else 'COMPLETE_EXPLORATORY'),
             'expected_jobs': len(expected), 'recorded_jobs': len(found), 'problems': problems,
             'cells': results, 'paired_seed_differences': differences, 'paired_image_intervals': intervals,
             'interpretation': 'Execution completeness only; hypothesis support and uncertainty require critique.'}
@@ -445,6 +467,8 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
                       if json.loads(r[0])['result']['plan_sha256']==digest(plan)),None)
     if published is not None:
         return published  # Published complete/incomplete comparisons are historical evidence.
+    from orchestrator.planning_contract import admit_plan
+    admit_plan(plan,store,controller.REPO)
     cfg = json.loads(campaigns.get(campaign_id)['config_json'])
     limits = cfg['limits']; budget = plan['resource_budget']
     error = ''
@@ -463,7 +487,7 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
         module = candidate_file(controller.REPO, plan['hypothesis_id']) if train_arms or plan['diagnostics'] else None
         source_hash = sha256(module) if module else ''
         trusted_files = ['orchestrator/autonomy.py','orchestrator/controller.py','orchestrator/experiment_plan.py',
-                         'orchestrator/experiment_runner.py','orchestrator/sandbox.py','orchestrator/development_feedback.py',
+                         'orchestrator/planning_contract.py','orchestrator/experiment_runner.py','orchestrator/sandbox.py','orchestrator/development_feedback.py',
                          'scripts/run_candidate.py','scripts/feedback_infer.py','scripts/candidate_smoke.py',
                          'benchmark/train_adapter.py','benchmark/feedback_metrics.py','benchmark/feedback_data.py',
                          'schemas/experiment_plan.schema.json','configs/development_feedback.json']

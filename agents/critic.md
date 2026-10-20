@@ -12,3 +12,10 @@ bias; even a supported development gain does not establish final-holdout improve
 An explicitly declared fixed_checkpoint_seed compares challenger training seeds
 against one unchanged incumbent. It cannot measure baseline training-seed variation
 or support a causal method/architecture claim. Preserve that distinction in critique.
+
+The trusted scientific_eligibility record is separate from execution coverage.
+Do not treat COMPLETE_CONTROLLED or agent-authored acceptance text as permission
+to promote. A fixed single-seed baseline remains COMPLETE_EXPLORATORY and is
+ineligible for confirmed promotion, even when challenger seeds improve. Missing
+required work is INCOMPLETE. Only independently trained, matched baseline seeds
+can address between-method seed uncertainty; inspect exact configurations.
