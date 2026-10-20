@@ -73,10 +73,18 @@ def _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=None,
                    json.dumps([{k:c[k] for k in ('cohort_id','state','champion')} for c in memory['cohorts']]))
         kwargs['reference_files']=files
         if evidence:
+            # Full evidence is mounted read-only. Repeating every configuration,
+            # critique and feedback block here needlessly exhausts agent context.
+            index=[{**{k:item[k] for k in ('run_id','hypothesis_id','candidate_id','status','git_sha')},
+                    'failure':item['error'][:500],
+                    'comparison_status':item['comparison'].get('status'),
+                    'evidence_file':f"/workspace/evidence/{item['run_id']}/evidence.json"}
+                   for item in evidence]
             prompt += ('\nRelevant committed prior implementations, failures, exact frozen baseline references and '
                        'aggregate results follow. Read their /workspace/evidence/<run_id>/model.py, '
                        'configuration.json and evidence.json. Historical one-arm results are exploratory, '
-                       'not controlled proof; a high single metric is not a winner.\n' + json.dumps(evidence))
+                       'not controlled proof; a high single metric is not a winner. Read detailed evidence files '
+                       'and cumulative memory as needed; this is an index, not a five-result history window.\n' + json.dumps(index))
             kwargs['reference_files'] = files
     if campaign:
         campaigns, campaign_id = campaign
@@ -90,7 +98,7 @@ def _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=None,
                            if e['kind'] in {'ATTEMPT_FAILED','VALIDATION_FAILED','PLAN_REVIEW_FAILED'}][:5]
         if recent_failures:
             prompt += '\nRecent exact campaign failures (do not erase or rename them): '+json.dumps(recent_failures)
-    if role in {'researcher', 'critic'}:
+    if role in {'researcher', 'critic'} and not kwargs.get('personal_mode'):
         from orchestrator.development_feedback import latest_summary
         feedback = []
         for r in store.list_runs(30):

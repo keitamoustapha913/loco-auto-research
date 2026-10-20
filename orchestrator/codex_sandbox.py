@@ -91,5 +91,5 @@ def command(repo_root: Path, role: str, schema: Path, output: Path, task: str,
              "--skip-git-repo-check", "--cd", "/workspace", "--sandbox",
              "workspace-write" if role == "implementer" else "read-only",
              "--output-schema", "/workspace/schema.json",
-             "--output-last-message", "/output/" + output.name, task]
+             "--output-last-message", "/output/" + output.name, '-']
     return [str(x) for x in args]

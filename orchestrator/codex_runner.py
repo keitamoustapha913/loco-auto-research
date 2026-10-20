@@ -1,6 +1,7 @@
 """Bounded, structured Codex invocation. No researcher-authored shell commands run."""
 from __future__ import annotations
 import hashlib
+import copy
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,27 @@ class AgentFailure(RuntimeError):
 
 class InvalidAgentOutput(AgentFailure):
     """An agent completed but its response needs correction, not host changes."""
+
+
+def provider_output_schema(schema):
+    """Compile the API subset; the original schema still validates every response.
+
+    Strict structured output rejects uniqueItems. Removing it only from the
+    provider's generation schema does not relax trusted acceptance constraints.
+    Traverse schema positions, never literal const/default/example dictionaries.
+    """
+    result=copy.deepcopy(schema)
+    def walk(node):
+        if not isinstance(node,dict):return
+        node.pop('uniqueItems',None)
+        for name in ('properties','$defs','definitions','patternProperties','dependentSchemas'):
+            for child in node.get(name,{}).values():walk(child)
+        for name in ('items','additionalProperties','contains','not','if','then','else','propertyNames'):
+            walk(node.get(name))
+        for name in ('anyOf','allOf','oneOf','prefixItems'):
+            for child in node.get(name,[]):walk(child)
+    walk(result)
+    return result
 
 
 def invoke(role: str, repo_root: Path, schema_path: Path, prompt: str, timeout=180, worktree=None,
@@ -39,19 +61,23 @@ def invoke(role: str, repo_root: Path, schema_path: Path, prompt: str, timeout=1
     schema = json.loads(Path(schema_path).read_text())
     with tempfile.TemporaryDirectory(prefix="codex-response-") as temp:
         response_file = Path(temp) / "response.json"
+        provider_schema_file=Path(temp)/'provider-schema.json'
+        provider_schema_file.write_text(json.dumps(provider_output_schema(schema)))
         if personal_mode:
             from orchestrator.codex_sandbox import command as sandbox_command
             candidate_dir = cwd / "candidates" / cwd.name if role == "implementer" else None
             if candidate_dir is not None:
                 candidate_dir.mkdir(parents=True, exist_ok=True)
-            command = sandbox_command(root, role, Path(schema_path), response_file, task, candidate_dir,
+            command = sandbox_command(root, role, provider_schema_file, response_file, task, candidate_dir,
                                       reference_files=reference_files)
             env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
         else:
-            command = ["codex", "exec", "--cd", str(cwd), "--sandbox", "workspace-write" if role == "implementer" else "read-only", "--output-schema", str(Path(schema_path).resolve()), "--output-last-message", str(response_file), task]
+            command = ["codex", "exec", "--cd", str(cwd), "--sandbox", "workspace-write" if role == "implementer" else "read-only", "--output-schema", str(provider_schema_file), "--output-last-message", str(response_file), '-']
             env = {k: v for k, v in os.environ.items() if k not in ("LOCO_SEALED_ROOT", "MLFLOW_TRACKING_TOKEN", "GITHUB_TOKEN")}
         try:
-            done = subprocess.run(command, cwd=cwd, env=env, capture_output=True, text=True, timeout=min(int(timeout), 600), check=False)
+            # Whole-history evidence can exceed Linux's per-argument size limit.
+            # The CLI's stdin prompt mode preserves the exact task and sandbox.
+            done = subprocess.run(command, input=task, cwd=cwd, env=env, capture_output=True, text=True, timeout=min(int(timeout), 600), check=False)
         except FileNotFoundError as exc:
             raise AgentFailure("Codex CLI not installed on server") from exc
         except subprocess.TimeoutExpired as exc:
