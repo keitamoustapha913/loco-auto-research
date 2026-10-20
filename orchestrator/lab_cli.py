@@ -440,6 +440,13 @@ def research_summary(campaigns, row, process, report=False):
               'current_hypothesis': row['current_hypothesis'],
               'next_hypothesis': row['next_hypothesis'], 'active_run_id': row['active_run_id'],
               'reason': row['reason'], 'consecutive_failures': row['consecutive_failures']}
+    result['codex_budget'] = campaigns.call_budget(row['id'])
+    with campaigns.store.connect() as con:
+        plan_result = con.execute("SELECT payload_json FROM campaign_events WHERE campaign_id=? AND kind='EXPERIMENT_PLAN_RESULT' ORDER BY id DESC LIMIT 1", (row['id'],)).fetchone()
+    if plan_result:
+        plan = json.loads(plan_result[0])['result']
+        result['experiment_plan'] = plan if report else {key:plan[key] for key in
+            ('plan_id','status','expected_jobs','recorded_jobs','problems')}
     if report:
         result['limits'] = json.loads(row['config_json'])['limits']
         result['runs'] = [{**{k: r[k] for k in ('run_id', 'hypothesis_id', 'candidate_id', 'status',

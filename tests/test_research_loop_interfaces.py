@@ -14,7 +14,7 @@ def proposal(index):
     mechanisms = {1: 'predict missing object placement from neighboring context',
                   2: 'distill spatial teacher residuals into a compact student',
                   3: 'model component relationships with a parametric graph'}
-    return {'schema_version':'1.0', 'hypothesis_id':f'hypothesis_{index}',
+    return {'schema_version':'1.0','followup_of':'','followup_kind':'new', 'hypothesis_id':f'hypothesis_{index}',
             'research_question':f'Can independent idea {index} improve localization?',
             'claim':f'The method can {mechanisms[index]} and change proxy localization.',
             'references':['https://example.org/primary-paper'], 'baseline':'toy reference',
@@ -23,7 +23,8 @@ def proposal(index):
             'evaluation_plan':'Use held-out normal images and two synthetic generators.',
             'estimated_gpu_minutes':10, 'risk_and_shortcuts':'May learn edit artifacts.',
             'new_dependencies':[], 'candidate_family':f'family_{index}',
-            'priority_rank':index, 'priority_rationale':'Ranked by expected information gain and bounded cost.'}
+            'priority_rank':index, 'priority_rationale':'Ranked by expected information gain and bounded cost.',
+            'experiment_plan': __import__('plan_fixtures').agent_plan(__import__('plan_fixtures').experiment_plan(f'hypothesis_{index}'))}
 
 
 def test_ranked_distinct_proposals_and_duplicate_guard(tmp_path, monkeypatch):
@@ -87,7 +88,8 @@ def test_supervised_cycle_interfaces_with_mocked_agents(tmp_path, monkeypatch):
     manifest_path = tmp_path / 'good_manifest.json'
     manifest_path.write_text(json.dumps(build_manifest(tmp_path / 'good_data')))
     store = StateStore(tmp_path / 'ledger.sqlite')
-    store.add_proposal(proposal(1))
+    legacy = proposal(1); legacy.pop('experiment_plan')
+    store.add_proposal(legacy)  # Explicit historical contract fixture, not a structured-plan bypass.
     monkeypatch.setattr(controller, 'implement_proposal', lambda store, hypothesis: {'candidate': hypothesis})
     def queue(store, hypothesis, candidate, category, stage, device, manifest, seconds):
         rid = store.create_run(hypothesis, candidate, category, stage, {'device': device})

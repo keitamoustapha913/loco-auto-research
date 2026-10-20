@@ -1,0 +1,80 @@
+"""Disposable CUDA contract check, launched only inside an already queued job.
+
+The host runner owns the GPU lock, timeout, cancellation and time accounting.
+This worker never calibrates or evaluates on development anomalies.
+"""
+from __future__ import annotations
+import argparse
+import json
+from pathlib import Path
+import time
+
+import torch
+
+from benchmark.data_guard import load_manifest, sha256_file
+from benchmark.train_adapter import load_candidate, validate_prediction
+from scripts.feedback_infer import state_digest
+from scripts.run_candidate import load_image
+
+
+def run(module_file, manifest_file, config, output):
+    if not str(config.get('device', '')).startswith('cuda') or not torch.cuda.is_available():
+        raise ValueError('CUDA smoke requires an available authorized CUDA device')
+    manifest, paths = load_manifest(manifest_file)
+    selected = [(e, p) for e, p in zip(manifest['images'], paths)
+                if e['split'] == 'train/good' and e['category'] == config['category']][:2]
+    if not selected:
+        raise ValueError('CUDA smoke requires authorized normal training images')
+    output.mkdir(parents=True, exist_ok=False)
+    smoke_config = dict(config, steps=2, epochs=1, batch_size=1, synthetic_evaluation=False,
+                        validation_smoke=True, expected_optimizer_updates=2, expected_source_exposures=2)
+    smoke_manifest = output / 'training_good_manifest.json'
+    smoke_manifest.write_text(json.dumps(dict(manifest, images=[e for e, _ in selected])))
+    started = time.monotonic()
+    torch.cuda.reset_peak_memory_stats()
+    module = load_candidate(module_file)
+    checkpoint_dir = output / 'checkpoint'
+    module.train(smoke_config, smoke_manifest, checkpoint_dir)
+    training_cuda_bytes = torch.cuda.max_memory_allocated()
+    if training_cuda_bytes <= 0:
+        raise ValueError('CUDA smoke observed no CUDA tensor allocation during training')
+    checkpoint = checkpoint_dir / 'model.pt'
+    metadata = checkpoint_dir / 'checkpoint_manifest.json'
+    before = (sha256_file(checkpoint), sha256_file(metadata))
+    predictor = module.load(metadata, device=config['device'])
+    models = [predictor] if isinstance(predictor, torch.nn.Module) else [
+        value for value in vars(predictor).values() if isinstance(value, torch.nn.Module)]
+    parameters = [p for model in models for p in model.parameters()]
+    if parameters and not all(p.device.type == 'cuda' for p in parameters):
+        raise ValueError('CUDA smoke predictor parameters are not on CUDA')
+    for value in vars(predictor).values():
+        if isinstance(value, torch.nn.Module):
+            value.eval()
+    state_before = state_digest(predictor)
+    size = int(config.get('size', 128))
+    with torch.inference_mode():
+        for _, path in selected:
+            batch = load_image(path, size)[None]
+            validate_prediction(predictor.predict(batch), batch.shape)
+    torch.cuda.synchronize()
+    if before != (sha256_file(checkpoint), sha256_file(metadata)) or state_before != state_digest(predictor):
+        raise ValueError('CUDA smoke inference mutated checkpoint or predictor state')
+    summary = {'status': 'PASSED', 'kind': 'infrastructure_validation_only',
+               'training_images': len(selected), 'optimizer_step_request': 2,
+               'device': str(config['device']), 'wall_seconds': time.monotonic()-started,
+               'training_peak_cuda_allocated_bytes': training_cuda_bytes,
+               'checkpoint_unchanged': True, 'pilot_reuses_smoke_weights': False}
+    (output / 'summary.json').write_text(json.dumps(summary, sort_keys=True))
+    return summary
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    for name in ('module', 'manifest', 'config', 'output'):
+        parser.add_argument('--'+name, required=True, type=Path)
+    args = parser.parse_args()
+    print(json.dumps(run(args.module, args.manifest, json.loads(args.config.read_text()), args.output)))
+
+
+if __name__ == '__main__':
+    main()

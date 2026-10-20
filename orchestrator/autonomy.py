@@ -11,6 +11,7 @@ import yaml
 from benchmark.data_guard import load_manifest, manifest_fingerprint
 from orchestrator.campaign_state import CampaignState, TERMINAL
 from orchestrator.state_store import StateStore
+from orchestrator.budgets import CodexBudgetExhausted
 
 REPO = Path(__file__).resolve().parents[1]
 REQUIRED_LIMITS = ("max_gpu_hours", "max_wall_hours", "max_experiments", "max_codex_calls",
@@ -108,7 +109,10 @@ def stop_reason(campaigns, campaign_id):
     if used["experiments"] >= limits["max_experiments"]:
         return "LIMIT_REACHED", "experiment count reached"
     if used["codex_calls"] >= limits["max_codex_calls"]:
-        return "LIMIT_REACHED", "Codex-call budget reached"
+        return "BUDGET_EXHAUSTED", "campaign Codex-call budget exhausted"
+    global_budget = campaigns.call_budget(campaign_id)['global']
+    if global_budget['remaining'] == 0:
+        return "BUDGET_EXHAUSTED", f"global Codex call budget exhausted ({global_budget['used']}/{global_budget['limit']}); LOCO_CODEX_MAX_CALLS"
     if row["consecutive_failures"] >= limits["max_consecutive_failures"]:
         return "LIMIT_REACHED", "consecutive failure limit reached"
     return None, ""
@@ -204,10 +208,11 @@ def correct_candidate_git_commit(store, run_id, repo_root=REPO):
     return commit
 
 
-def choose_proposal(store, excluded=()):
+def choose_proposal(store, excluded=(), allowed_ids=None):
     """Select evidence-ranked proposals; Codex provides the research ranking."""
     from orchestrator.controller import list_proposals
-    available = [p for p in list_proposals(store) if p["status"] == "PROPOSED" and p["hypothesis_id"] not in excluded]
+    available = [p for p in list_proposals(store) if p["status"] == "PROPOSED" and p["hypothesis_id"] not in excluded
+                 and (allowed_ids is None or p["hypothesis_id"] in allowed_ids)]
     available.sort(key=lambda p: (json.loads(p["proposal_json"]).get("priority_rank", 999), p["created_at"]))
     return available[0] if available else None
 
@@ -229,6 +234,24 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
     directive = campaigns.get(campaign_id)['next_hypothesis']
     proposal = None
     research = config['research']
+    from orchestrator.experiment_plan import plan_history, execute_plan, review_plan, validate_plan, register_plan, record_result
+    # Resume the immutable comparison, never regenerate or replay a recorded cell.
+    with store.connect() as con:
+        reviewed_plans = {json.loads(r[0]).get('plan_id') for r in con.execute(
+            "SELECT payload_json FROM campaign_events WHERE campaign_id=? AND kind='CRITIQUE'", (campaign_id,))}
+    for registered in plan_history(campaigns, campaign_id):
+        pending = registered['plan']
+        if pending['plan_id'] not in reviewed_plans:
+            with store.connect() as con:
+                previous_result = con.execute("SELECT payload_json FROM campaign_events WHERE campaign_id=? AND kind='EXPERIMENT_PLAN_RESULT' ORDER BY id DESC", (campaign_id,)).fetchall()
+            result = next((json.loads(r[0])['result'] for r in previous_result
+                           if json.loads(r[0])['result']['plan_id']==pending['plan_id']), None)
+            if result is None:
+                result = execute_plan(store, campaigns, campaign_id, runtime, pending)
+            store.set_hypothesis_status(pending['hypothesis_id'], 'INCOMPLETE' if result['status']=='INCOMPLETE' else 'COMPLETED')
+            await_authorized_stage(campaigns, campaign_id, finishing=True)
+            review_plan(store, campaigns, campaign_id, pending, result)
+            return
     fresh_events = [event for event in campaigns.events(campaign_id, 100)
                     if event['kind'] == 'EVIDENCE_ADAPTED_HYPOTHESES']
     if not prior and research.get('fresh_hypotheses') and fresh_events:
@@ -263,7 +286,7 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
                   "leads and measured prior results, including generator sensitivity and actual GPU use "
                   "where measured. THIS CAMPAIGN IS AN RTX 4090 CUDA PILOT: each proposed learning strategy "
                   "must actually train a PyTorch model on CUDA and infer on CUDA, with estimated_gpu_minutes "
-                  "strictly greater than zero and at most five. No CPU-only screening proposals. Do not "
+                  "strictly greater than zero and within authorized campaign limits. No CPU-only screening proposals. Do not "
                   "prescribe one architecture; propose scientifically distinct mechanisms. Only normal "
                   "juice_bottle images are authorized for model learning; a one-category pilot cannot establish "
                   "claims across all five LOCO categories. Use only installed "
@@ -296,7 +319,7 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
                   json.dumps(history))
         if research.get('require_torch_cuda'):
             prompt += (' This is a CUDA pilot: all three proposals must train PyTorch on CUDA, '
-                       'estimated_gpu_minutes must be greater than zero and at most five; no CPU-only screen.')
+                       'estimated_gpu_minutes must be greater than zero and within campaign limits; no CPU-only screen.')
         generated = add_research_proposals(store, prompt, campaign=context, personal_mode=True,
                                            require_gpu_pilot=bool(research.get('require_torch_cuda')))
         ids = {item['hypothesis_id'] for item in generated}
@@ -308,7 +331,10 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
                         hypotheses=[p['hypothesis_id'] for p in fresh])
         campaigns.update(campaign_id, next_hypothesis='')
     if proposal is None:
-        proposal = choose_proposal(store)
+        with store.connect() as con:
+            scoped = con.execute("SELECT payload_json FROM campaign_events WHERE campaign_id=? AND kind='EVIDENCE_ADAPTED_HYPOTHESES' ORDER BY id DESC LIMIT 1", (campaign_id,)).fetchone()
+        allowed = set(json.loads(scoped[0]).get('hypotheses', [])) if scoped else set()
+        proposal = choose_proposal(store, allowed_ids=allowed)
     if proposal is None:
         if prior:
             history = [{"hypothesis": r["hypothesis_id"], "status": r["status"],
@@ -338,11 +364,12 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
                       " Previous attempts: " + json.dumps(previous))
         if research.get('require_torch_cuda'):
             prompt += (' This is a CUDA pilot: all three proposals must train PyTorch on CUDA, '
-                       'estimated_gpu_minutes must be greater than zero and at most five; no CPU-only screen.')
-        add_research_proposals(store, prompt, campaign=context, personal_mode=True,
+                       'estimated_gpu_minutes must be greater than zero and within campaign limits; no CPU-only screen.')
+        generated = add_research_proposals(store, prompt, campaign=context, personal_mode=True,
                                require_gpu_pilot=bool(research.get('require_torch_cuda')))
-        campaigns.event(campaign_id, "HYPOTHESES_GENERATED")
-        proposal = choose_proposal(store)
+        ids = {p['hypothesis_id'] for p in generated}
+        campaigns.event(campaign_id, 'EVIDENCE_ADAPTED_HYPOTHESES', hypotheses=sorted(ids))
+        proposal = choose_proposal(store, allowed_ids=ids)
     if proposal is None:
         raise RuntimeError("no selectable hypothesis")
     hypothesis_id = proposal["hypothesis_id"]
@@ -354,107 +381,42 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
         store.set_hypothesis_status(hypothesis_id, "INVALID")
         campaigns.event(campaign_id, "CANDIDATE_REJECTED", hypothesis_id=hypothesis_id, reason="unapproved dependencies")
         return
+    result = None
     try:
+        plan = detail.get('experiment_plan')
+        if not plan:
+            store.set_hypothesis_status(hypothesis_id, 'INCOMPLETE')
+            campaigns.event(campaign_id, 'EXPERIMENT_PLAN_REJECTED', hypothesis_id=hypothesis_id,
+                            status='INCOMPLETE', reason='structured experiment_plan required; historical prose is not executable')
+            raise ValueError('structured experiment_plan required; refusing default-arm execution')
+        validate_plan(plan, hypothesis_id)
+        register_plan(store, campaigns, campaign_id, plan)
         await_authorized_stage(campaigns, campaign_id)
-        implemented = implement_proposal(store, hypothesis_id, campaign=context, personal_mode=True,
-                                         require_torch_cuda=bool(research.get('require_torch_cuda')))
-        from orchestrator.experiment_runner import candidate_file, probe_candidate_interface, run_candidate_unit_tests
-        if candidate_file(REPO, hypothesis_id).resolve() != Path(implemented['candidate_module']).resolve():
-            raise RuntimeError('candidate source resolution differs from the reviewed implementation')
-        probe_candidate_interface(REPO, Path(implemented['candidate_module']),
-                                  Path(os.environ['LOCO_GOOD_ROOT']), runtime, hypothesis_id)
-        unit_result = run_candidate_unit_tests(REPO, Path(implemented['candidate_module']),
-                                               Path(os.environ['LOCO_GOOD_ROOT']), runtime, hypothesis_id)
-        campaigns.event(campaign_id, 'CANDIDATE_TESTS', hypothesis_id=hypothesis_id, **unit_result)
-        from orchestrator.codex_runner import commit_candidate_snapshot
-        candidate_commit = commit_candidate_snapshot(REPO, hypothesis_id)
-        campaigns.event(campaign_id, 'CANDIDATE_SNAPSHOT', hypothesis_id=hypothesis_id,
-                        git_commit=candidate_commit)
-        campaigns.event(campaign_id, "IMPLEMENTED", hypothesis_id=hypothesis_id, module=implemented["candidate_module"])
-        await_authorized_stage(campaigns, campaign_id)
-        seconds = remaining_job_seconds(campaigns, campaign_id)
-        if seconds < 15:
-            campaigns.set_status(campaign_id, "LIMIT_REACHED", "insufficient remaining GPU/wall budget")
-            return
-        manifest_path = Path(runtime) / "good_manifest.json"
-        rid = queue_candidate(store, hypothesis_id, hypothesis_id, "juice_bottle",
-                              "pilot" if research.get('require_torch_cuda') else "smoke", "cuda",
-                              manifest_path, seconds=min(300, seconds), personal_mode_authorized=True,
-                              campaign_id=campaign_id, campaign_name=config['campaign']['name'],
-                              synthetic_evaluation=research.get('synthetic_diagnostics', not research.get('real_development_feedback', False)))
-        campaigns.attach_run(campaign_id, rid)
-        campaigns.event(campaign_id, "EXPERIMENT_QUEUED", run_id=rid)
-        outcome = run_worker_once(store, manifest_path, runtime, personal_mode_authorized=True,
-                                  cancel=lambda: campaigns.get(campaign_id)["status"] == "STOPPING",
-                                  expected_run_id=rid)
-        if outcome.get("run_id") != rid:
-            raise RuntimeError("GPU scheduler did not claim the campaign's queued run")
-        run = store.get_run(rid)
-        campaigns.update(campaign_id, active_run_id="")
-        campaigns.event(campaign_id, "EXPERIMENT_FINISHED", run_id=rid, status=run["status"])
-        if run["status"] != "COMPLETED":
-            raise RuntimeError(f"experiment {rid} ended {run['status']}: {run['error']}")
+        if any(a['execution']=='train' for a in plan['arms']) or plan['diagnostics']:
+            implemented = implement_proposal(store, hypothesis_id, campaign=context, personal_mode=True,
+                require_torch_cuda=bool(research.get('require_torch_cuda')) and any(a['execution']=='train' for a in plan['arms']), validation_runtime=runtime)
+            from orchestrator.codex_runner import commit_candidate_snapshot
+            candidate_commit = commit_candidate_snapshot(REPO, hypothesis_id)
+            campaigns.event(campaign_id, 'CANDIDATE_SNAPSHOT', hypothesis_id=hypothesis_id, git_commit=candidate_commit)
+            campaigns.event(campaign_id, 'IMPLEMENTED', hypothesis_id=hypothesis_id, module=implemented['candidate_module'])
+        result = execute_plan(store, campaigns, campaign_id, runtime, plan)
+        store.set_hypothesis_status(hypothesis_id, 'INCOMPLETE' if result['status']=='INCOMPLETE' else 'COMPLETED')
         await_authorized_stage(campaigns, campaign_id, finishing=True)
-        if research.get('real_development_feedback'):
-            from orchestrator.development_feedback import evaluate_run
-            row = campaigns.get(campaign_id)
-            remaining_wall = int(row['created_at'] + config['limits']['max_wall_hours'] * 3600 - time.time())
-            if remaining_wall <= 0:
-                raise CampaignHalted('wall-time budget reached before real-development feedback')
-            feedback = evaluate_run(runtime, store, rid,
-                timeout=min(research.get('feedback_cpu_timeout_seconds', 600), remaining_wall),
-                personal_mode_authorized=True,
-                cancel=lambda: campaigns.get(campaign_id)['status'] == 'STOPPING')
-            campaigns.event(campaign_id, 'REAL_DEVELOPMENT_FEEDBACK', run_id=rid, summary=feedback)
-        await_authorized_stage(campaigns, campaign_id, finishing=True)
-        provenance_file = Path(runtime) / 'jobs' / rid / 'run_manifest.json'
-        provenance = json.loads(provenance_file.read_text()) if provenance_file.is_file() and provenance_file.stat().st_size < 100_000 else {}
-        prompt = ("Critique this immutable measured development run. Separate synthetic proxies from any appended real-development feedback. Evaluate shortcuts, "
-                  "normal false positives, generator gaps, latency, memory, reproducibility and whether "
-                  "the hypothesis was supported. Never claim official LOCO performance. "
-                  "The trusted runner enforces finite aligned [B,1,H,W] maps and disjoint normal "
-                  "calibration/assessment images. gpu_seconds measures exclusive GPU slot wall time, "
-                  "not CUDA kernel time; zero peak VRAM gives no evidence of GPU computation. "
-                  "Synthetic results alone do not establish real anomaly generalization; custom development detection alone does not establish logical localization. "
-                  f"Run: {json.dumps(run, default=str)} Provenance: {json.dumps(provenance)} "
-                  f"Hypothesis: {json.dumps(detail)}")
-        review = budgeted_invoke(store, "critic", REPO, REPO / "schemas" / "review.schema.json",
-                                 prompt, timeout=180, campaign=context, personal_mode=True)["response"]
-        with store.connect() as con:
-            con.execute("INSERT INTO events(run_id,time,kind,payload_json) VALUES(?,?,?,?)",
-                        (rid, time.time(), "CRITIC_REVIEW", json.dumps(review)))
-        campaigns.event(campaign_id, "CRITIQUE", run_id=rid, review=review)
-        store.transition(rid, "REVIEWED")
-        action = review["recommended_next_action"]
-        if action == 'reject':
-            store.transition(rid, 'REJECTED', reason='Critic rejected development evidence')
-        elif action == 'promote_for_review':
-            from orchestrator.decision_engine import eligible
-            eligibility_run = dict(store.get_run(rid))
-            if research.get('real_development_feedback'):
-                eligibility_run['real_feedback'] = feedback
-            eligible_for_review, eligibility_reason = eligible(eligibility_run)
-            if eligible_for_review:
-                store.transition(rid, 'PROMOTED', reason='Further research warranted by measured evidence; no final benchmark claim')
-            else:
-                campaigns.event(campaign_id, 'PROMOTION_WITHHELD', run_id=rid, reason=eligibility_reason)
-        from orchestrator.mlflow_tracker import enqueue_run_tracking
-        enqueue_run_tracking(store, rid)
-        store.set_hypothesis_status(hypothesis_id, "COMPLETED")
-        campaigns.update(campaign_id, consecutive_failures=0)
-        direction = f'evidence-followup:{hypothesis_id}:{action}'
-        campaigns.update(campaign_id, next_hypothesis=direction)
-        campaigns.event(campaign_id, "NEXT_DECISION", action=action,
-                        next_hypothesis=direction,
-                        evidence_run=rid, reason=review.get("objective_measured_results", ""))
+        review_plan(store, campaigns, campaign_id, plan, result)
     except CampaignHalted:
         return
+    except CodexBudgetExhausted:
+        raise
     except Exception as exc:
-        if store.get_run(campaigns.get(campaign_id)["active_run_id"] or "") is None:
-            store.set_hypothesis_status(hypothesis_id, "FAILED")
-        failures = campaigns.get(campaign_id)["consecutive_failures"] + 1
-        campaigns.update(campaign_id, consecutive_failures=failures, active_run_id="")
-        campaigns.event(campaign_id, "ATTEMPT_FAILED", hypothesis_id=hypothesis_id, error=str(exc))
+        if detail.get('experiment_plan') and result is None:
+            record_result(store, campaigns, campaign_id, detail['experiment_plan'], campaigns.runs(campaign_id), runtime,
+                          f'{type(exc).__name__}: {exc}')
+        elif result is not None:
+            campaigns.event(campaign_id,'PLAN_REVIEW_FAILED',plan_id=result['plan_id'],error=str(exc))
+        store.set_hypothesis_status(hypothesis_id, 'INCOMPLETE')
+        failures = campaigns.get(campaign_id)['consecutive_failures'] + 1
+        campaigns.update(campaign_id, consecutive_failures=failures, active_run_id='')
+        campaigns.event(campaign_id, 'ATTEMPT_FAILED', hypothesis_id=hypothesis_id, error=str(exc))
         raise
 
 
@@ -485,6 +447,9 @@ def run_forever(campaign_id: str, runtime: Path, ledger: Path, idle_seconds=2):
         failures_before = campaigns.get(campaign_id)["consecutive_failures"]
         try:
             run_cycle(store, campaigns, campaign_id, runtime)
+        except CodexBudgetExhausted as exc:
+            campaigns.set_status(campaign_id, 'BUDGET_EXHAUSTED', str(exc))
+            return
         except Exception as exc:
             if campaigns.get(campaign_id)["consecutive_failures"] == failures_before:
                 campaigns.update(campaign_id, consecutive_failures=failures_before + 1)

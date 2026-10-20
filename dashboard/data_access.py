@@ -255,6 +255,9 @@ def real_feedback_summaries():
         try:
             summary = json.loads(row['payload_json'])
             summary.update(run_id=row['run_id'],candidate_id=row['candidate_id'])
+            comparison = rows("SELECT payload_json FROM events WHERE run_id=? AND kind='SCIENTIFIC_COMPARISON' ORDER BY id DESC LIMIT 1", (row['run_id'],))
+            if comparison:
+                summary['scientific_comparison'] = json.loads(comparison[0]['payload_json'])
             summaries.append(summary)
         except (ValueError,TypeError):
             continue

@@ -11,7 +11,7 @@ import time
 import numpy as np
 from PIL import Image
 from benchmark.data_guard import load_manifest, manifest_fingerprint
-from benchmark.train_adapter import load_candidate, validate_prediction
+from benchmark.train_adapter import load_candidate, load_predictor, validate_prediction
 from benchmark.validation import evaluate_dev_v2
 from benchmark.metrics_v2 import EVALUATOR_VERSION, pixel_ap_report, pixel_auroc
 from benchmark.inference_benchmark import benchmark_predict
@@ -156,9 +156,56 @@ def run(module_file, manifest_file, config, output):
         raise ValueError('normal training images required')
     training_manifest_file = output / 'training_good_manifest.json'
     training_manifest_file.write_text(json.dumps(training_manifest, sort_keys=True))
-    checkpoint_meta = mod.train(config, training_manifest_file, output / "checkpoint")
-    training_duration_seconds = time.perf_counter() - training_started
-    predictor = mod.load(output / "checkpoint" / "checkpoint_manifest.json", device=device)
+    training_audit = {}
+    if config.get('execution_kind') == 'frozen':
+        # The trusted host copied the exact checkpoint; candidate train is never called.
+        training_duration_seconds = 0.0
+        training_audit = {'optimizer_updates': 0, 'source_exposures': 0, 'seed': config['seed'],
+                          'measurement_source': 'trusted frozen checkpoint reuse; no learning'}
+    elif config.get('plan_sha256'):
+        import torch
+        from torch.optim.optimizer import register_optimizer_step_post_hook
+        observed = []
+        def step_hook(optimizer, args, kwargs):
+            observed.append(type(optimizer).__name__)
+        hook = register_optimizer_step_post_hook(step_hook)
+        torch.manual_seed(config['seed'])
+        if str(device).startswith('cuda'): torch.cuda.manual_seed_all(config['seed'])
+        try:
+            checkpoint_meta = mod.train(config, training_manifest_file, output / 'checkpoint')
+        finally:
+            hook.remove()
+        training_duration_seconds = time.perf_counter() - training_started
+        metadata = json.loads((output/'checkpoint/checkpoint_manifest.json').read_text())
+        training_audit = metadata.get('training_audit', {})
+        for name in ('optimizer_updates', 'source_exposures', 'seed'):
+            value = training_audit.get(name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f'planned candidate must record integer training_audit.{name}')
+        if training_audit['seed'] != config['seed'] or training_audit['optimizer_updates'] != len(observed):
+            raise ValueError('observed optimizer updates or seed differ from training audit')
+        for name, actual in [('expected_optimizer_updates', len(observed)),
+                             ('expected_source_exposures', training_audit['source_exposures'])]:
+            if config[name] != actual:
+                raise ValueError(f'planned {name}={config[name]} but observed/reported {actual}')
+        training_audit = dict(training_audit, observed_optimizer_step_calls=len(observed),
+                              optimizer_classes=sorted(set(observed)),
+                              exposure_measurement_source='candidate instrumented; not an OS-enforced counter')
+    else:
+        checkpoint_meta = mod.train(config, training_manifest_file, output / 'checkpoint')
+        training_duration_seconds = time.perf_counter() - training_started
+    learning_frozen_files = {p.name: sha256_file(p) for p in (output/'checkpoint').iterdir()
+                             if p.name in {'model.pt','checkpoint_manifest.json'}}
+    predictor = load_predictor(mod, output / 'checkpoint/checkpoint_manifest.json', device,
+                               config.get('inference'))
+    if config.get('plan_sha256'):
+        import torch
+        from scripts.feedback_infer import state_digest, modules_of
+        for net in modules_of(predictor):
+            net.eval(); net.requires_grad_(False)
+            if any(p.device.type != torch.device(device).type for p in net.parameters()):
+                raise ValueError('planned inference device differs from model parameter device')
+        initial_frozen_state = state_digest(predictor)
     valid_paths = [p for p, entry in zip(paths, manifest["images"]) if entry["split"] == "validation/good"]
     # A disjoint good subset calibrates scores; remaining good images assess FPR.
     calibrate_paths, score_paths = split_validation_paths(valid_paths)
@@ -289,6 +336,40 @@ def run(module_file, manifest_file, config, output):
         evaluation = {'threshold_calibration':calibrated,'normal_assessment':assessed,
                       'inference_protocol':'batch one; decode/resize/prediction/full-resolution restore; 2 warmups, 8 repeats',
                       'device':device,'synthetic_evaluation':False}
+    if config.get('plan_sha256'):
+        import torch
+        from scripts.feedback_infer import state_digest
+        frozen_state = state_digest(predictor)
+        if frozen_state != initial_frozen_state:
+            raise ValueError('normal assessment changed frozen predictor state')
+        diagnostic_module = load_candidate('/diagnostics/model.py') if config.get('diagnostic_provider') else mod
+        for request in config.get('diagnostics', []):
+            if not callable(getattr(diagnostic_module, 'diagnose', None)):
+                raise ValueError(f"missing diagnose hook for {request['diagnostic_id']}")
+            assessment_ids = [sha256_file(path) for path in score_paths]
+            with torch.inference_mode():
+                diagnostic = diagnostic_module.diagnose(predictor, normal.copy(), dict(request['config'],
+                    diagnostic_id=request['diagnostic_id'], frozen_normal_threshold=metrics['normal/threshold'],
+                    assessment_source_ids=assessment_ids))
+            values = diagnostic.get('metrics', {}) if isinstance(diagnostic, dict) else {}
+            if not set(request['required_metrics']).issubset(values):
+                raise ValueError(f"diagnostic {request['diagnostic_id']} omitted required measurements")
+            for key, value in values.items():
+                if isinstance(value, bool) or not isinstance(value, (int,float)) or not np.isfinite(value):
+                    raise ValueError('diagnostic metrics must be finite measured numbers')
+                metrics[f"diagnostic/{request['diagnostic_id']}/{key}"] = float(value)
+            if 'per_image' in diagnostic:
+                ids = [r.get('source_id') for r in diagnostic['per_image']]
+                if len(ids)!=len(assessment_ids) or set(ids)!=set(assessment_ids):
+                    raise ValueError('diagnostic per-image identities differ from normal assessment sources')
+            if frozen_state != state_digest(predictor):
+                raise ValueError('diagnostic changed frozen predictor state')
+            (output/f"diagnostic_{request['diagnostic_id']}.json").write_text(json.dumps(diagnostic, allow_nan=False))
+        if any(sha256_file(output/'checkpoint'/name) != sha for name,sha in learning_frozen_files.items()):
+            raise ValueError('diagnostic changed frozen checkpoint')
+        metrics.update({'protocol/optimizer_updates': training_audit['optimizer_updates'],
+                        'protocol/source_exposures': training_audit['source_exposures'], 'protocol/seed': config['seed']})
+        (output/'training_audit.json').write_text(json.dumps(training_audit, sort_keys=True))
     checkpoint = output / "checkpoint" / "model.pt"
     metrics["inference/checkpoint_mib"] = checkpoint.stat().st_size / 2**20
     try:
@@ -330,6 +411,18 @@ def run(module_file, manifest_file, config, output):
         provenance['metric_status'] = 'NORMAL_ONLY_CALIBRATION_AND_EFFICIENCY'
         for key in list(provenance):
             if key.startswith('synthetic_') or key == 'artifact_control_status': provenance.pop(key)
+    if config.get('plan_sha256'):
+        import os
+        provenance.update(effective_configuration=config, training_audit=training_audit,
+                          plan_sha256=config['plan_sha256'], plan_id=config['plan_id'],
+                          plan_arm=config['plan_arm'], execution_kind=config['execution_kind'],
+                          trusted_source_sha256=config['trusted_source_sha256'],
+                          frozen_baseline=config.get('frozen_baseline'),
+                          execution_environment={'torch':torch.__version__,'numpy':np.__version__,
+                            'cuda_build':torch.version.cuda,'device':device,
+                            'gpu_name':torch.cuda.get_device_name(device) if str(device).startswith('cuda') else None,
+                            'cublas_workspace_config':os.environ.get('CUBLAS_WORKSPACE_CONFIG'),
+                            'deterministic_algorithms':torch.are_deterministic_algorithms_enabled()})
     (output / "run_manifest.json").write_text(json.dumps(provenance, indent=2))
     return {"metrics": {k: float(v) for k,v in metrics.items()}, "provenance": provenance}
 

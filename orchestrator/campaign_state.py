@@ -7,7 +7,7 @@ import uuid
 
 
 ACTIVE = {"RUNNING", "PAUSED", "STOPPING"}
-TERMINAL = {"STOPPED", "LIMIT_REACHED", "FAILED", "COMPLETED"}
+TERMINAL = {"STOPPED", "LIMIT_REACHED", "BUDGET_EXHAUSTED", "FAILED", "COMPLETED"}
 
 
 class CampaignState:
@@ -108,21 +108,35 @@ class CampaignState:
             records = con.execute("SELECT * FROM campaign_events WHERE campaign_id=? ORDER BY id DESC LIMIT ?", (campaign_id, limit)).fetchall()
         return [dict(r) for r in records]
 
-    def reserve_codex_call(self, campaign_id):
+    def reserve_codex_call(self, campaign_id, role='unknown'):
+        self.store.reserve_codex_call(role, campaign_id=campaign_id)
+
+    def call_budget(self, campaign_id):
+        import os
+        row = self.get(campaign_id)
+        maximum = int(json.loads(row['config_json'])['limits']['max_codex_calls'])
         with self.store.connect() as con:
-            con.execute("BEGIN IMMEDIATE")
-            row = con.execute("SELECT config_json,codex_calls,status FROM campaigns WHERE id=?", (campaign_id,)).fetchone()
-            if not row or row["status"] != "RUNNING":
-                raise RuntimeError("campaign is not running")
-            maximum = int(json.loads(row["config_json"])["limits"]["max_codex_calls"])
-            if row["codex_calls"] >= maximum:
-                raise RuntimeError("campaign Codex-call budget exhausted")
-            con.execute("UPDATE campaigns SET codex_calls=codex_calls+1,updated_at=? WHERE id=?", (time.time(), campaign_id))
+            counts = dict(con.execute('SELECT kind,COUNT(*) FROM campaign_events WHERE campaign_id=? GROUP BY kind', (campaign_id,)).fetchall())
+        global_used = self.store.codex_call_count()
+        global_limit = int(os.getenv('LOCO_CODEX_MAX_CALLS', '30'))
+        return {
+            'campaign': {'used': row['codex_calls'], 'limit': maximum,
+                         'remaining': max(0, maximum-row['codex_calls']),
+                         'completed': counts.get('AGENT_COMPLETED', 0),
+                         'failed_invocations': counts.get('AGENT_FAILED', 0),
+                         'accounting': 'admitted calls; includes failed/interrupted invocations' if counts.get('CODEX_CALL_ADMITTED') or not row['codex_calls'] else 'legacy reservations; may include blocked requests, preserved unchanged'},
+            'global': {'used': global_used, 'limit': global_limit,
+                       'remaining': max(0, global_limit-global_used),
+                       'scope': 'all historical ledger calls', 'source': 'LOCO_CODEX_MAX_CALLS (default 30)'},
+        }
 
     def attach_run(self, campaign_id, run_id):
         with self.store.connect() as con:
             con.execute("BEGIN IMMEDIATE")
-            con.execute("INSERT INTO campaign_runs(run_id,campaign_id) VALUES(?,?)", (run_id, campaign_id))
+            owner = con.execute('SELECT campaign_id FROM campaign_runs WHERE run_id=?',(run_id,)).fetchone()
+            if owner and owner['campaign_id'] != campaign_id:
+                raise ValueError('run already belongs to another campaign')
+            con.execute("INSERT OR IGNORE INTO campaign_runs(run_id,campaign_id) VALUES(?,?)", (run_id, campaign_id))
             con.execute("UPDATE campaigns SET active_run_id=?,updated_at=? WHERE id=?", (run_id, time.time(), campaign_id))
 
     def runs(self, campaign_id):

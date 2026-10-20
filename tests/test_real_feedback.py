@@ -271,8 +271,17 @@ def test_campaign_automatically_evaluates_before_critique(tmp_path,monkeypatch):
     from orchestrator.campaign_state import CampaignState
     cfg=autonomy.load_campaign_config(Path(__file__).parents[1]/'configs/autonomy_real_feedback.yaml')
     cfg['research']['fresh_hypotheses']=False
+    from scripts.demo_run import make_fixture
+    from benchmark.data_guard import build_manifest
+    make_fixture(tmp_path/'good_data')
+    (tmp_path/'good_manifest.json').write_text(json.dumps(build_manifest(tmp_path/'good_data')))
     store=StateStore(tmp_path/'ledger.sqlite');campaigns=CampaignState(store);cid=campaigns.create(cfg)
-    store.add_proposal({'hypothesis_id':'fixture_h','priority_rank':1,'new_dependencies':[]})
+    from plan_fixtures import experiment_plan
+    plan=experiment_plan('fixture_h',seeds=(17,),arms=('control',))
+    plan['evaluation']['real_development_feedback']=True;plan['diagnostics']=[]
+    plan['required_measurements']=[{'source':'real','key':'dev_real/logical_image_auroc'}]
+    store.add_proposal({'hypothesis_id':'fixture_h','priority_rank':1,'new_dependencies':[],'experiment_plan':plan})
+    campaigns.event(cid,'EVIDENCE_ADAPTED_HYPOTHESES',hypotheses=['fixture_h'])
     source=tmp_path/'model.py';source.write_text('# fixture')
     order=[]
     monkeypatch.setenv('LOCO_GOOD_ROOT',str(tmp_path))
@@ -282,12 +291,12 @@ def test_campaign_automatically_evaluates_before_critique(tmp_path,monkeypatch):
     monkeypatch.setattr(experiment_runner,'run_candidate_unit_tests',lambda *a,**kw:{})
     monkeypatch.setattr(codex_runner,'commit_candidate_snapshot',lambda *a:'fixture-sha')
     def queue(*a,**kw):
-        rid=store.create_run('fixture_h','fixture_h','juice_bottle',config={'campaign_id':cid})
+        rid=store.create_run('fixture_h','fixture_h','juice_bottle',config=dict(kw['effective_config'],campaign_id=cid),run_id=kw['run_id'])
         for state in ('IMPLEMENTED','VALIDATED','QUEUED'): store.transition(rid,state)
         return rid
     monkeypatch.setattr(controller,'queue_candidate',queue)
     def worker(*a,**kw):
-        rid=kw['expected_run_id'];store.transition(rid,'RUNNING');store.set_run_result(rid,{'dev_synthetic/pixel_ap':.3})
+        rid=kw['expected_run_id'];store.transition(rid,'RUNNING');store.set_run_result(rid,{'protocol/optimizer_updates':2,'protocol/source_exposures':4,'protocol/seed':17})
         store.transition(rid,'COMPLETED');order.append('training');return {'run_id':rid,'status':'COMPLETED'}
     monkeypatch.setattr(controller,'run_worker_once',worker)
     def evaluate(runtime,target,rid,**kw):
@@ -297,8 +306,9 @@ def test_campaign_automatically_evaluates_before_critique(tmp_path,monkeypatch):
     monkeypatch.setattr(development_feedback,'evaluate_run',evaluate)
     def critic(*a,**kw):
         assert order==['training','feedback'];order.append('critic')
-        return {'response':{'recommended_next_action':'investigate','objective_measured_results':'near chance development detection'}}
-    monkeypatch.setattr(controller,'budgeted_invoke',critic)
+        return {'response':{'recommended_next_action':'investigate','objective_measured_results':'near chance development detection','plan_id':plan['plan_id'],
+            'comparison_status':'COMPLETE_EXPLORATORY','hypothesis_outcome':'inconclusive','causal_claim':False}}
+    monkeypatch.setattr(controller,'_budgeted_invoke_once',critic)
     autonomy.run_cycle(store,campaigns,cid,tmp_path)
     assert order==['training','feedback','critic']
     assert campaigns.get(cid)['next_hypothesis']=='evidence-followup:fixture_h:investigate'

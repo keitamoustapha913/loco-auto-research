@@ -12,7 +12,7 @@ import shutil
 
 
 def command(repo_root: Path, role: str, schema: Path, output: Path, task: str,
-            candidate_dir: Path | None = None) -> list[str]:
+            candidate_dir: Path | None = None, reference_files=None) -> list[str]:
     bwrap = shutil.which("bwrap")
     if not bwrap:
         raise RuntimeError("Bubblewrap is required for personal-server Codex calls")
@@ -57,6 +57,22 @@ def command(repo_root: Path, role: str, schema: Path, output: Path, task: str,
     for filename in ("train_adapter.py", "validation.py"):
         args += ["--ro-bind", repo / "benchmark" / filename, "/workspace/benchmark/" + filename]
     args += ['--ro-bind', repo / 'scripts' / 'run_candidate.py', '/workspace/scripts/run_candidate.py']
+    args += ['--ro-bind', repo / 'schemas' / 'experiment_plan_agent.schema.json', '/workspace/experiment_plan.schema.json']
+    if reference_files:
+        import re
+        allowed = Path(os.environ.get('LOCO_LEDGER', str(Path(os.environ.get('LOCO_RUNTIME', '.runtime'))/'controller/experiments.sqlite'))).resolve().parent/'research_evidence'
+        args += ['--dir','/workspace/evidence']
+        directories = set()
+        for alias, source in reference_files.items():
+            if not re.fullmatch(r'[A-Za-z0-9_-]+/(model.py|configuration.json|evidence.json)',alias):
+                raise PermissionError('unapproved research evidence alias')
+            source = Path(source).resolve(strict=True)
+            if not source.is_relative_to(allowed) or not source.is_file():
+                raise PermissionError('research evidence must be a controller-owned snapshot')
+            group = alias.split('/')[0]
+            if group not in directories:
+                args += ['--dir','/workspace/evidence/'+group]; directories.add(group)
+            args += ['--ro-bind',source,'/workspace/evidence/'+alias]
     args += ["--ro-bind", repo / "literature" / "evidence_index.json", "/workspace/literature/evidence_index.json"]
     role_file = repo / "agents" / f"{role}.md"
     args += ["--ro-bind", role_file, "/workspace/agents/" + role_file.name]

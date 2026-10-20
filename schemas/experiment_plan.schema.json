@@ -1,0 +1,472 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "plan_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,64}$"
+    },
+    "hypothesis_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,64}$"
+    },
+    "kind": {
+      "enum": [
+        "exploratory",
+        "controlled_comparison"
+      ]
+    },
+    "seeds": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20,
+      "uniqueItems": true,
+      "items": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 2147483647
+      }
+    },
+    "training": {
+      "type": "object",
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ]
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "controlled_variables": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string"
+      }
+    },
+    "baselines": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "baseline_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,64}$"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seed": {
+            "type": "integer"
+          },
+          "source_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "checkpoint_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "configuration_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "checkpoint_manifest_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "baseline_id",
+          "run_id",
+          "seed",
+          "source_sha256",
+          "checkpoint_sha256",
+          "configuration_sha256",
+          "checkpoint_manifest_sha256"
+        ]
+      }
+    },
+    "arms": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "arm_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,64}$"
+          },
+          "difference": {
+            "type": "string",
+            "minLength": 5
+          },
+          "execution": {
+            "enum": [
+              "train",
+              "frozen"
+            ]
+          },
+          "training_overrides": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "null"
+                  ]
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": [
+                      "string",
+                      "number",
+                      "boolean",
+                      "null"
+                    ]
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": [
+                      "string",
+                      "number",
+                      "boolean",
+                      "null"
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          "inference": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "null"
+                  ]
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": [
+                      "string",
+                      "number",
+                      "boolean",
+                      "null"
+                    ]
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": [
+                      "string",
+                      "number",
+                      "boolean",
+                      "null"
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          "source_arm_id": {
+            "type": "string"
+          },
+          "baseline_by_seed": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "arm_id",
+          "difference",
+          "execution",
+          "training_overrides",
+          "inference",
+          "source_arm_id",
+          "baseline_by_seed"
+        ]
+      }
+    },
+    "diagnostics": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "diagnostic_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,64}$"
+          },
+          "config": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "null"
+                  ]
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": [
+                      "string",
+                      "number",
+                      "boolean",
+                      "null"
+                    ]
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": [
+                      "string",
+                      "number",
+                      "boolean",
+                      "null"
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          "required_metrics": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "required": [
+          "diagnostic_id",
+          "config",
+          "required_metrics"
+        ]
+      }
+    },
+    "required_measurements": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "source": {
+            "enum": [
+              "run",
+              "real",
+              "diagnostic"
+            ]
+          },
+          "key": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "source",
+          "key"
+        ]
+      }
+    },
+    "resource_budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_jobs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_job_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_gpu_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "max_wall_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      },
+      "required": [
+        "max_jobs",
+        "max_job_seconds",
+        "max_gpu_seconds",
+        "max_wall_seconds"
+      ]
+    },
+    "completion_criteria": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 5
+      }
+    },
+    "failure_criteria": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "on_job_failure": {
+          "enum": [
+            "stop",
+            "continue"
+          ]
+        },
+        "max_failed_jobs": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "on_job_failure",
+        "max_failed_jobs"
+      ]
+    },
+    "evaluation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "synthetic_diagnostics": {
+          "type": "boolean"
+        },
+        "real_development_feedback": {
+          "type": "boolean"
+        },
+        "metric_evaluator_version": {
+          "const": "development-v2.0"
+        }
+      },
+      "required": [
+        "synthetic_diagnostics",
+        "real_development_feedback",
+        "metric_evaluator_version"
+      ]
+    },
+    "paired_comparisons": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "comparison_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,64}$"
+          },
+          "left_arm": {
+            "type": "string"
+          },
+          "right_arm": {
+            "type": "string"
+          },
+          "diagnostic_id": {
+            "type": "string"
+          },
+          "metric": {
+            "type": "string"
+          },
+          "bootstrap_seed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "repeats": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 10000
+          }
+        },
+        "required": [
+          "comparison_id",
+          "left_arm",
+          "right_arm",
+          "diagnostic_id",
+          "metric",
+          "bootstrap_seed",
+          "repeats"
+        ]
+      }
+    },
+    "baseline_arm_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "plan_id",
+    "hypothesis_id",
+    "kind",
+    "seeds",
+    "training",
+    "controlled_variables",
+    "baselines",
+    "arms",
+    "diagnostics",
+    "required_measurements",
+    "resource_budget",
+    "completion_criteria",
+    "failure_criteria",
+    "evaluation",
+    "paired_comparisons",
+    "baseline_arm_id"
+  ],
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

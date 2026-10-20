@@ -86,19 +86,35 @@ def probe_candidate_interface(repo_root, module_file, good_root, runtime, candid
 
 
 def run_candidate_unit_tests(repo_root, module_file, good_root, runtime, candidate_id):
-    """Execute optional candidate tests only in the same no-network CPU boundary."""
+    """Require executable candidate CPU tests in the no-network boundary."""
     from orchestrator.sandbox import command as sandbox_command
     module = Path(module_file).resolve(strict=True)
     if not (module.parent / 'test_model.py').is_file():
-        return {'tests': 'none provided'}
+        raise ValueError('candidate CPU unit tests failed: mandatory test_model.py is missing')
     probe_root = Path(runtime).resolve() / 'probes'
     probe_root.mkdir(parents=True, exist_ok=True)
     probe_dir = probe_root / safe_candidate_id(candidate_id)
     probe_dir.mkdir(parents=True, exist_ok=True)
     if probe_dir.is_symlink() or not probe_dir.resolve(strict=True).is_relative_to(probe_root):
         raise PermissionError('candidate test output escapes runtime')
+    # pytest exits zero for an entirely skipped suite. Count successful test
+    # bodies, not collection/setup, and fail closed when none actually run.
+    test_script = '''import sys
+import pytest
+class Results:
+    passed = 0
+    def pytest_runtest_logreport(self, report):
+        if report.when == 'call' and report.passed and not hasattr(report, 'wasxfail'):
+            self.passed += 1
+results = Results()
+code = pytest.main(['-q', '-ra', '-p', 'no:cacheprovider', '/candidate/test_model.py'], plugins=[results])
+if code == 0 and results.passed == 0:
+    print('candidate validation rejected: no tests executed successfully (all skipped or xfailed)')
+    code = 5
+sys.exit(code)
+'''
     cmd = sandbox_command(repo_root, module, good_root, probe_dir,
-                          ['-m', 'pytest', '-q', '-p', 'no:cacheprovider', '/candidate/test_model.py'],
+                          ['-c', test_script],
                           use_gpu=False)
     try:
         result = subprocess.run(cmd, cwd=repo_root, env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'},
@@ -106,7 +122,7 @@ def run_candidate_unit_tests(repo_root, module_file, good_root, runtime, candida
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError('candidate CPU unit tests timed out') from exc
     if result.returncode:
-        raise ValueError(f'candidate CPU unit tests failed: {(result.stdout + result.stderr)[-1000:]}')
+        raise ValueError(f'candidate CPU unit tests failed: {(result.stdout + result.stderr)[-8000:]}')
     return {'tests': 'passed', 'output': result.stdout[-300:]}
 
 
@@ -123,12 +139,23 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
     _, paths = load_manifest(manifest_path)
     if not paths:
         raise ValueError("empty good-image manifest")
-    module_file = candidate_file(repo_root, run["candidate_id"])
+    from orchestrator.experiment_plan import execution_source
+    module_file = execution_source(run, store, runtime, repo_root)
     if run["candidate_id"] != "toy_normal_ae" and not personal_mode_authorized and os.getenv("LOCO_SANDBOX_VERIFIED") != "1":
         raise PermissionError("Non-toy candidate execution disabled until operator verifies OS-level isolation (deploy/SECURITY.md)")
     job_dir = runtime / "jobs" / run["run_id"]
     job_dir.mkdir(parents=True, exist_ok=False)
     config = json.loads(run["config_json"])
+    if config.get('execution_kind') == 'frozen':
+        import shutil
+        from orchestrator.experiment_plan import verify_baseline
+        _, origin = verify_baseline(store, config['frozen_baseline'], repo_root)
+        if origin['manifest_sha256'] != run['manifest_sha256']:
+            raise ValueError('baseline training dataset differs from the planned dataset')
+        checkpoint_dir = job_dir / 'checkpoint'
+        checkpoint_dir.mkdir()
+        for name in ('model.pt', 'checkpoint_manifest.json'):
+            shutil.copyfile(Path(origin['artifact_dir'])/'checkpoint'/name, checkpoint_dir/name)
     isolated = run['candidate_id'] != 'toy_normal_ae' or os.getenv('LOCO_FORCE_SANDBOX_TOY') == '1'
     input_dir = runtime / 'controller' / 'job_inputs' / run['run_id'] if isolated else job_dir
     input_dir.mkdir(parents=True, exist_ok=True)
@@ -138,62 +165,137 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
     command = [sys.executable, "-m", "scripts.run_candidate", "--module", str(module_file), "--manifest", str(manifest_path), "--config", str(config_path), "--output", str(job_dir), "--result", str(result_path)]
     environment = {key: value for key, value in os.environ.items() if key not in {"OPENAI_API_KEY", "GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "MLFLOW_TRACKING_TOKEN"}}
     environment["PYTHONPATH"] = str(repo_root)
+    environment['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
     if isolated:
         from orchestrator.sandbox import command as sandbox_command, write_sandbox_manifest
         sandbox_manifest, data_root = write_sandbox_manifest(manifest_path, input_dir)
+        diagnostic_file = None
+        if config.get('diagnostic_provider'):
+            reference = config['diagnostic_provider']
+            diagnostic_file = candidate_file(repo_root, reference['candidate_id'])
+            if sha256(diagnostic_file) != reference['source_sha256']:
+                raise ValueError('shared diagnostic implementation changed')
         command = sandbox_command(repo_root, module_file, data_root, job_dir,
             ['-m', 'scripts.run_candidate', '--module', '/candidate/model.py',
              '--manifest', '/inputs/good_manifest.json', '--config', '/inputs/config.json',
              '--output', '/output', '--result', '/output/measurement.json'],
             use_gpu=config.get('device', 'cpu').startswith('cuda'),
-            input_files={'config.json': config_path, 'good_manifest.json': sandbox_manifest})
+            input_files={'config.json': config_path, 'good_manifest.json': sandbox_manifest},
+            pinned_source=bool(config.get('frozen_baseline')), diagnostic_file=diagnostic_file)
         # Bubblewrap clears its environment; no controller or Codex secrets enter.
         environment = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}
     timeout = min(max_job_seconds(), int(config.get("timeout_seconds", max_job_seconds())))
+    stages = []
+    if config.get('cuda_smoke_required'):
+        if not config.get('device', '').startswith('cuda'):
+            raise ValueError('CUDA smoke cannot run on a CPU job')
+        smoke_command = list(command)
+        index = smoke_command.index('scripts.run_candidate')
+        smoke_command[index] = 'scripts.candidate_smoke'
+        smoke_command[smoke_command.index('--output', index)+1] = '/output/cuda_smoke' if isolated else str(job_dir / 'cuda_smoke')
+        result_index = smoke_command.index('--result', index)
+        del smoke_command[result_index:result_index+2]
+        stages.append(('cuda_smoke', smoke_command, min(30, timeout)))
+    stages.append(('pilot', command, timeout))
     started = time.monotonic()
-    with (job_dir / "stdout.log").open("wb") as stdout, (job_dir / "stderr.log").open("wb") as stderr:
-        process = subprocess.Popen(command, cwd=repo_root, env=environment, stdout=stdout, stderr=stderr, start_new_session=True)
-        status = "COMPLETED"
-        try:
-            deadline = time.monotonic() + timeout
-            while process.poll() is None:
-                if cancel and cancel():
-                    status = "CANCELLED"
-                    break
-                if time.monotonic() >= deadline:
-                    status = "TIMED_OUT"
-                    break
-                time.sleep(min(0.5, max(0.01, deadline - time.monotonic())))
-            if status == "COMPLETED" and process.returncode != 0:
-                status = "FAILED"
-        finally:
-            if process.poll() is None:
-                try:
-                    os.killpg(process.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                try:
-                    process.wait(timeout=8)
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    process.wait()
+    deadline = started + timeout  # Both stages share the original job allowance.
+    smoke_seconds = 0.0
+    status = 'COMPLETED'
+    failed_stage = ''
+    for stage, stage_command, stage_limit in stages:
+        if cancel and cancel():
+            status = 'CANCELLED'
+            break
+        if time.monotonic() >= deadline:
+            status = 'TIMED_OUT'
+            break
+        prefix = 'cuda_smoke_' if stage == 'cuda_smoke' else ''
+        stage_started = time.monotonic()
+        with (job_dir / (prefix + "stdout.log")).open("wb") as stdout, (job_dir / (prefix + "stderr.log")).open("wb") as stderr:
+            process = subprocess.Popen(stage_command, cwd=repo_root, env=environment, stdout=stdout, stderr=stderr, start_new_session=True)
+            try:
+                stage_deadline = min(deadline, stage_started + stage_limit)
+                while process.poll() is None:
+                    if cancel and cancel():
+                        status = "CANCELLED"
+                        break
+                    if time.monotonic() >= stage_deadline:
+                        status = "TIMED_OUT"
+                        break
+                    time.sleep(min(0.5, max(0.01, stage_deadline - time.monotonic())))
+                if status == "COMPLETED" and process.returncode != 0:
+                    status = "FAILED"
+            finally:
+                if process.poll() is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.wait()
+        if stage == 'cuda_smoke':
+            smoke_seconds = time.monotonic() - stage_started
+            with store.connect() as con:
+                con.execute('INSERT INTO events(run_id,time,kind,payload_json) VALUES(?,?,?,?)',
+                            (run['run_id'], time.time(), 'CUDA_SMOKE_VALIDATION',
+                             json.dumps({'status': status, 'seconds': smoke_seconds, 'timeout_seconds': stage_limit})))
+        if status != 'COMPLETED':
+            failed_stage = stage
+            break
     elapsed = time.monotonic() - started
     if status == "FAILED":
-        err_tail = (job_dir / "stderr.log").read_bytes()[-20000:].lower()
+        error_log = job_dir / ('cuda_smoke_stderr.log' if failed_stage == 'cuda_smoke' else 'stderr.log')
+        err_tail = error_log.read_bytes()[-20000:].lower()
         if b"out of memory" in err_tail or b"cuda error: out of memory" in err_tail:
             status = "OOM"
     try:
         if status == "COMPLETED":
-            measured = json.loads(result_path.read_text())
-            metrics = measured["metrics"]
+            if result_path.is_symlink() or not result_path.resolve().is_relative_to(job_dir.resolve()):
+                raise PermissionError('candidate result artifact escapes its assigned job')
+            try:
+                measured = json.loads(result_path.read_text())
+                metrics = measured['metrics']
+                if not isinstance(metrics, dict):
+                    raise ValueError('measurement metrics must be an object')
+                if config.get('plan_sha256') and measured.get('provenance',{}).get('effective_configuration') != config:
+                    raise ValueError('effective configuration differs from the registered planned job')
+            except (FileNotFoundError, ValueError, KeyError, TypeError) as exc:
+                import traceback
+                reason = f'Candidate result validation {type(exc).__name__}: {exc}\n{traceback.format_exc(limit=5)[-8000:]}'
+                store.set_run_result(run['run_id'], {}, gpu_seconds=elapsed if config.get('device', 'cpu').startswith('cuda') else 0,
+                                     artifact_dir=str(job_dir))
+                store.transition(run['run_id'], 'FAILED', reason=reason, expect='RUNNING')
+                enqueue_run_tracking(store, run['run_id'], artifact_dir=job_dir)
+                return 'FAILED'
+            if config.get('frozen_baseline') and sha256(job_dir/'checkpoint/model.pt') != config['frozen_baseline']['checkpoint_sha256']:
+                raise ValueError('frozen baseline checkpoint changed during job execution')
+            if config.get('frozen_baseline') and sha256(job_dir/'checkpoint/checkpoint_manifest.json') != config['frozen_baseline']['checkpoint_manifest_sha256']:
+                raise ValueError('frozen baseline metadata changed during job execution')
+            if config.get('cuda_smoke_required'):
+                metrics.update({'validation/cuda_smoke_passed': 1, 'validation/cuda_smoke_seconds': smoke_seconds})
             store.set_run_result(run["run_id"], metrics, gpu_seconds=elapsed if config.get("device", "cpu").startswith("cuda") else 0, artifact_dir=str(job_dir))
             store.transition(run["run_id"], "COMPLETED", expect="RUNNING")
         else:
-            store.account_gpu_usage(run["run_id"], elapsed if config.get("device", "cpu").startswith("cuda") else 0)
-            store.transition(run["run_id"], status, reason=f"Candidate process {status}; inspect stderr.log", expect="RUNNING")
+            charged = elapsed if config.get("device", "cpu").startswith("cuda") else 0
+            if failed_stage == 'cuda_smoke':
+                store.set_run_result(run['run_id'], {'validation/cuda_smoke_passed': 0,
+                    'validation/cuda_smoke_seconds': smoke_seconds}, gpu_seconds=charged, artifact_dir=str(job_dir))
+            else:
+                store.account_gpu_usage(run['run_id'], charged)
+            reason = f"Candidate process {status}; inspect stderr.log"
+            if failed_stage == 'cuda_smoke':
+                log = job_dir / 'cuda_smoke_stderr.log'
+                reason = f"CUDA smoke validation {status}: {log.read_text(errors='replace')[-8000:]}"
+            elif (job_dir / 'stderr.log').is_file():
+                reason += '\n' + (job_dir / 'stderr.log').read_text(errors='replace')[-8000:]
+            store.transition(run["run_id"], status, reason=reason, expect="RUNNING")
         enqueue_run_tracking(store, run["run_id"], artifact_dir=job_dir)
         return status
     except Exception as exc:
         if store.get_run(run["run_id"])["status"] == "RUNNING":
+            store.account_gpu_usage(run["run_id"], elapsed if config.get("device", "cpu").startswith("cuda") else 0)
             store.transition(run["run_id"], "FAILED", reason=f"runner post-processing: {exc}", expect="RUNNING")
         raise

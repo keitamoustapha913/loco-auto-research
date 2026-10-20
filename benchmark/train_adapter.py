@@ -12,6 +12,19 @@ class CandidateContractError(ValueError):
     pass
 
 
+def load_predictor(module, checkpoint, device, inference_config=None):
+    """Never silently discard an explicitly requested prediction intervention."""
+    if inference_config:
+        import inspect
+        if 'inference_config' not in inspect.signature(module.load).parameters:
+            raise CandidateContractError('requested inference settings require load(..., inference_config=...)')
+        predictor = module.load(checkpoint, device=device, inference_config=dict(inference_config))
+        if getattr(predictor, 'inference_config', None) != inference_config:
+            raise CandidateContractError('predictor did not acknowledge the exact inference configuration')
+        return predictor
+    return module.load(checkpoint, device=device)
+
+
 def load_candidate(module_file: str | Path):
     """Load candidate only from trusted, isolated subprocesses, NEVER the controller."""
     module_file = Path(module_file).resolve(strict=True)

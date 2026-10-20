@@ -138,10 +138,23 @@ def _sync_locked(store: StateStore, tracking_uri=None, max_events=100):
                 client.set_tag(mlflow_run_id, 'research.critic_assessment', critique['payload_json'][:4000])
             if artifact_dir.is_dir():
                 # Allowlisted output types only. Never upload raw source images or test masks.
-                for filename in ("measurement.json", "run_manifest.json", "development_case_metrics.json", "stage6_comparison.json", "normal_preview.png", "synthetic_input.png", "synthetic_mask.png", "synthetic_heatmap.png", "synthetic_overlay.png"):
+                for filename in ("measurement.json", "run_manifest.json", "training_audit.json", "plan_comparison.json", "development_case_metrics.json", "stage6_comparison.json", "normal_preview.png", "synthetic_input.png", "synthetic_mask.png", "synthetic_heatmap.png", "synthetic_overlay.png", "cuda_smoke_stdout.log", "cuda_smoke_stderr.log", "cuda_smoke/summary.json"):
                     item_path = artifact_dir / filename
-                    if item_path.is_file() and not item_path.is_symlink():
+                    if (item_path.is_file() and not item_path.is_symlink()
+                            and item_path.resolve().is_relative_to(artifact_dir.resolve())):
                         client.log_artifact(mlflow_run_id, str(item_path))
+                comparison = artifact_dir/'plan_comparison.json'
+                if comparison.is_file() and not comparison.is_symlink():
+                    record = json.loads(comparison.read_text())
+                    client.set_tag(mlflow_run_id,'research.plan_id',record['plan']['plan_id'])
+                    client.set_tag(mlflow_run_id,'research.plan_sha256',record['result']['plan_sha256'])
+                    client.set_tag(mlflow_run_id,'research.comparison_status',record['result']['status'])
+                for request in data.get('params',{}).get('diagnostics',[]):
+                    name = request.get('diagnostic_id','')
+                    if not __import__('re').fullmatch(r'[A-Za-z0-9_-]{1,64}',name): continue
+                    path = artifact_dir/f'diagnostic_{name}.json'
+                    if path.is_file() and not path.is_symlink() and path.resolve().is_relative_to(artifact_dir):
+                        client.log_artifact(mlflow_run_id,str(path))
                 checkpoint = artifact_dir / 'checkpoint' / 'model.pt'
                 if checkpoint.is_file() and not checkpoint.is_symlink() and checkpoint.resolve().is_relative_to(allowed_root):
                     client.log_artifact(mlflow_run_id, str(checkpoint), artifact_path='checkpoint')

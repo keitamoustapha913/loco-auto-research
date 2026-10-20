@@ -91,7 +91,7 @@ class StateStore:
             con.execute("INSERT INTO events(run_id,time,kind,payload_json) VALUES(NULL,?,?,?)", (now, "PROPOSAL", json.dumps({"hypothesis_id": proposal["hypothesis_id"]})))
 
     def set_hypothesis_status(self, hypothesis_id, status):
-        if status not in {"PROPOSED", "IMPLEMENTED", "INVALID", "QUEUED", "COMPLETED", "FAILED"}:
+        if status not in {"PROPOSED", "IMPLEMENTED", "INVALID", "QUEUED", "COMPLETED", "FAILED", "INCOMPLETE"}:
             raise ValueError("invalid hypothesis status")
         with self.connect() as con:
             cursor = con.execute("UPDATE hypotheses SET status=? WHERE hypothesis_id=?", (status, hypothesis_id))
@@ -104,9 +104,22 @@ class StateStore:
         run_id = run_id or str(uuid.uuid4())
         now = time.time()
         with self.connect() as con:
+            planned_campaign = (config or {}).get('campaign_id') if (config or {}).get('plan_sha256') else None
+            if planned_campaign:
+                con.execute('BEGIN IMMEDIATE')
+                campaign = con.execute('SELECT status,config_json FROM campaigns WHERE id=?',(planned_campaign,)).fetchone()
+                if not campaign or campaign['status']!='RUNNING':
+                    raise RuntimeError('campaign is not running at planned job admission')
+                used = con.execute('SELECT COUNT(*) FROM campaign_runs WHERE campaign_id=?',(planned_campaign,)).fetchone()[0]
+                if used >= json.loads(campaign['config_json'])['limits']['max_experiments']:
+                    from orchestrator.budgets import BudgetExceeded
+                    raise BudgetExceeded('campaign experiment count reached at atomic admission')
             con.execute("INSERT INTO runs(run_id,hypothesis_id,candidate_id,category,stage,status,created_at,updated_at,config_json,git_sha,manifest_sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                         (run_id, hypothesis_id, candidate_id, category, stage, "PROPOSED", now, now, json.dumps(config or {}, sort_keys=True), git_sha, manifest_sha256))
             con.execute("INSERT INTO events(run_id,time,kind,payload_json) VALUES(?,?,?,?)", (run_id, now, "CREATED", "{}"))
+            if planned_campaign:
+                con.execute('INSERT INTO campaign_runs(run_id,campaign_id) VALUES(?,?)',(run_id,planned_campaign))
+                con.execute('UPDATE campaigns SET active_run_id=?,updated_at=? WHERE id=?',(run_id,now,planned_campaign))
         return run_id
 
     def get_run(self, run_id):
@@ -184,14 +197,32 @@ class StateStore:
         with self.connect() as con:
             return int(con.execute("SELECT COUNT(*) AS n FROM events WHERE kind='CODEX_CALL'").fetchone()["n"])
 
-    def reserve_codex_call(self, role):
+    def reserve_codex_call(self, role, campaign_id=None):
+        """Atomically admit a call against both allowances before invocation.
+
+        Admitted calls stay charged after a crash or failed invocation. Denials
+        change neither counter. The historical global ceiling is unchanged.
+        """
+        from orchestrator.budgets import CodexBudgetExhausted
         max_calls = int(os.getenv("LOCO_CODEX_MAX_CALLS", "30"))
         with self.connect() as con:
             con.execute("BEGIN IMMEDIATE")
+            if campaign_id is not None:
+                row = con.execute('SELECT * FROM campaigns WHERE id=?', (campaign_id,)).fetchone()
+                if not row or row['status'] != 'RUNNING':
+                    raise RuntimeError('campaign is not running')
+                maximum = int(json.loads(row['config_json'])['limits']['max_codex_calls'])
+                if row['codex_calls'] >= maximum:
+                    raise CodexBudgetExhausted(f"campaign Codex-call budget exhausted ({row['codex_calls']}/{maximum})")
             count = con.execute("SELECT COUNT(*) AS n FROM events WHERE kind='CODEX_CALL'").fetchone()["n"]
             if count >= max_calls:
-                raise RuntimeError("Codex call budget exhausted; obtain operator approval")
-            con.execute("INSERT INTO events(run_id,time,kind,payload_json) VALUES(NULL,?,?,?)", (time.time(), "CODEX_CALL", json.dumps({"role": role, "count": count+1})))
+                raise CodexBudgetExhausted(f"global Codex call budget exhausted ({count}/{max_calls}); LOCO_CODEX_MAX_CALLS")
+            now = time.time()
+            con.execute("INSERT INTO events(run_id,time,kind,payload_json) VALUES(NULL,?,?,?)", (now, "CODEX_CALL", json.dumps({"role": role, "count": count+1, "campaign_id": campaign_id})))
+            if campaign_id is not None:
+                con.execute('UPDATE campaigns SET codex_calls=codex_calls+1,updated_at=? WHERE id=?', (now, campaign_id))
+                con.execute('INSERT INTO campaign_events(campaign_id,time,kind,payload_json) VALUES(?,?,?,?)',
+                            (campaign_id, now, 'CODEX_CALL_ADMITTED', json.dumps({'role': role})))
 
     def set_mlflow_id(self, run_id, mlflow_run_id):
         with self.connect() as con:

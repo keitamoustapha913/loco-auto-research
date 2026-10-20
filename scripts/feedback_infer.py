@@ -48,7 +48,7 @@ def modules_of(predictor):
     return [v for v in vars(predictor).values() if isinstance(v,torch.nn.Module)]
 
 
-def infer_one(module, checkpoint, image_path, size, output):
+def infer_one(module, checkpoint, image_path, size, output, inference_config=None):
     torch.set_num_threads(2)
     def prohibited(*args,**kwargs):
         raise RuntimeError('optimizer steps are prohibited in real-development inference')
@@ -58,7 +58,8 @@ def infer_one(module, checkpoint, image_path, size, output):
     checkpoint = Path(checkpoint)
     frozen = {p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in checkpoint.parent.iterdir()
               if p.name in {'model.pt','checkpoint_manifest.json'}}
-    predictor = load_candidate(module).load(checkpoint,device='cpu')
+    from benchmark.train_adapter import load_predictor
+    predictor = load_predictor(load_candidate(module), checkpoint, 'cpu', inference_config)
     modules = modules_of(predictor)
     if not modules:
         raise ValueError('audited inference requires an exposed torch Module on the predictor')
@@ -98,6 +99,7 @@ if __name__=='__main__':
     import argparse
     p=argparse.ArgumentParser()
     p.add_argument('--size',type=int,required=True)
+    p.add_argument('--inference-config-json',default='{}')
     a=p.parse_args()
     if not 16<=a.size<=1024: raise ValueError('invalid frozen preprocessing size')
-    infer_one('/candidate/model.py','/inputs/checkpoint_manifest.json','/inputs/image.png',a.size,'/output')
+    infer_one('/candidate/model.py','/inputs/checkpoint_manifest.json','/inputs/image.png',a.size,'/output',json.loads(a.inference_config_json))

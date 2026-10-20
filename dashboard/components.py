@@ -55,6 +55,13 @@ def development_result_card(feedback):
     from dashboard.presentation import development_card_metrics
     st.subheader(feedback['candidate_id'].replace('_',' ').title())
     st.caption('Development · Real anomalies · Custom LOCO split, not official full-test results')
+    comparison = feedback.get('scientific_comparison')
+    if comparison:
+        st.caption(f"Scientific comparison: {comparison['status'].replace('_',' ').title()} · "
+                   f"{comparison['recorded_jobs']} / {comparison['expected_jobs']} planned jobs. Completion does not establish hypothesis support.")
+        if comparison['status'] == 'INCOMPLETE':
+            with st.expander('Missing comparison evidence'):
+                st.write(comparison['problems'])
     values = development_card_metrics(feedback)
     for offset in range(0,len(values),3):
         for column,(label,value) in zip(st.columns(3),values[offset:offset+3]):

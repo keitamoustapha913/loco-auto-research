@@ -30,7 +30,7 @@ def test_campaign_persistence_and_call_budget(tmp_path):
     campaigns.reserve_codex_call(cid)
     with pytest.raises(RuntimeError, match='budget exhausted'):
         campaigns.reserve_codex_call(cid)
-    assert stop_reason(campaigns, cid)[0] == 'LIMIT_REACHED'
+    assert stop_reason(campaigns, cid)[0] == 'BUDGET_EXHAUSTED'
     campaigns.set_status(cid, 'PAUSED')
     campaigns.set_status(cid, 'RUNNING')
     campaigns.set_status(cid, 'STOPPED')
@@ -198,7 +198,7 @@ def test_next_hypothesis_generation_uses_measured_critique(tmp_path, monkeypatch
     def proposals(target_store, prompt, **kwargs):
         prompts.append(prompt)
         item = {'hypothesis_id': 'new_h', 'priority_rank': 1, 'priority_rationale': 'Measured failure',
-                'new_dependencies': []}
+                'new_dependencies': [],'experiment_plan': __import__('plan_fixtures').experiment_plan('new_h')}
         target_store.add_proposal(item)
         return [item]
     monkeypatch.setattr(controller, 'add_research_proposals', proposals)
@@ -230,7 +230,8 @@ def test_fresh_gpu_cycle_uses_prior_evidence_and_cuda_contract(tmp_path, monkeyp
     def propose(target, prompt, **kwargs):
         prompts.append(prompt)
         item = {'hypothesis_id': 'fresh_cuda_h', 'priority_rank': 1,
-                'priority_rationale': 'independent generator evidence', 'new_dependencies': []}
+                'priority_rationale': 'independent generator evidence', 'new_dependencies': [],
+                'experiment_plan': __import__('plan_fixtures').experiment_plan('fresh_cuda_h')}
         target.add_proposal(item)
         return [item]
     monkeypatch.setattr(controller, 'add_research_proposals', propose)

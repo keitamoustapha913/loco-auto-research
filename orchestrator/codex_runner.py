@@ -13,8 +13,12 @@ class AgentFailure(RuntimeError):
     pass
 
 
+class InvalidAgentOutput(AgentFailure):
+    """An agent completed but its response needs correction, not host changes."""
+
+
 def invoke(role: str, repo_root: Path, schema_path: Path, prompt: str, timeout=180, worktree=None,
-           personal_mode=False):
+           personal_mode=False, reference_files=None):
     if role not in {"scout", "researcher", "implementer", "critic"}:
         raise ValueError("unknown agent role")
     root = Path(repo_root).resolve(strict=True)
@@ -40,7 +44,8 @@ def invoke(role: str, repo_root: Path, schema_path: Path, prompt: str, timeout=1
             candidate_dir = cwd / "candidates" / cwd.name if role == "implementer" else None
             if candidate_dir is not None:
                 candidate_dir.mkdir(parents=True, exist_ok=True)
-            command = sandbox_command(root, role, Path(schema_path), response_file, task, candidate_dir)
+            command = sandbox_command(root, role, Path(schema_path), response_file, task, candidate_dir,
+                                      reference_files=reference_files)
             env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
         else:
             command = ["codex", "exec", "--cd", str(cwd), "--sandbox", "workspace-write" if role == "implementer" else "read-only", "--output-schema", str(Path(schema_path).resolve()), "--output-last-message", str(response_file), task]
@@ -54,13 +59,16 @@ def invoke(role: str, repo_root: Path, schema_path: Path, prompt: str, timeout=1
             if isinstance(detail, bytes):
                 detail = detail.decode(errors='replace')
             raise AgentFailure(f"Codex invocation timed out: {detail[-600:]}") from exc
-        if done.returncode or not response_file.is_file():
+        if done.returncode:
             raise AgentFailure(f"Codex exited {done.returncode}: {done.stderr[-800:]}")
+        if not response_file.is_file():
+            raise InvalidAgentOutput('Codex completed without the required structured response file')
         try:
             output = json.loads(response_file.read_text())
             validate(instance=output, schema=schema)
-        except (ValueError, Exception) as exc:
-            raise AgentFailure("Codex produced invalid schema-constrained JSON") from exc
+        except Exception as exc:
+            raise InvalidAgentOutput(f"Codex produced invalid schema-constrained JSON: {exc}\n"
+                                     f"Rejected response: {response_file.read_text()[-8000:]}") from exc
     return {"response": output, "prompt_sha256": hashlib.sha256(task.encode()).hexdigest(), "schema_sha256": hashlib.sha256(Path(schema_path).read_bytes()).hexdigest()}
 
 
@@ -98,14 +106,21 @@ def commit_candidate_snapshot(repo_root, hypothesis_id):
         if line[3:].replace('"', '') not in {f'candidates/{hypothesis_id}/{p.name}' for p in files}:
             raise PermissionError('candidate worktree contains out-of-scope changes')
     branch = f'loco-candidate/{hypothesis_id}'
-    subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', '-C', str(tree), 'switch', '-c', branch],
-                   check=True, capture_output=True, text=True)
+    current_branch = subprocess.run(['git', '-C', str(tree), 'branch', '--show-current'],
+                                    check=True, capture_output=True, text=True).stdout.strip()
+    if current_branch != branch:
+        subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', '-C', str(tree), 'switch', '-c', branch],
+                       check=True, capture_output=True, text=True)
     subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', '-C', str(tree), 'add', '--',
                     *[str(p.relative_to(tree)) for p in files]], check=True)
-    subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'user.name=LOCO Research Controller',
+    changed = subprocess.run(['git', '-C', str(tree), 'diff', '--cached', '--quiet'], check=False)
+    if changed.returncode not in (0, 1):
+        raise RuntimeError('cannot inspect repaired candidate snapshot')
+    if changed.returncode:
+        subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'user.name=LOCO Research Controller',
                     '-c', 'user.email=loco-controller@localhost', '-C', str(tree), 'commit',
                     '-m', f'Candidate {hypothesis_id}: isolated research snapshot'],
-                   check=True, capture_output=True, text=True)
+                       check=True, capture_output=True, text=True)
     sha = subprocess.run(['git', '-C', str(tree), 'rev-parse', 'HEAD'], check=True,
                          capture_output=True, text=True).stdout.strip()
     return sha

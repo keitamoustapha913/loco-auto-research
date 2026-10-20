@@ -13,7 +13,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 import sys
 from orchestrator.budgets import BudgetExceeded, max_job_seconds, enforce
-from orchestrator.codex_runner import invoke, create_candidate_worktree
+from orchestrator.codex_runner import invoke, create_candidate_worktree, InvalidAgentOutput
 from orchestrator.gpu_queue import claim_next, gpu_lock
 from orchestrator.experiment_runner import execute_run
 from orchestrator.state_store import StateStore
@@ -47,7 +47,17 @@ def run_worker_once(store, manifest_path, runtime, personal_mode_authorized=Fals
         return {"run_id": job["run_id"], "status": outcome}
 
 
-def budgeted_invoke(store, role, repo_root, schema, prompt, campaign=None, **kwargs):
+def _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=None, **kwargs):
+    requested = kwargs.pop('evidence_run_ids', ())
+    if kwargs.get('personal_mode') and role in {'researcher','implementer','critic'}:
+        from orchestrator.experiment_plan import research_evidence
+        evidence, files = research_evidence(store, repo_root, requested)
+        if evidence:
+            prompt += ('\nRelevant committed prior implementations, failures, exact frozen baseline references and '
+                       'aggregate results follow. Read their /workspace/evidence/<run_id>/model.py, '
+                       'configuration.json and evidence.json. Historical one-arm results are exploratory, '
+                       'not controlled proof; a high single metric is not a winner.\n' + json.dumps(evidence))
+            kwargs['reference_files'] = files
     if campaign:
         campaigns, campaign_id = campaign
         row = campaigns.get(campaign_id)
@@ -56,8 +66,10 @@ def budgeted_invoke(store, role, repo_root, schema, prompt, campaign=None, **kwa
         if remaining < 10:
             raise RuntimeError('campaign wall-time budget exhausted before Codex call')
         kwargs['timeout'] = min(int(kwargs.get('timeout', 180)), remaining)
-        campaigns.reserve_codex_call(campaign_id)
-        campaigns.event(campaign_id, 'AGENT_STARTED', role=role)
+        recent_failures = [e for e in campaigns.events(campaign_id,100)
+                           if e['kind'] in {'ATTEMPT_FAILED','VALIDATION_FAILED','PLAN_REVIEW_FAILED'}][:5]
+        if recent_failures:
+            prompt += '\nRecent exact campaign failures (do not erase or rename them): '+json.dumps(recent_failures)
     if role in {'researcher', 'critic'}:
         from orchestrator.development_feedback import latest_summary
         feedback = []
@@ -71,7 +83,11 @@ def budgeted_invoke(store, role, repo_root, schema, prompt, campaign=None, **kwa
                        'but never use anomaly images/masks to fit model weights, normalization or thresholds. '
                        'Custom split, not official full-test performance. Missing AU-sPRO is unavailable, not zero. '
                        + json.dumps(feedback))
-    store.reserve_codex_call(role)
+    if campaign:
+        campaigns.reserve_codex_call(campaign_id, role)
+        campaigns.event(campaign_id, 'AGENT_STARTED', role=role)
+    else:
+        store.reserve_codex_call(role)
     try:
         result = invoke(role, repo_root, schema, prompt, **kwargs)
     except Exception as exc:
@@ -83,12 +99,21 @@ def budgeted_invoke(store, role, repo_root, schema, prompt, campaign=None, **kwa
     return result
 
 
-def add_research_proposals(store, prompt, count=3, campaign=None, personal_mode=False,
-                           require_gpu_pilot=False):
-    schema = REPO / "schemas" / "proposals.schema.json"
-    output = budgeted_invoke(store, "researcher", REPO, schema, prompt, timeout=240,
-                             campaign=campaign, personal_mode=personal_mode)["response"]
-    proposals = output["proposals"]
+def budgeted_invoke(store, role, repo_root, schema, prompt, campaign=None, **kwargs):
+    # Researcher/Implementer combine response validation with their downstream
+    # checks below, sharing one repair allowance. Scout/Critic validate at the
+    # structured-output boundary and receive the same correction mechanism.
+    if role in {'scout', 'critic'}:
+        def request(feedback, attempt):
+            return _budgeted_invoke_once(store, role, repo_root, schema, prompt + feedback,
+                                         campaign=campaign, **kwargs)
+        result, _, _ = _with_agent_correction(store, campaign, role, request, lambda result: None)
+        return result
+    return _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=campaign, **kwargs)
+
+
+def _validate_research_proposals(store, proposals, count, require_gpu_pilot):
+    """Validate the entire batch before persisting any accepted proposal."""
     if len(proposals) < count:
         raise ValueError(f"researcher returned {len(proposals)}; need at least {count}")
     families = {p["candidate_family"] for p in proposals}
@@ -101,19 +126,139 @@ def add_research_proposals(store, prompt, count=3, campaign=None, personal_mode=
     def signature(item):
         return ' '.join((item.get('claim', '') + ' ' + item.get('controlled_change', '')).lower().split())
     for proposal in proposals:
+        followup = proposal.get('followup_of', '')
+        followup_kind = proposal.get('followup_kind', 'new')
+        if followup_kind != 'new' and not any(p['hypothesis_id']==followup for p in prior):
+            raise ValueError('scientific follow-up must name an existing parent hypothesis')
+        if followup_kind == 'new' and followup:
+            raise ValueError('new hypothesis cannot silently reuse a parent identity')
         minutes = proposal.get('estimated_gpu_minutes')
         if require_gpu_pilot and (isinstance(minutes, bool) or not isinstance(minutes, (int, float))
-                                  or not 0 < minutes <= 5
+                                  or not 0 < minutes <= 240
                                   or 'cpu-only' in proposal.get('evaluation_plan', '').lower()):
-            raise ValueError('CUDA pilot requires GPU-trained hypotheses within five minutes; CPU-only proposals remain research leads')
+            raise ValueError('CUDA pilot requires GPU-trained hypotheses within authorized limits; CPU-only proposals remain research leads')
         if any(not isinstance(dep, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+(?:[<>=!~]+[0-9][A-Za-z0-9_.-]*)?', dep)
                for dep in proposal.get('new_dependencies', [])):
             raise ValueError('new_dependencies must contain package names only; use [] for none')
-        if any(proposal['hypothesis_id'] == old['hypothesis_id'] or
-               SequenceMatcher(None, signature(proposal), signature(old)).ratio() > 0.92
-               for old in prior):
-            raise ValueError(f"duplicate research proposal: {proposal['hypothesis_id']}")
+        duplicate = next((old for old in prior if proposal['hypothesis_id'] == old['hypothesis_id'] or
+                          (not (old['hypothesis_id']==followup and followup_kind!='new') and
+                           SequenceMatcher(None, signature(proposal), signature(old)).ratio() > 0.92)), None)
+        if duplicate:
+            raise ValueError(f"duplicate research proposal: {proposal['hypothesis_id']}; "
+                             f"matches {duplicate['hypothesis_id']}: {duplicate.get('claim', '')} "
+                             f"Controlled change: {duplicate.get('controlled_change', '')}")
+        from orchestrator.experiment_plan import validate_plan
+        if 'experiment_plan' not in proposal:
+            raise ValueError('structured experiment_plan required for newly generated hypotheses')
+        validate_plan(proposal['experiment_plan'], proposal['hypothesis_id'])
         prior.append(proposal)
+
+
+def _validation_event(store, campaign, kind, role, **payload):
+    """Retain rejection/repair evidence without marking a research failure."""
+    data = dict(payload, role=role)
+    with store.connect() as con:
+        con.execute('INSERT INTO events(run_id,time,kind,payload_json) VALUES(NULL,?,?,?)',
+                    (__import__('time').time(), kind, json.dumps(data)))
+    if campaign:
+        campaign[0].event(campaign[1], kind, **data)
+
+
+def _with_agent_correction(store, campaign, role, request, validate, *,
+                           hypothesis_id=None, initial_feedback=None):
+    """One shared correction for agent-owned output/validation failures.
+
+    Classification uses the failure's origin, not message matching. Only the
+    validation callback handles generated proposals/files/tests; host operations
+    (workspace creation, scheduling, database writes) stay outside that boundary.
+    """
+    import sqlite3
+    import traceback
+    from orchestrator.autonomy import CampaignHalted, await_authorized_stage
+    feedback = ('\nTrusted candidate execution failure to correct:\n' + initial_feedback) if initial_feedback else ''
+    attempts = 1 if initial_feedback is not None else 2
+    for attempt in range(attempts):
+        if campaign:
+            await_authorized_stage(campaign[0], campaign[1], finishing=True)
+        phase = 'agent_response'
+        response = None
+        try:
+            response = request(feedback, attempt)
+            phase = 'generated_work_validation'
+            validation = validate(response)
+            return response, validation, initial_feedback is not None or attempt > 0
+        except Exception as exc:
+            # These controls must never become instructions to change the host,
+            # request extra privileges, edit budgets, or weaken trusted checks.
+            if isinstance(exc, (BudgetExceeded, CampaignHalted, PermissionError, sqlite3.Error, subprocess.SubprocessError)):
+                raise
+            if isinstance(exc, OSError) and not isinstance(exc, TimeoutError):
+                raise
+            if phase == 'agent_response' and not isinstance(exc, InvalidAgentOutput):
+                raise  # CLI/transport/host failure, rather than generated output.
+            detail = {'hypothesis_id': hypothesis_id, 'attempt': attempt+1, 'stage': phase,
+                      'error_type': type(exc).__name__, 'error': str(exc),
+                      'traceback': traceback.format_exc(limit=8)[-12000:]}
+            _validation_event(store, campaign, 'VALIDATION_FAILED', role, **detail)
+            if attempt+1 == attempts:
+                raise
+            _validation_event(store, campaign, 'REPAIR_REQUESTED', role, **detail)
+            feedback = ('\nTrusted failure report for correction:\n' + json.dumps(detail) +
+                        '\nDiagnose and correct the cause in your own generated output or assigned candidate files. '
+                        'Return a complete response satisfying the same contract. Preserve scientific intent and evidence. '
+                        'Do not weaken tests, trusted evaluators, restrictions or budgets. If correction is impossible '
+                        'within your authority, report that limitation accurately. Rejected response: ' +
+                        json.dumps(response, default=str)[-24000:])
+
+
+def add_research_proposals(store, prompt, count=3, campaign=None, personal_mode=False,
+                           require_gpu_pilot=False):
+    schema = REPO / "schemas" / "proposals.schema.json"
+    previous = [json.loads(row['proposal_json']) for row in list_proposals(store)[:50]]
+    instruction = prompt + '\nPreviously recorded hypotheses (do not repeat IDs or mechanisms): ' + json.dumps([
+        {key: p.get(key, '') for key in ('hypothesis_id', 'claim', 'controlled_change')} for p in previous])
+    instruction += (' Return distinct mechanisms; renaming the same idea is insufficient. '
+                    'Use unique hypothesis IDs and valid priority ranks.')
+    instruction += (' Every proposal requires experiment_plan matching schemas/experiment_plan.schema.json. '
+                    'Declare every arm, seed, complete training settings including steps, size, batch_size, '
+                    'expected_optimizer_updates and expected_source_exposures, prediction settings, required '
+                    'measurements, executable diagnose hook requests, controlled variables and bounded resources. '
+                    'Frozen baselines must use the exact supplied run ID, source/checkpoint/configuration hashes '
+                    'and seed, never a historical hypothesis name. Do not claim future measurements are available. '
+                    'COMPLETE only means requested work executed; missing arms or diagnostics mean INCOMPLETE. '
+                    'You may explicitly complete, replicate or ablate a previous hypothesis using followup_of '
+                    'and followup_kind, with a new unique hypothesis/plan identity. Do not evade an incomplete '
+                    'comparison by superficially renaming a different single-arm experiment. Use followup_kind=new '
+                    'and followup_of="" only for new mechanisms. ')
+    if campaign:
+        campaigns, cid = campaign
+        limits = json.loads(campaigns.get(cid)['config_json'])['limits']
+        usage = campaigns.usage(cid)
+        remaining = {'max_jobs':limits['max_experiments']-usage['experiments'],
+                     'max_gpu_seconds':limits['max_gpu_hours']*3600-usage['gpu_seconds'],
+                     'max_wall_seconds':limits['max_wall_hours']*3600-usage['wall_seconds'],
+                     'max_job_seconds':limits['max_job_seconds']}
+        instruction += '\nRemaining ceilings for ONE comparison (not spending targets): '+json.dumps(remaining)
+    def request(feedback, attempt):
+        output = budgeted_invoke(store, "researcher", REPO, schema, instruction + feedback, timeout=240,
+                                 campaign=campaign, personal_mode=personal_mode)["response"]
+        _validation_event(store, campaign, 'RESEARCHER_RESPONSE', 'researcher',
+                          attempt=attempt+1, response=output)
+        return output
+    def validate(output):
+        from orchestrator.experiment_plan import decode_agent_plan
+        for proposal in output['proposals']:
+            if proposal.get('experiment_plan'):
+                proposal['experiment_plan'] = decode_agent_plan(proposal['experiment_plan'])
+        _validate_research_proposals(store, output['proposals'], count, require_gpu_pilot)
+        from orchestrator.experiment_plan import verify_baseline
+        for proposal in output['proposals']:
+            plan = proposal['experiment_plan']
+            for reference in plan['baselines']: verify_baseline(store, reference, REPO)
+            if campaign and any(plan['resource_budget'][key] > allowance for key,allowance in remaining.items()):
+                raise ValueError('proposed comparison exceeds remaining authorized campaign allowance')
+        return output['proposals']
+    _, proposals, _ = _with_agent_correction(store, campaign, 'researcher', request, validate)
     for proposal in proposals:
         store.add_proposal(proposal)
         with store.connect() as con:
@@ -146,14 +291,54 @@ def list_proposals(store):
     return [dict(row) for row in rows]
 
 
+def _validate_candidate_files(tree, hypothesis_id):
+    """Allow repair of extra regular files only inside the assigned directory.
+
+    Outside-workspace changes and symlinks remain hard permission failures.
+    The controller never removes files on the agent's behalf.
+    """
+    candidate = tree / 'candidates' / hypothesis_id
+    if candidate.is_symlink() or not candidate.resolve().is_relative_to(tree.resolve()):
+        raise PermissionError('candidate directory must not be a symlink')
+    approved_names = {'model.py', 'README.md', 'test_model.py', 'candidate_manifest.json'}
+    approved_files = {f'candidates/{hypothesis_id}/{name}' for name in approved_names}
+    changed = subprocess.run(['git', '-C', str(tree), 'status', '--porcelain', '--untracked-files=all'],
+                             check=True, capture_output=True, text=True).stdout.splitlines()
+    extras = set()
+    for line in changed:
+        filename = line[3:].replace('"', '')
+        path = tree / filename
+        if ('..' in Path(filename).parts or not path.is_relative_to(candidate)
+                or path.is_symlink() or not path.resolve().is_relative_to(candidate.resolve())):
+            raise PermissionError(f'Agent attempted to modify out-of-scope path: {filename}')
+        if filename not in approved_files:
+            extras.add(filename)
+    for item in candidate.rglob('*'):
+        if item.is_symlink() or not item.resolve().is_relative_to(candidate.resolve()):
+            raise PermissionError(f'Agent wrote an unsafe candidate path: {item.name}')
+        if item.parent != candidate or item.name not in approved_names:
+            extras.add(str(item.relative_to(tree)))
+    if extras:
+        raise ValueError('Unapproved candidate files inside assigned workspace: ' + ', '.join(sorted(extras)) +
+                         '. Remove these extra generated files. Allowed files: model.py, README.md, '
+                         'test_model.py, candidate_manifest.json. Put licensing/provenance notes in README.md '
+                         'or candidate_manifest.json. Do not modify files outside your assigned candidate directory.')
+
+
 def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
-                       require_torch_cuda=False):
+                       require_torch_cuda=False, validation_runtime=None,
+                       repair_feedback=None):
     with store.connect() as con:
         row = con.execute("SELECT proposal_json FROM hypotheses WHERE hypothesis_id=?", (hypothesis_id,)).fetchone()
     if not row:
         raise KeyError(hypothesis_id)
     proposal = json.loads(row["proposal_json"])
-    tree = create_candidate_worktree(REPO, hypothesis_id)
+    if repair_feedback is None:
+        tree = create_candidate_worktree(REPO, hypothesis_id)
+    else:
+        tree = (REPO / 'candidates' / 'worktrees' / hypothesis_id).resolve(strict=True)
+        if not tree.is_relative_to((REPO / 'candidates' / 'worktrees').resolve()):
+            raise PermissionError('repair workspace escapes assigned candidates')
     allowed_file = tree / "candidates" / hypothesis_id / "model.py"
     schema = REPO / "schemas" / "implementation.schema.json"
     instruction = (
@@ -167,89 +352,143 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
         "output_dir/checkpoint_manifest.json and output_dir/model.pt; the trusted "
         "runner measures the latter artifact. Read-only scripts/run_candidate.py "
         "shows the precise protocol. Do not alter its calling convention. "
-        "Actually create model.py, a short README, and optionally test_model.py and candidate_manifest.json; "
+        "Actually create model.py, a short README, mandatory test_model.py and optionally candidate_manifest.json; "
         "a proposal or plan alone fails verification. "
-        "If you write tests, use the system temporary directory for fixtures because candidate source is mounted read-only during tests. "
+        "Tests run first inside a CPU-only sandbox with no NVIDIA devices. At least one real CPU test must pass. "
+        "Test rejection of non-training splits before device setup or image reads, invalid inputs, and applicable output-shape logic on CPU. "
+        "Never skip the whole test module or class based on CUDA availability. Apply CUDA skip rules only to individual GPU tests. "
+        "The trusted queued job then runs a separate bounded CUDA train/load/predict smoke check using two train/good images, "
+        "steps=2, epochs=1 and batch_size=1, before pilot training. Honor those bounded smoke settings. "
+        "Use system temporary directories for test fixtures because candidate source is read-only. "
+        "Only model.py, README.md, test_model.py and candidate_manifest.json are permitted in your candidate directory. "
+        "Put licensing notes in README.md or candidate_manifest.json; do not create LICENSE or other extra files. "
         "Do not change other directories. " +
         ("This pilot must implement a real trainable PyTorch model. If config['device'] is cuda, "
          "move model and training tensors to CUDA, train there, and run inference there. "
          "Do not claim GPU execution if no CUDA tensors are used. " if require_torch_cuda else "") +
         f"Proposal: {json.dumps(proposal, sort_keys=True)}"
     )
+    if proposal.get('experiment_plan'):
+        instruction += ('\nImplement this exact experiment_plan, not a default demonstration. Honor all declared '
+            'training settings, seeds, arms and inference modes. steps is a total schedule, not an implicit one-epoch cap. '
+            'Save checkpoint metadata training_audit={seed, optimizer_updates, source_exposures}; optimizer_updates '
+            'counts actual optimizer.step calls across all optimizers. The runner independently counts calls and '
+            'rejects mismatches with expected_optimizer_updates/expected_source_exposures. Exposure counts must be '
+            'instrumented in your minibatch loop, including sampling with replacement. Smoke checks use their own '
+            'two-update/two-exposure configuration and disposable weights. For nonempty prediction settings implement '
+            'load(checkpoint_manifest, device, inference_config) and set predictor.inference_config to the exact '
+            'consumed dictionary; never ignore settings. For each requested diagnostic implement '
+            'diagnose(predictor, assessment_good_images, diagnostic_config), returning {metrics:{...}, ...} '
+            'with all named finite measurements. It runs on frozen weights in inference mode on disjoint normal '
+            'assessment inputs and permitted derived synthetic data, never real-development images/masks. '
+            'Persist per-image diagnostic evidence where meaningful in the returned JSON. A missing arm, seed, '
+            'control or endpoint means INCOMPLETE; do not substitute a historical recipe from its name.')
     import subprocess
     from orchestrator.experiment_runner import verify_candidate_source
-    feedback = ''
-    for attempt in range(2):
+    def request(feedback, attempt):
         response = budgeted_invoke(store, "implementer", REPO, schema, instruction + feedback,
-                                   timeout=600, worktree=tree, campaign=campaign, personal_mode=personal_mode)
-        with store.connect() as con:
-            con.execute("INSERT INTO events(run_id,time,kind,payload_json) VALUES(NULL,?,?,?)",
-                        (__import__('time').time(), 'IMPLEMENTER_RESPONSE', json.dumps({
-                            'hypothesis_id': hypothesis_id, 'attempt': attempt + 1,
-                            'response': response['response']})))
-        changed = subprocess.run(["git", "-C", str(tree), "status", "--porcelain", "--untracked-files=all"],
-                                 check=True, capture_output=True, text=True).stdout.splitlines()
-        approved_prefix = f"candidates/{hypothesis_id}/"
-        approved_names = {'model.py', 'README.md', 'test_model.py', 'candidate_manifest.json'}
-        approved_files = {approved_prefix + name for name in approved_names}
-        for line in changed:
-            filename = line[3:].replace('"', '')
-            if filename not in approved_files or ".." in Path(filename).parts or (tree / filename).is_symlink():
-                raise PermissionError(f"Agent attempted to modify out-of-scope path: {filename}")
-        for item in allowed_file.parent.rglob('*'):
-            if item.is_symlink() or (item.is_file() and item.name not in approved_names):
-                raise PermissionError(f"Agent wrote an unapproved candidate file: {item.name}")
+                                   timeout=600, worktree=tree, campaign=campaign, personal_mode=personal_mode,
+                                   evidence_run_ids=[b['run_id'] for b in proposal.get('experiment_plan',{}).get('baselines',[])])
+        _validation_event(store, campaign, 'IMPLEMENTER_RESPONSE', 'implementer',
+                          hypothesis_id=hypothesis_id, attempt=attempt+1, response=response['response'])
+        return response
+    def validate(response):
         if response["response"].get("new_dependencies") or response['response'].get('external_weights'):
             raise PermissionError("Agent requested dependencies or external weights; provenance and operator approval required")
-        try:
-            if response['response'].get('candidate_id') != hypothesis_id or not all(
-                    response['response'].get(k) is True for k in ('train_contract', 'load_contract', 'predict_contract')):
-                raise ValueError('implementer did not attest the assigned candidate contract')
-            if not allowed_file.is_file():
-                raise ValueError('implementation missing model.py')
-            verify_candidate_source(allowed_file)
-            break
-        except ValueError as exc:
-            if attempt == 1:
-                raise
-            feedback = f"\nYour first attempt failed the trusted static check: {exc}. Repair only the assigned candidate files and return accurate contract claims."
+        _validate_candidate_files(tree, hypothesis_id)
+        if response['response'].get('candidate_id') != hypothesis_id or not all(
+                response['response'].get(k) is True for k in ('train_contract', 'load_contract', 'predict_contract')):
+            raise ValueError('implementer did not attest the assigned candidate contract')
+        if not allowed_file.is_file():
+            raise ValueError('implementation missing model.py')
+        verify_candidate_source(allowed_file)
+        if proposal.get('experiment_plan'):
+            import ast
+            functions = {n.name:n for n in ast.parse(allowed_file.read_text()).body if isinstance(n,ast.FunctionDef)}
+            plan = proposal['experiment_plan']
+            if plan['diagnostics'] and 'diagnose' not in functions:
+                raise ValueError('experiment plan requires diagnose(predictor, assessment_good_images, diagnostic_config)')
+            if any(a['execution']=='train' and a['inference'] for a in plan['arms']):
+                if 'inference_config' not in {a.arg for a in functions['load'].args.args}:
+                    raise ValueError('planned inference intervention requires explicit load inference_config argument')
+        if validation_runtime is not None:
+            from orchestrator.experiment_runner import probe_candidate_interface, run_candidate_unit_tests
+            good_root = Path(os.environ['LOCO_GOOD_ROOT'])
+            probe_candidate_interface(REPO, allowed_file, good_root, validation_runtime, hypothesis_id)
+            cpu_result = run_candidate_unit_tests(REPO, allowed_file, good_root, validation_runtime, hypothesis_id)
+            if campaign:
+                campaign[0].event(campaign[1], 'CANDIDATE_TESTS', hypothesis_id=hypothesis_id, **cpu_result)
+            return cpu_result
+        return None
+    response, cpu_result, repair_used = _with_agent_correction(store, campaign, 'implementer',
+        request, validate, hypothesis_id=hypothesis_id, initial_feedback=repair_feedback)
     store.set_hypothesis_status(hypothesis_id, "IMPLEMENTED")
-    return {"worktree": str(tree), "candidate_module": str(allowed_file), "agent": response["response"]}
+    return {"worktree": str(tree), "candidate_module": str(allowed_file), "agent": response["response"],
+            "cpu_validation": cpu_result, "repair_used": repair_used}
 
 
 def queue_candidate(store, hypothesis_id, candidate_id, category, stage, device, manifest_path, seconds=300,
                     personal_mode_authorized=False, campaign_id=None, campaign_name=None,
-                    context_arm=None, seed=None, synthetic_evaluation=True):
+                    context_arm=None, seed=None, synthetic_evaluation=True, cuda_smoke_required=False,
+                    effective_config=None, run_id=None):
     from benchmark.data_guard import load_manifest, manifest_fingerprint
     from orchestrator.experiment_runner import candidate_file, sha256
+    with store.connect() as con:
+        declared = con.execute('SELECT proposal_json FROM hypotheses WHERE hypothesis_id=?',(hypothesis_id,)).fetchone()
+    if declared and json.loads(declared[0]).get('experiment_plan') and effective_config is None:
+        raise ValueError('structured experiment plan must use loco-lab research; refusing default queue settings')
     if candidate_id != "toy_normal_ae" and not personal_mode_authorized and os.getenv("LOCO_SANDBOX_VERIFIED") != "1":
         raise PermissionError("Operator must verify OS isolation before queueing untrusted candidates")
-    module = candidate_file(REPO, candidate_id)
+    frozen = (effective_config or {}).get('frozen_baseline')
+    if frozen:
+        from orchestrator.experiment_plan import verify_baseline
+        _, origin = verify_baseline(store, frozen, REPO)
+        module = None
+    else:
+        module = candidate_file(REPO, candidate_id)
     manifest, paths = load_manifest(manifest_path)
     if not any(item["category"] == category for item in manifest["images"]):
         raise ValueError("category absent from authorized good-only manifest")
     enforce(store, next_gpu_seconds=seconds if device == "cuda" else 0)
     timeout = min(int(seconds), max_job_seconds())
-    if seed is not None and (candidate_id != 'masked_context_ablation' or seed not in {7, 17, 29}):
+    if effective_config is None and seed is not None and (candidate_id != 'masked_context_ablation' or seed not in {7, 17, 29}):
         raise ValueError('seed is restricted to the predeclared masked-context study seeds')
     cfg = {"device": device, "size": 128, "epochs": 1, "seed": 7 if seed is None else seed,
-           "timeout_seconds": timeout, "category": category, "model_sha256": sha256(module),
+           "timeout_seconds": timeout, "category": category, "model_sha256": frozen['source_sha256'] if frozen else sha256(module),
            "metric_evaluator_version": "development-v2.0", "synthetic_evaluation": bool(synthetic_evaluation)}
+    if cuda_smoke_required:
+        cfg['cuda_smoke_required'] = True
     if context_arm is not None:
         if candidate_id != 'masked_context_ablation' or context_arm not in {'local', 'global', 'combined', 'neither', 'spatial'}:
             raise ValueError('context_arm is only available for the reviewed masked-context ablation')
         cfg.update(context_arm=context_arm, steps=100, batch_size=4)
+    if effective_config is not None:
+        # Compiled by trusted plan code, not defaults or agent shell commands.
+        cfg = dict(effective_config)
+        cfg.update(device=device, category=category, timeout_seconds=timeout,
+                   synthetic_evaluation=bool(synthetic_evaluation), cuda_smoke_required=bool(cuda_smoke_required))
+        actual_hash = frozen['source_sha256'] if frozen else sha256(module)
+        if cfg.get('model_sha256') != actual_hash:
+            raise ValueError('planned source hash changed before queue submission')
     if campaign_id:
         cfg["campaign_id"] = campaign_id
         if campaign_name:
             cfg["campaign_name"] = campaign_name
         cfg["execution_mode"] = "personal_bwrap" if personal_mode_authorized else "isolated"
     candidate_tree = REPO / "candidates" / "worktrees" / candidate_id
-    if candidate_tree.is_dir() and module.resolve().is_relative_to(candidate_tree.resolve()):
+    if frozen:
+        git_sha = origin['git_sha']
+    elif candidate_tree.is_dir() and module.resolve().is_relative_to(candidate_tree.resolve()):
         git_sha = subprocess.run(["git", "-C", str(candidate_tree), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
     else:
         git_sha = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
-    run_id = store.create_run(hypothesis_id, candidate_id, category, stage, cfg, git_sha=git_sha, manifest_sha256=manifest_fingerprint(manifest))
+    if run_id and store.get_run(run_id):
+        prior = store.get_run(run_id)
+        if json.loads(prior['config_json']) != cfg:
+            raise ValueError('stable plan job identity has conflicting configuration')
+        return run_id
+    run_id = store.create_run(hypothesis_id, candidate_id, category, stage, cfg, git_sha=git_sha,
+                              manifest_sha256=manifest_fingerprint(manifest), run_id=run_id)
     for state in ("IMPLEMENTED", "VALIDATED", "QUEUED"):
         store.transition(run_id, state)
     return run_id
@@ -273,6 +512,8 @@ def run_research_campaign(store, manifest_path, device="cuda", max_experiments=3
     completed = []
     proposals = [p for p in list_proposals(store) if p["status"] == "PROPOSED"]
     proposals.sort(key=lambda row: json.loads(row['proposal_json']).get('priority_rank', 999))
+    if any(json.loads(row['proposal_json']).get('experiment_plan') for row in proposals):
+        raise ValueError('legacy campaign cannot execute structured plans; use loco-lab research start --config APPROVED_CONFIG')
     for row in proposals[:max_experiments]:
         enforce(store, next_gpu_seconds=300 if device.startswith("cuda") else 0)
         hypothesis_id = row["hypothesis_id"]

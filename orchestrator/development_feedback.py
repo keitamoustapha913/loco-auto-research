@@ -94,7 +94,9 @@ def _evaluate(runtime,store,run_id,timeout,cancel):
     job=runtime/'jobs'/run_id
     if job.is_symlink() or not job.resolve(strict=True).is_relative_to(runtime/'jobs'):
         raise ValueError('job path escapes runtime')
-    module=candidate_file(REPO,run['candidate_id'])
+    from orchestrator.experiment_plan import execution_source
+    module=execution_source(run, store, runtime, REPO)
+    config=json.loads(run['config_json'])
     provenance=json.loads((job/'run_manifest.json').read_text())
     checkpoint=job/'checkpoint/model.pt'; checkpoint_meta=job/'checkpoint/checkpoint_manifest.json'
     good,_=load_manifest(runtime/'good_manifest.json')
@@ -130,9 +132,10 @@ def _evaluate(runtime,store,run_id,timeout,cancel):
             if remaining<=0: raise TimeoutError('bounded CPU feedback wall limit reached')
             folder=output/f'case_{index:04d}'; folder.mkdir()
             command=sandbox_command(REPO,module,empty,folder,
-                ['-m','scripts.feedback_infer','--size',str(provenance['size'])],use_gpu=False,
+                ['-m','scripts.feedback_infer','--size',str(provenance['size']),
+                 '--inference-config-json',json.dumps(config.get('inference', {}))],use_gpu=False,
                 input_files={'model.pt':checkpoint,'checkpoint_manifest.json':checkpoint_meta,
-                             'image.png':data_root/entry['path']})
+                             'image.png':data_root/entry['path']}, pinned_source=bool(config.get('frozen_baseline')))
             run_bounded(command, folder/'worker.log', min(30,remaining), cancel)
             validate_worker_outputs(folder, entry['width'], entry['height'])
             result=json.loads((folder/'inference.json').read_text())
@@ -179,6 +182,11 @@ def _evaluate(runtime,store,run_id,timeout,cancel):
                  'cuda_inference_memory_status':'unavailable: CPU inference; no CUDA measurement',
                  'localization_status':LOCALIZATION_STATUS,'localization_blocker':'Official download still HTTP 404; compatible scorer uses published definition, not verified original-code equivalence.',
                  'artifact_dir':str(output),'status':'COMPLETE_COMPATIBLE_DEVELOPMENT'}
+        if config.get('plan_sha256'):
+            summary.update(plan_id=config['plan_id'], plan_sha256=config['plan_sha256'],
+                           plan_arm=config['plan_arm'], seed=config['seed'],
+                           inference_configuration=config.get('inference', {}),
+                           trusted_source_sha256=config['trusted_source_sha256'])
         (output/'case_scores.json').write_text(json.dumps(rows,sort_keys=True,indent=2))
         (output/'summary.json').write_text(json.dumps(summary,sort_keys=True,indent=2))
         record_summary(store,run_id,summary)

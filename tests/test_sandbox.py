@@ -21,6 +21,9 @@ def test_sandbox_mount_allowlist(tmp_path):
     assert str(Path.home() / '.ssh') not in joined
     assert '--bind' in cmd and '/output' in cmd
     assert '--ro-bind' in cmd and '/data' in cmd
+    setting = cmd.index('CUBLAS_WORKSPACE_CONFIG')
+    assert cmd[setting - 1:setting + 2] == ['--setenv', 'CUBLAS_WORKSPACE_CONFIG', ':4096:8']
+    assert setting < cmd.index('/opt/venv/bin/python')
 
 
 def test_candidate_outside_repository_rejected(tmp_path):
@@ -39,6 +42,7 @@ def test_adversarial_mount_and_secret_denial(tmp_path):
     script = '''import json, os, socket
 from pathlib import Path
 result = {}
+assert os.environ['CUBLAS_WORKSPACE_CONFIG'] == ':4096:8'
 result["outside_readable"] = Path("%s").exists()
 result["controller_visible"] = Path("/lab/orchestrator/controller.py").exists()
 result["evaluator_visible"] = Path("/lab/benchmark/official_evaluator.py").exists()

@@ -7,6 +7,10 @@ class BudgetExceeded(RuntimeError):
     pass
 
 
+class CodexBudgetExhausted(BudgetExceeded):
+    """A denied call is a stop condition, not a failed research attempt."""
+
+
 def enforce(store, next_gpu_seconds=0, runtime=None):
     if store.is_paused():
         raise BudgetExceeded("controller paused by operator")
