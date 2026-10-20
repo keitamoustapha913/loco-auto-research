@@ -84,7 +84,10 @@ for arm in plan['arms']:
     started=time.monotonic()
     result=run(Path('/candidate/model.py'),manifest,cfg,Path('/output')/arm['arm_id'])
     required={m['key'] for m in plan['required_measurements'] if m['source']=='run'}
-    assert required<=result['metrics'].keys()
+    # Historical train() has no phase boundary. Do not fabricate training-only duration.
+    assert required-result['metrics'].keys()=={'training/duration_seconds'}
+    assert result['metrics']['training/timing_verified']==0
+    assert result['metrics']['training/function_wall_seconds']>0
     for key in plan['diagnostics'][0]['required_metrics']:
         assert 'diagnostic/within_source_proxy/'+key in result['metrics']
     assert not any(k.startswith('diagnostic/diagnostic/') for k in result['metrics'])
@@ -112,6 +115,11 @@ def test_exact_frozen_plan_six_cells_dispatched_and_missing_evidence_is_incomple
     folder=repo/'candidates'/CID;folder.mkdir();(folder/'model.py').write_bytes((FOLDER/'model.py').read_bytes())
     with store.connect() as con:
         cfg=json.loads(c.get(cid)['config_json']);cfg['research']['real_development_feedback']=True
+        # This dispatch fixture represents the original explicit six-job approval,
+        # not a new training-only authorization of the unchanged historical source.
+        cfg.pop('configuration_version',None)
+        cfg['limits']={'max_gpu_hours':.2,'max_wall_hours':3,'max_experiments':6,'max_codex_calls':16,
+                       'max_job_seconds':120,'max_consecutive_failures':1,'max_parallel_gpu_jobs':1}
         con.execute('UPDATE campaigns SET config_json=? WHERE id=?',(json.dumps(cfg),cid))
     # Historical reference integrity is independently checked against the real
     # read-only ledger during readiness inspection; this fixture has no live DB.
@@ -156,3 +164,17 @@ def test_exact_frozen_plan_six_cells_dispatched_and_missing_evidence_is_incomple
     assert comparison_result(p,broken,feedback)['status']=='INCOMPLETE'
     assert execute_plan(store,c,cid,runtime,p)==result and len(calls)==6
     assert p==PLAN
+
+
+def test_time_budget_does_not_rewrite_or_run_historical_source_without_phases(laboratory,monkeypatch):
+    store,c,cid,runtime,repo,calls,_=laboratory;p=copy.deepcopy(PLAN)
+    store.add_proposal({'hypothesis_id':CID})
+    folder=repo/'candidates'/CID;folder.mkdir();source=(FOLDER/'model.py').read_bytes();(folder/'model.py').write_bytes(source)
+    cfg=json.loads(c.get(cid)['config_json']);cfg['research']['real_development_feedback']=True
+    with store.connect() as con:con.execute('UPDATE campaigns SET config_json=? WHERE id=?',(json.dumps(cfg),cid))
+    monkeypatch.setattr(planning_contract,'baseline_capability',lambda s,ref,root:{
+        'reference':ref,'configuration':{'size':128},'recorded_inference':{},'named_inference_config_parameter':False})
+    result=execute_plan(store,c,cid,runtime,p)
+    assert result['status']=='INCOMPLETE' and calls==[] and c.runs(cid)==[]
+    assert any('training-only budget cannot be verified' in problem for problem in result['problems'])
+    assert (folder/'model.py').read_bytes()==source and digest(p)==digest(PLAN)

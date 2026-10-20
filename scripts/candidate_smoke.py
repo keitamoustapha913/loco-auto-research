@@ -34,7 +34,13 @@ def run(module_file, manifest_file, config, output):
     torch.cuda.reset_peak_memory_stats()
     module = load_candidate(module_file)
     checkpoint_dir = output / 'checkpoint'
-    module.train(smoke_config, smoke_manifest, checkpoint_dir)
+    if config.get('training_budget_seconds') is not None:
+        from scripts.training_phase import run_training_phases
+        # Disposable smoke is bounded by the host job and excluded from pilot training time.
+        smoke_config.pop('training_budget_seconds',None)
+        run_training_phases(module,smoke_config,smoke_manifest,checkpoint_dir,budget=None)
+    else:
+        module.train(smoke_config, smoke_manifest, checkpoint_dir)
     training_cuda_bytes = torch.cuda.max_memory_allocated()
     if training_cuda_bytes <= 0:
         raise ValueError('CUDA smoke observed no CUDA tensor allocation during training')

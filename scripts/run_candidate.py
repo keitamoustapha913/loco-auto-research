@@ -18,44 +18,25 @@ from benchmark.inference_benchmark import benchmark_predict
 
 
 def train_measured(module, config, manifest, output):
-    """Separate measured learning from import, validation and inference overhead."""
-    import signal
-    device = str(config.get('device', 'cpu'))
+    from scripts.training_phase import run_training_phases
+    if callable(getattr(module,'training_steps',None)) or config.get('training_budget_seconds') is not None:
+        return run_training_phases(module,config,manifest,output,budget=config.get('training_budget_seconds'))
+    # Legacy authorizations/infra fixtures retain their original calling contract.
+    # This wall duration is explicitly unverified, never training-only compliance.
+    device=str(config.get('device','cpu'))
     if device.startswith('cuda'):
         import torch
         torch.cuda.synchronize()
-    budget = config.get('training_budget_seconds')
-    started = time.perf_counter()
-    audit_path = Path(output).parent/'training_timing.json'
-    timing = {'started_at':time.time(), 'status':'RUNNING', 'budget_seconds':budget,
-              'protocol':'train-call-with-device-synchronization-v1'}
-    audit_path.write_text(json.dumps(timing))
-    previous_handler = None
-    previous_timer = None
-    if budget is not None:
-        if isinstance(budget,bool) or not np.isfinite(budget) or budget <= 0:
-            raise ValueError('invalid trusted training deadline')
-        def expired(signum, frame):
-            raise TimeoutError('training-time budget exceeded')
-        previous_handler = signal.signal(signal.SIGALRM, expired)
-        previous_timer = signal.setitimer(signal.ITIMER_REAL, float(budget))
+    started=time.perf_counter()
     try:
-        metadata = module.train(config, manifest, output)
-        if device.startswith('cuda'): torch.cuda.synchronize()
-        timing['status'] = 'COMPLETED'
-        return metadata, time.perf_counter()-started
-    except BaseException:
-        timing['status'] = 'FAILED'
-        raise
+        metadata=module.train(config,manifest,output)
+        if device.startswith('cuda'):torch.cuda.synchronize()
+        return metadata,time.perf_counter()-started
     finally:
-        elapsed = time.perf_counter()-started
-        if budget is not None:
-            signal.setitimer(signal.ITIMER_REAL, 0)
-            signal.signal(signal.SIGALRM, previous_handler)
-            if previous_timer[0]:
-                signal.setitimer(signal.ITIMER_REAL, max(.000001,previous_timer[0]-elapsed),previous_timer[1])
-        timing['duration_seconds'] = elapsed
-        audit_path.write_text(json.dumps(timing))
+        (Path(output).parent/'training_timing.json').write_text(json.dumps({
+            'protocol':'legacy-candidate-train-call-v1','verified':False,
+            'status':'UNVERIFIABLE','function_wall_seconds':time.perf_counter()-started,
+            'reason':'legacy train call includes setup; no training-only measurement'}))
 
 
 def load_image(path, size):
@@ -232,6 +213,7 @@ def run(module_file, manifest_file, config, output):
                               exposure_measurement_source='candidate instrumented; not an OS-enforced counter')
     else:
         checkpoint_meta, training_duration_seconds = train_measured(mod, config, training_manifest_file, output / 'checkpoint')
+    timing_audit=json.loads((output/'training_timing.json').read_text()) if (output/'training_timing.json').is_file() else {}
     learning_frozen_files = {p.name: sha256_file(p) for p in (output/'checkpoint').iterdir()
                              if p.name in {'model.pt','checkpoint_manifest.json'}}
     predictor = load_predictor(mod, output / 'checkpoint/checkpoint_manifest.json', device,
@@ -411,6 +393,12 @@ def run(module_file, manifest_file, config, output):
         metrics.update({'protocol/optimizer_updates': training_audit['optimizer_updates'],
                         'protocol/source_exposures': training_audit['source_exposures'], 'protocol/seed': config['seed']})
         (output/'training_audit.json').write_text(json.dumps(training_audit, sort_keys=True))
+    if timing_audit.get('protocol')=='legacy-candidate-train-call-v1':
+        metrics.pop('training/duration_seconds',None)
+        metrics['training/function_wall_seconds']=timing_audit['function_wall_seconds']
+    metrics['training/timing_verified']=float(timing_audit.get('verified', config.get('execution_kind')=='frozen'))
+    if timing_audit.get('protocol')=='prepared-training-step-v1':
+        metrics['training/phase_steps']=timing_audit['completed_steps']
     checkpoint = output / "checkpoint" / "model.pt"
     metrics["inference/checkpoint_mib"] = checkpoint.stat().st_size / 2**20
     try:
@@ -431,7 +419,7 @@ def run(module_file, manifest_file, config, output):
     provenance = {"training_input_policy": "train/good only; real development images and masks never mounted",
                   "training_images": len(training_manifest['images']),
                   "training_manifest_fingerprint": manifest_fingerprint(training_manifest),
-                  "protocol_version": "2.0", "metric_evaluator_version": EVALUATOR_VERSION,
+                  "training_timing_protocol":timing_audit.get("protocol", "frozen-no-training"), "protocol_version": "2.0", "metric_evaluator_version": EVALUATOR_VERSION,
                   "evaluation": evaluation, "python_version": sys.version.split()[0],
                   "development_calibration_count": len(calibrate_paths), "normal_assessment_count": len(score_paths),
                   "dependencies_pyproject_sha256": sha256_file(Path(__file__).resolve().parents[1] / "pyproject.toml"),

@@ -59,19 +59,29 @@ def verify_candidate_source(path):
 
 
 def read_training_timing(path):
-    """Bound reads from candidate-writable audit artifacts."""
+    """Bound reads from candidate-writable audit artifacts; never treat setup as training."""
     import math
     path=Path(path)
-    if not path.is_file() or path.is_symlink() or path.stat().st_size>4096: return {}
+    if not path.is_file() or path.is_symlink() or path.stat().st_size>4096:return {}
     try:
         value=json.loads(path.read_text())
-        if not isinstance(value,dict) or value.get('status') not in {'RUNNING','COMPLETED','FAILED'}: return {}
-        for field in ('started_at','duration_seconds'):
+        if not isinstance(value,dict) or value.get('status') not in {'RUNNING','TRAINING','PREPARING','COMPLETED','FAILED','TIMED_OUT','UNVERIFIABLE'}:return {}
+        for field in ('started_at','duration_seconds','phase_started_monotonic'):
             number=value.get(field)
-            if field=='duration_seconds' and number is None:continue
+            if number is None:
+                if field=='started_at' and value.get('protocol') is None:return {}
+                continue
             if isinstance(number,bool) or not isinstance(number,(int,float)) or not math.isfinite(number) or number<0:return {}
         return value
     except (OSError,ValueError):return {}
+
+
+def require_training_phases(path):
+    """Static fail-closed admission; candidate code is never imported on the host."""
+    import ast
+    tree=ast.parse(Path(path).read_text())
+    if not any(isinstance(node,ast.FunctionDef) and node.name=='training_steps' for node in tree.body):
+        raise ValueError('training-only budget cannot be verified: candidate lacks explicit training_steps interface; frozen source will not be rewritten')
 
 
 def probe_candidate_interface(repo_root, module_file, good_root, runtime, candidate_id):
@@ -227,6 +237,8 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
             break
         prefix = 'cuda_smoke_' if stage == 'cuda_smoke' else ''
         stage_started = time.monotonic()
+        observed_phase=None
+        phase_deadline=None
         with (job_dir / (prefix + "stdout.log")).open("wb") as stdout, (job_dir / (prefix + "stderr.log")).open("wb") as stderr:
             process = subprocess.Popen(stage_command, cwd=repo_root, env=environment, stdout=stdout, stderr=stderr, start_new_session=True)
             try:
@@ -238,9 +250,18 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
                     timing_file = job_dir / 'training_timing.json'
                     if stage == 'pilot' and config.get('training_budget_seconds') and timing_file.is_file() and not timing_file.is_symlink():
                         timing = read_training_timing(timing_file)
-                        if timing.get('status') == 'RUNNING' and time.time()-timing['started_at'] >= config['training_budget_seconds']:
-                            status = 'TIMED_OUT'
-                            break
+                        if timing.get('protocol')=='prepared-training-step-v1' and timing.get('status')=='TRAINING':
+                            phase=timing.get('completed_steps')
+                            if observed_phase!=phase:
+                                # Receipt time cannot charge earlier setup/preparation.
+                                observed_phase=phase
+                                phase_deadline=time.monotonic()+max(0,config['training_budget_seconds']-timing.get('duration_seconds',0))
+                            if time.monotonic()>=phase_deadline:
+                                status='TIMED_OUT'
+                                break
+                        else:
+                            observed_phase=None
+                            phase_deadline=None
                     if time.monotonic() >= stage_deadline:
                         status = "TIMED_OUT"
                         break
@@ -282,6 +303,12 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
             try:
                 measured = json.loads(result_path.read_text())
                 metrics = measured['metrics']
+                if config.get('training_budget_seconds') is not None and config.get('execution_kind')!='frozen':
+                    timing=read_training_timing(job_dir/'training_timing.json')
+                    if timing.get('protocol')!='prepared-training-step-v1' or timing.get('verified') is not True or timing.get('status')!='COMPLETED':
+                        raise ValueError('training-only budget cannot be verified from completed phase audit')
+                    if metrics.get('training/duration_seconds')!=timing['duration_seconds'] or timing['duration_seconds']>config['training_budget_seconds']:
+                        raise ValueError('training-only timing metric or deadline mismatch')
                 if not isinstance(metrics, dict):
                     raise ValueError('measurement metrics must be an object')
                 if config.get('plan_sha256') and measured.get('provenance',{}).get('effective_configuration') != config:
@@ -307,8 +334,9 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
             timing_file = job_dir/'training_timing.json'
             timing=read_training_timing(timing_file)
             if timing:
-                duration=timing.get('duration_seconds',max(0,time.time()-timing['started_at']))
-                store.set_run_result(run['run_id'], {'training/duration_seconds':duration}, gpu_seconds=charged, artifact_dir=str(job_dir))
+                duration=timing.get('duration_seconds')
+                if duration is not None:
+                    store.set_run_result(run['run_id'], {'training/duration_seconds':duration,'training/timing_verified':float(timing.get('verified',False))}, gpu_seconds=charged, artifact_dir=str(job_dir))
             if failed_stage == 'cuda_smoke':
                 store.set_run_result(run['run_id'], {'validation/cuda_smoke_passed': 0,
                     'validation/cuda_smoke_seconds': smoke_seconds}, gpu_seconds=charged, artifact_dir=str(job_dir))

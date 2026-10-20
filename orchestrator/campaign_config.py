@@ -63,11 +63,11 @@ def starting_context(store, config, strict=False):
     result = {'start_from': mode, 'dataset': config['campaign']['dataset'], 'models': [],
               'weight_reuse': 'Only an explicit validated scientific plan may request weight reuse.'}
     if mode == 'previous_best':
-        from orchestrator.model_registry import states, retained, verify_archive, admissible, policy
+        from orchestrator.model_registry import states, retained, verify_archive, admissible, policy, retained_category
         models = retained(store)
         for cohort, state in states(store).items():
             model = models[state['retention_id']]
-            if model['category'] != result['dataset'] or not admissible(model, policy()): continue
+            if retained_category(store,model) != result['dataset'] or not admissible(model, policy()): continue
             verify_archive(model)
             result['models'].append({'cohort_id': cohort, 'confirmation': state['confirmation'],
                 'run_id': model['run_id'], 'candidate_id': model['candidate_id'],

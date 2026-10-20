@@ -107,7 +107,7 @@ def _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=None,
             prompt += (f"\nDesired training time per model: {limits['training_minutes_per_experiment']*60:g} seconds. "
                        "Choose model, optimizer steps/epochs and exposures to make scientifically useful use of that allowance; "
                        "do not copy a historical short schedule by default. Justify estimated training time and any shorter "
-                       "schedule in evaluation_plan. Training time excludes validation, smoke checks and scoring. "
+                       "schedule in evaluation_plan. Training time excludes initialization, data preparation, checkpoint saving, validation, smoke checks and scoring. "
                        "The plan job timeout must include its estimated smoke, import and validation overhead, separate from training. "
                        "Preserve all declared arms, seeds and controls; never stretch or truncate a frozen plan.")
         remaining = int(row['created_at'] + limits['max_wall_hours'] * 3600 - __import__('time').time())
@@ -456,6 +456,18 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
          "Do not claim GPU execution if no CUDA tensors are used. " if require_torch_cuda else "") +
         f"Proposal: {json.dumps(proposal, sort_keys=True)}"
     )
+    if campaign:
+        from orchestrator.campaign_config import time_based
+        if time_based(json.loads(campaign[0].get(campaign[1])['config_json'])):
+            instruction += ('\nTime-budgeted learning requires training_steps(config, allowed_train_manifest, output_dir), '
+                'a generator yielding scripts.training_phase.TrainingStep(objective=Module returning scalar differentiable loss, '
+                'optimizer=initialized Optimizer, args=tuple of prepared device tensors). Initialize models and optimizers, '
+                'prepare batches/transfers, log progress and save checkpoint metadata BETWEEN yields, never inside forward. '
+                'Return checkpoint metadata from the generator. The trusted loop executes forward/loss, backward and optimizer '
+                'updates and measures only those phases. Explicit use_closure=True supports closure-based optimizers. '
+                'Read scripts/training_phase.py. Preserve train/load/predict for legacy callers. No learning outside yielded steps; '
+                'the trusted driver rejects unmeasured parameter changes. Missing/unsupported boundaries are UNVERIFIABLE, '
+                'never a reason to time the whole train function or alter a frozen scientific plan.')
     if proposal.get('experiment_plan'):
         instruction += ('\nImplement this exact experiment_plan, not a default demonstration. Honor all declared '
             'training settings, seeds, arms and inference modes. steps is a total schedule, not an implicit one-epoch cap. '
@@ -510,6 +522,11 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
             if any(a['execution']=='train' and a['inference'] for a in plan['arms']):
                 if 'inference_config' not in {a.arg for a in functions['load'].args.args}:
                     raise ValueError('planned inference intervention requires explicit load inference_config argument')
+        if campaign:
+            from orchestrator.campaign_config import time_based
+            if time_based(json.loads(campaign[0].get(campaign[1])['config_json'])):
+                from orchestrator.experiment_runner import require_training_phases
+                require_training_phases(allowed_file)
         if validation_runtime is not None:
             from orchestrator.experiment_runner import probe_candidate_interface, run_candidate_unit_tests
             good_root = Path(os.environ['LOCO_GOOD_ROOT'])
@@ -563,6 +580,9 @@ def queue_candidate(store, hypothesis_id, candidate_id, category, stage, device,
         campaign_row = CampaignState(store).get(campaign_id)
         if not campaign_row: raise ValueError('unknown campaign')
         campaign_config = json.loads(campaign_row['config_json'])
+    if campaign_config and time_based(campaign_config) and not frozen:
+        from orchestrator.experiment_runner import require_training_phases
+        require_training_phases(module)
     enforce(store, next_gpu_seconds=seconds if device == "cuda" else 0, campaign_id=campaign_id)
     timeout = min(int(seconds), campaign_config['limits']['max_job_seconds'] if campaign_config and time_based(campaign_config) else max_job_seconds())
     if effective_config is None and seed is not None and (candidate_id != 'masked_context_ablation' or seed not in {7, 17, 29}):

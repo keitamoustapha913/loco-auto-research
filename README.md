@@ -37,8 +37,10 @@ Bubblewrap risk acceptance remains false unless explicitly authorized by the ope
 - **Research hours** count all elapsed time: agents, implementation, training, CPU
   evaluation, critique, waiting and pauses. Restart/resume does not reset the clock.
   Each independently authorized new campaign receives its own clock.
-- **Training minutes** are the learning allowance, including candidate training-data
-  loading and CUDA synchronization, excluding smoke checks, calibration and evaluation.
+- **Training minutes** count only prepared model forward/loss, backward and optimizer
+  updates. Model/optimizer initialization, batch loading/preparation/transfers, checkpoint
+  saving, coding, calibration, evaluation and critique are excluded. CUDA setup work is
+  synchronized before timing; queued learning kernels finish inside the measured phase.
   Codex chooses steps, epochs and exposures and must justify its estimated training
   duration or a shorter schedule. This is a ceiling/target, not fabricated training time:
   convergence or a justified experiment can finish earlier. Actual duration is recorded.
@@ -70,6 +72,30 @@ Home, Results and campaign reports show elapsed research and measured training t
 Technical GPU-slot/call counters remain available in System diagnostics and ledger
 records. Training timing protocol is recorded in `training_timing.json`, including
 failed/time-limited learning attempts, and synchronized through the existing outbox.
+
+### Training-only candidate contract
+
+Time-based learning requires `training_steps(config, allowed_train_manifest, output_dir)`:
+a generator that yields `scripts.training_phase.TrainingStep` objects. Initialize the
+objective (`torch.nn.Module` returning a scalar differentiable loss) and optimizer before
+yielding, prepare device-resident inputs between yields, and save checkpoint/metadata
+after the final yield. Return checkpoint metadata from the generator. The trusted loop
+runs forward/loss, backward and the optimizer update; it never times generator setup or
+finalization. Closure-based optimizers are supported through explicit `use_closure=True`.
+The existing train/load/predict contract is retained for legacy callers and inference.
+
+The worker rejects I/O, model/optimizer creation within the learning step and optimizer
+updates or gradient-enabled training forwards outside it. Inputs must be prepared tensors
+and scalars, not file paths/loaders/callbacks. These are checked Python contract boundaries
+inside the existing sandbox, **not** a new OS security boundary against malicious Python.
+Candidates with unsupported/custom training procedures must expose a verifiable contract
+or report incompatibility; the controller does not rewrite scientific schedules.
+
+Missing `training_steps` is **UNVERIFIABLE** and rejected before admitting a time-budgeted
+GPU comparison. Historical candidates/checkpoints remain untouched. Frozen inference
+needs no training interface. Legacy unbounded-by-training-time calls are explicitly marked
+`verified: false` (`legacy-candidate-train-call-v1`); their wall duration is recorded as `training/function_wall_seconds`, not
+`training/duration_seconds`, and is not a verified training-only measurement. New verified measurements use `prepared-training-step-v1`.
 
 Within that authorization, Codex investigates, implements, trains on good images, receives
 frozen-model real-development measurements, critiques and selects its next experiment.

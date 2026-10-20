@@ -41,7 +41,7 @@ def test_agent_wire_schema_is_closed_and_round_trips_all_scientific_settings():
 def laboratory(tmp_path, monkeypatch):
     repo=tmp_path/'repo';repo.mkdir()
     candidate=repo/'candidates/fixture';candidate.mkdir(parents=True)
-    (candidate/'model.py').write_text('# committed fixture implementation\n')
+    (candidate/'model.py').write_text('# committed fixture implementation\ndef training_steps(*args):\n    raise RuntimeError("fixture protocol only; never executed")\n')
     for args in (['init','-q'],['add','.'],['-c','user.name=Fixture','-c','user.email=fixture@localhost','commit','-qm','fixture']):
         subprocess.run(['git','-C',str(repo),*args],check=True,capture_output=True)
     make_fixture(tmp_path/'good')
@@ -190,11 +190,12 @@ def test_frozen_arm_uses_exact_same_seed_checkpoint_and_committed_source(laborat
     assert result['status']=='COMPLETE_CONTROLLED',result['problems']
     frozen=[r for r in c.runs(cid) if json.loads(r['config_json'])['execution_kind']=='frozen']
     assert len(frozen)==3
+    original_source=(repo/'candidates/fixture/model.py').read_text()
     (repo/'candidates/fixture/model.py').write_text('# later unrelated source change\n')
     for row in frozen:
         cfg=json.loads(row['config_json']);assert cfg['frozen_baseline']['seed']==cfg['seed']
         source=execution_source(row,store,runtime,repo)
-        assert source.read_text()=='# committed fixture implementation\n'
+        assert source.read_text()==original_source
         assert hashlib.sha256(source.read_bytes()).hexdigest()==cfg['model_sha256']
         bad=dict(cfg['frozen_baseline'],checkpoint_sha256='0'*64)
         with pytest.raises(ValueError,match='changed'):verify_baseline(store,bad,repo)

@@ -84,7 +84,8 @@ def test_new_campaign_has_own_clock_and_ignores_exhausted_legacy_globals(tmp_pat
 
 def test_training_time_is_distinct_from_validation_and_job_timeout(tmp_path):
     cfg={'device':'cpu','training_budget_seconds':.2}
-    module=SimpleNamespace(train=lambda *a:time.sleep(.015))
+    from training_phase_fixtures import phase_module
+    module=phase_module(training_delay=.015)
     _,duration=train_measured(module,cfg,tmp_path,tmp_path/'checkpoint')
     time.sleep(.04)  # Represents post-training validation, excluded from learning time.
     audit=json.loads((tmp_path/'training_timing.json').read_text())
@@ -94,11 +95,12 @@ def test_training_time_is_distinct_from_validation_and_job_timeout(tmp_path):
 
 
 def test_training_deadline_does_not_continue_to_validation(tmp_path):
-    module=SimpleNamespace(train=lambda *a:time.sleep(.3))
+    from training_phase_fixtures import phase_module
+    module=phase_module(training_delay=.3)
     with pytest.raises(TimeoutError,match='training-time budget'):
         train_measured(module,{'device':'cpu','training_budget_seconds':.02},tmp_path,tmp_path/'checkpoint')
     audit=json.loads((tmp_path/'training_timing.json').read_text())
-    assert audit['status']=='FAILED' and .015<=audit['duration_seconds']<.2
+    assert audit['status']=='TIMED_OUT' and .015<=audit['duration_seconds']<.2
 
 
 def test_cuda_training_timing_synchronizes_without_real_cuda(tmp_path,monkeypatch):

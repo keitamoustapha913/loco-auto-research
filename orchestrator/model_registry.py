@@ -158,6 +158,42 @@ def verify_archive(model):
         if path.is_symlink() or sha256_file(path)!=expected: raise ValueError('retained model integrity failure: '+name)
 
 
+def retained_category(store, model):
+    """Resolve legacy records from the authoritative run; never patch history."""
+    from orchestrator.experiment_plan import digest
+    verify_archive(model)
+    row=store.get_run(model['run_id'])
+    if row is None:raise ValueError('retained model has no authoritative historical run')
+    reference=model['reference'];root=Path(model['archive'])
+    if (reference['run_id']!=row['run_id'] or model['candidate_id']!=row['candidate_id'] or
+        model['hypothesis_id']!=row['hypothesis_id'] or model['git_commit']!=row['git_sha']):
+        raise ValueError('retained model/run identity or source commit mismatch')
+    configuration=json.loads(row['config_json'])
+    archived=json.loads((root/'configuration.json').read_text())
+    if (archived!=configuration or model['configuration']!=configuration or
+        digest(configuration)!=reference['configuration_sha256']):
+        raise ValueError('retained configuration differs from authoritative provenance')
+    if (sha256_file(root/'model.py')!=reference['source_sha256'] or
+        configuration.get('model_sha256')!=reference['source_sha256'] or
+        sha256_file(root/'model.pt')!=reference['checkpoint_sha256'] or
+        sha256_file(root/'checkpoint_manifest.json')!=reference['checkpoint_manifest_sha256']):
+        raise ValueError('retained source/checkpoint provenance mismatch')
+    provenance=json.loads((root/'run_manifest.json').read_text())
+    evaluation=json.loads((root/'evaluation.json').read_text())
+    fingerprint=row['manifest_sha256']
+    if (not fingerprint or provenance.get('good_manifest_sha256')!=fingerprint or
+        evaluation.get('training_manifest_sha256')!=fingerprint or
+        model['conditions'].get('training_manifest_sha256')!=fingerprint):
+        raise ValueError('retained normal-learning dataset provenance mismatch')
+    category=row['category']
+    if not isinstance(category,str) or not category:raise ValueError('historical run has no dataset/category')
+    for label,record in [('retained record',model),('configuration',configuration),('run manifest',provenance)]:
+        for key in ('category','dataset'):
+            if key in record and record[key]!=category:
+                raise ValueError(label+' dataset/category mismatches authoritative run')
+    return category
+
+
 def admissible(model, rules):
     m=model['metrics']
     return m[FPR]<=rules['max_normal_fpr'] and m[PARAMETERS]<=rules['max_parameters']

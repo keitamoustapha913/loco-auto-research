@@ -525,10 +525,13 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
             raise BudgetExceeded('complete frozen comparison plus evaluation and critique cannot fit remaining research duration')
         train_arms = [a for a in plan['arms'] if a['execution'] == 'train']
         module = candidate_file(controller.REPO, plan['hypothesis_id']) if train_arms or plan['diagnostics'] else None
+        if train_arms and time_based(cfg):
+            from orchestrator.experiment_runner import require_training_phases
+            require_training_phases(module)
         source_hash = sha256(module) if module else ''
         trusted_files = ['orchestrator/autonomy.py','orchestrator/controller.py','orchestrator/experiment_plan.py',
                          'orchestrator/planning_contract.py','orchestrator/experiment_runner.py','orchestrator/sandbox.py','orchestrator/development_feedback.py',
-                         'scripts/run_candidate.py','scripts/feedback_infer.py','scripts/candidate_smoke.py',
+                         'scripts/run_candidate.py','scripts/training_phase.py','scripts/feedback_infer.py','scripts/candidate_smoke.py',
                          'benchmark/train_adapter.py','benchmark/feedback_metrics.py','benchmark/feedback_data.py',
                          'schemas/experiment_plan.schema.json','configs/development_feedback.json']
         trusted_files += ['orchestrator/model_registry.py','configs/champion_policy.json',
