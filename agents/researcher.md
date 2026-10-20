@@ -38,3 +38,10 @@ explicitly exploratory comparison. Repeated inference of one fixed checkpoint
 cannot support confirmed champion promotion. Agent kind/acceptance prose cannot
 set trusted eligibility. Return a corrected complete plan on semantic rejection;
 do not remove scientifically necessary controls merely to pass validation.
+
+Diagnostic declarations are authoritative: list scalar names in required_metrics.
+For source="diagnostic", request diagnostic_id/metric_name. Trusted code accepts
+an unambiguous diagnostic/diagnostic_id/metric_name storage alias for that exact
+declaration and applies the ledger prefix once. Do not repeat the same measurement
+through different aliases/sources or request undeclared metrics. Paired comparison
+metric names must also appear in the selected diagnostic's required_metrics.

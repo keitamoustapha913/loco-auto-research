@@ -11,7 +11,7 @@ import time
 import numpy as np
 from PIL import Image
 from benchmark.data_guard import load_manifest, manifest_fingerprint
-from benchmark.train_adapter import load_candidate, load_predictor, validate_prediction
+from benchmark.train_adapter import load_candidate, load_predictor, validate_prediction, diagnostic_measurement_catalog
 from benchmark.validation import evaluate_dev_v2
 from benchmark.metrics_v2 import EVALUATOR_VERSION, pixel_ap_report, pixel_auroc
 from benchmark.inference_benchmark import benchmark_predict
@@ -343,6 +343,7 @@ def run(module_file, manifest_file, config, output):
         if frozen_state != initial_frozen_state:
             raise ValueError('normal assessment changed frozen predictor state')
         diagnostic_module = load_candidate('/diagnostics/model.py') if config.get('diagnostic_provider') else mod
+        catalog=diagnostic_measurement_catalog(config.get('diagnostics', []))
         for request in config.get('diagnostics', []):
             if not callable(getattr(diagnostic_module, 'diagnose', None)):
                 raise ValueError(f"missing diagnose hook for {request['diagnostic_id']}")
@@ -357,7 +358,9 @@ def run(module_file, manifest_file, config, output):
             for key, value in values.items():
                 if isinstance(value, bool) or not isinstance(value, (int,float)) or not np.isfinite(value):
                     raise ValueError('diagnostic metrics must be finite measured numbers')
-                metrics[f"diagnostic/{request['diagnostic_id']}/{key}"] = float(value)
+                canonical=f"{request['diagnostic_id']}/{key}"
+                if canonical not in catalog:raise ValueError('diagnostic returned undeclared metric: '+canonical)
+                metrics[catalog[canonical]] = float(value)
             if 'per_image' in diagnostic:
                 ids = [r.get('source_id') for r in diagnostic['per_image']]
                 if len(ids)!=len(assessment_ids) or set(ids)!=set(assessment_ids):

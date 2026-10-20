@@ -27,6 +27,37 @@ REQUIRED_TRAINING_POSITIVE = ('steps', 'batch_size', 'size', 'expected_source_ex
 MATCHED_TRAINING_CONTROLS = REQUIRED_TRAINING_POSITIVE + ('expected_optimizer_updates',)
 
 
+def canonicalize_diagnostic_measurements(plan):
+    """Only normalize declared diagnostic aliases; preserve science and input bytes."""
+    from benchmark.train_adapter import (DIAGNOSTIC_PREFIX,diagnostic_measurement_catalog,
+                                          canonical_diagnostic_measurement)
+    plan=copy.deepcopy(plan)
+    catalog=diagnostic_measurement_catalog(plan['diagnostics'])
+    seen=set()
+    for request in plan['required_measurements']:
+        source,key=request['source'],request['key']
+        if source=='diagnostic':
+            key=canonical_diagnostic_measurement(catalog,key)
+            request['key']=key
+            storage=catalog[key]
+        elif source=='run' and key.startswith(DIAGNOSTIC_PREFIX):
+            # Existing explicit ledger references are valid only when declared.
+            canonical=canonical_diagnostic_measurement(catalog,key)
+            storage=catalog[canonical]
+            if storage!=key:raise ValueError('ambiguous run diagnostic storage alias: '+key)
+        else:
+            if source!='run' and key.startswith(DIAGNOSTIC_PREFIX):
+                raise ValueError('diagnostic storage key conflicts with measurement source: '+source)
+            storage=key
+        identity=('real' if source=='real' else 'run',storage)
+        if identity in seen:raise ValueError('duplicate/conflicting measurement after diagnostic canonicalization: '+storage)
+        seen.add(identity)
+    for comparison in plan['paired_comparisons']:
+        canonical=f"{comparison['diagnostic_id']}/{comparison['metric']}"
+        if canonical not in catalog:raise ValueError('paired comparison requests an undeclared diagnostic metric: '+canonical)
+    return plan
+
+
 def decode_agent_plan(plan):
     """Closed output-schema settings become ordinary canonical JSON dictionaries.
 
@@ -51,7 +82,7 @@ def decode_agent_plan(plan):
             arm['baseline_by_seed'] = {str(b['seed']):b['baseline_id'] for b in values}
             if len(arm['baseline_by_seed'])!=len(values):raise ValueError('duplicate frozen baseline seed')
     for diagnostic in plan['diagnostics']: diagnostic['config'] = settings(diagnostic['config'])
-    return plan
+    return canonicalize_diagnostic_measurements(plan)
 
 
 def digest(value):
@@ -69,6 +100,7 @@ def training_seed(arm, pair_seed):
 def validate_plan(plan, hypothesis_id=None):
     validate(plan, json.loads((REPO / 'schemas/experiment_plan.schema.json').read_text()))
     digest(plan)  # Reject NaN/infinity even inside extensible settings.
+    plan=canonicalize_diagnostic_measurements(plan)
     from orchestrator.planning_contract import local_issues, PlanningValidationError
     issues=local_issues(plan)
     if issues:raise PlanningValidationError(issues)
@@ -157,6 +189,7 @@ def cell_run_id(campaign_id, plan, arm_id, seed):
 
 
 def register_plan(store, campaigns, campaign_id, plan):
+    plan=canonicalize_diagnostic_measurements(plan)
     def existing(con):
         rows = con.execute("SELECT payload_json FROM campaign_events WHERE campaign_id=? AND kind='EXPERIMENT_PLAN_REGISTERED'",
                            (campaign_id,)).fetchall()
@@ -314,6 +347,8 @@ def execution_source(run, store, runtime, repo_root=REPO):
 
 def comparison_result(plan, runs, feedback=None):
     """Check actual cell coverage/configuration and finite measured endpoints."""
+    from benchmark.train_adapter import diagnostic_measurement_catalog,canonical_diagnostic_measurement
+    catalog=diagnostic_measurement_catalog(plan['diagnostics'])
     feedback = feedback or {}
     expected = {(a['arm_id'], s) for a, s in cells(plan)}
     found = {}
@@ -349,14 +384,15 @@ def comparison_result(plan, runs, feedback=None):
         measurements = {}
         for request in plan['required_measurements']:
             source, key = request['source'], request['key']
-            value = real.get(key) if source == 'real' else run_metrics.get(('diagnostic/' if source == 'diagnostic' else '') + key)
+            storage=catalog[canonical_diagnostic_measurement(catalog,key)] if source=='diagnostic' else key
+            value = real.get(key) if source == 'real' else run_metrics.get(storage)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                 missing.append(f'{source}:{key}')
             else:
                 measurements[f'{source}:{key}'] = value
         for d in plan['diagnostics']:
             for key in d['required_metrics']:
-                if f"diagnostic/{d['diagnostic_id']}/{key}" not in run_metrics:
+                if catalog[f"{d['diagnostic_id']}/{key}"] not in run_metrics:
                     missing.append(f"diagnostic:{d['diagnostic_id']}/{key}")
         for key in ('protocol/optimizer_updates', 'protocol/source_exposures'):
             if key not in run_metrics:
@@ -460,6 +496,7 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
     from orchestrator.experiment_runner import candidate_file, sha256
 
     runtime = Path(runtime)
+    plan=canonicalize_diagnostic_measurements(plan)
     record = register_plan(store, campaigns, campaign_id, plan)
     with store.connect() as con:
         finished = con.execute("SELECT payload_json FROM campaign_events WHERE campaign_id=? AND kind='EXPERIMENT_PLAN_RESULT' ORDER BY id DESC",(campaign_id,)).fetchall()

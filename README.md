@@ -354,3 +354,14 @@ Schema defects are infrastructure errors and do not trigger an agent repair call
 Checks follow the [documented Structured Outputs subset](https://developers.openai.com/api/docs/guides/structured-outputs)
 and saved provider errors. Passing these local checks does **not** establish actual
 provider acceptance; that requires a separately authorized successful live call.
+
+Diagnostic measurement names derive from `diagnostics[].required_metrics`. The
+canonical request is `{source: "diagnostic", key: "diagnostic_id/metric_name"}`;
+trusted decoding also accepts the exact declared ledger alias
+`diagnostic/diagnostic_id/metric_name`. This is name canonicalization only: no
+scientific settings, arm, seed, metric definition or budget is changed. The shared
+contract emits/reads the storage prefix once. Unknown names, ambiguous aliases,
+duplicate/conflicting requests and undeclared paired/output metrics are rejected.
+Canonicalization is idempotent and occurs before plan hashing/registration;
+original agent responses remain in the audit history, and offline admission reports
+include the exact name changes and canonical plan.

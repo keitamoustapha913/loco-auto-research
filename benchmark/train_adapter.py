@@ -12,6 +12,34 @@ class CandidateContractError(ValueError):
     pass
 
 
+DIAGNOSTIC_PREFIX = 'diagnostic/'
+
+
+def diagnostic_measurement_catalog(diagnostics):
+    """Declared canonical identifiers -> ledger keys; no inferred metric names."""
+    catalog={};ids=set()
+    for declaration in diagnostics:
+        identifier=declaration['diagnostic_id']
+        if identifier in ids:raise CandidateContractError('duplicate diagnostic identity: '+identifier)
+        ids.add(identifier)
+        for metric in declaration['required_metrics']:
+            canonical=f'{identifier}/{metric}'
+            if canonical in catalog:raise CandidateContractError('duplicate declared diagnostic metric: '+canonical)
+            catalog[canonical]=DIAGNOSTIC_PREFIX+canonical
+    for canonical,storage in catalog.items():
+        if storage in catalog:
+            raise CandidateContractError('ambiguous diagnostic measurement alias: '+storage)
+    return catalog
+
+
+def canonical_diagnostic_measurement(catalog, name):
+    """Accept canonical or exactly one declared storage alias, never guess/strip."""
+    matches=[key for key,storage in catalog.items() if name in (key,storage)]
+    if len(matches)!=1:
+        raise CandidateContractError('unknown diagnostic ID, undeclared metric or ambiguous alias: '+name)
+    return matches[0]
+
+
 def load_predictor(module, checkpoint, device, inference_config=None):
     """Never silently discard an explicitly requested prediction intervention."""
     if inference_config:

@@ -169,3 +169,12 @@ def test_nonempty_inference_settings_cannot_be_silently_ignored():
     with pytest.raises(CandidateContractError,match='require load'):load_predictor(old,'unused','cpu',{'mode':'other'})
     ignored=SimpleNamespace(load=lambda path,device,inference_config:object())
     with pytest.raises(CandidateContractError,match='acknowledge'):load_predictor(ignored,'unused','cpu',{'mode':'other'})
+
+
+def test_runner_rejects_undeclared_diagnostic_output_names(tmp_path,monkeypatch,inputs):
+    source,manifest,config=inputs
+    module=load_candidate(source)
+    module.diagnose=lambda *args:{'metrics':{'mean_score':1.,'undeclared':2.}}
+    monkeypatch.setattr('scripts.run_candidate.load_candidate',lambda path:module)
+    with pytest.raises(ValueError,match='diagnostic returned undeclared metric'):
+        run(source,manifest,config,tmp_path/'job')

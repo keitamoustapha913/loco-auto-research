@@ -95,8 +95,9 @@ def inspect_plan(plan, store=None, repo_root=None):
     except ValidationError as exc:
         return {'valid':False,'errors':[{'code':'PLAN_SCHEMA','message':exc.message,'path':list(exc.path)}],
                 'notices':[],'scientific_eligibility':{'promotion_eligible':False},'baseline_capabilities':{}}
+    original_measurements=copy.deepcopy(plan['required_measurements'])
     issues=local_issues(plan)
-    try:validate_plan(plan)
+    try:plan=validate_plan(plan)
     except PlanningValidationError:pass
     except Exception as exc:issues.append({'code':'PLAN_CONTRACT','message':str(exc)})
     capabilities={}
@@ -127,8 +128,11 @@ def inspect_plan(plan, store=None, repo_root=None):
         classification.update(promotion_eligible=False,evidence_level='EXPLORATORY')
         classification['reasons'].append('Semantic admission failed; no execution or promotion permitted.')
     notices=[] if classification['promotion_eligible'] else [{'code':'NONPROMOTABLE_EVIDENCE_LEVEL',**classification}]
+    normalizations=[{'source':old['source'],'submitted':old['key'],'canonical':new['key']}
+                    for old,new in zip(original_measurements,plan['required_measurements']) if old!=new]
     return {'valid':not issues,'errors':issues,'notices':notices,'scientific_eligibility':classification,
-            'baseline_capabilities':capabilities}
+            'baseline_capabilities':capabilities,'diagnostic_name_normalizations':normalizations,
+            'canonical_plan':plan if not issues else None}
 
 
 def admit_plan(plan, store, repo_root=None):
@@ -144,6 +148,7 @@ def planning_instructions(capabilities=()):
         'required_nonnegative_training_key':'expected_optimizer_updates',
         'controlled_variables':'Names of real training keys, not sentences. Values must be declared, equal across arms and recorded in every frozen baseline.',
         'matched_training_controls_for_confirmation':list(MATCHED_TRAINING_CONTROLS),
+        'diagnostic_measurements':'diagnostics[].required_metrics is authoritative. For source=diagnostic use diagnostic_id/metric; diagnostic/diagnostic_id/metric is a storage alias accepted only for the same declared metric. Never duplicate requests via aliases or invent metric names. Paired metric names must be declared.',
         'frozen_inference':'Copy recorded_inference exactly; {} encodes [] in wire settings. Never invent loader options.',
         'fixed_checkpoint':'Declare the actual fixed seed; pairing indices are not independent baseline training. Such comparisons are exploratory and cannot confirm a champion.',
         'evidence_level':'Agent kind is intent only. Trusted admission/completion derives eligibility; text cannot authorize promotion.',
@@ -164,6 +169,7 @@ def constrain_output_schema(schema, capabilities=()):
                 # and control semantics are enforced by local_issues, not regex.
                 pair['properties']['name'].pop('pattern',None)
                 props['controlled_variables']['items'].pop('pattern',None)
+                props['required_measurements']['description']='Diagnostic requests reference diagnostics[].required_metrics using source=diagnostic and key=diagnostic_id/metric. Trusted code resolves only unambiguous declared storage aliases.'
                 props['controlled_variables']['description']='Actual common training setting key names, with equal recorded values; never prose.'
                 arm=props['arms']['items']
                 arm['properties']['training_overrides']['items']['properties']['name'].pop('pattern',None)
