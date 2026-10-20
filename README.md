@@ -228,3 +228,83 @@ uv run --extra all loco-lab research start --config APPROVED_CONFIG
 The same status, pause, resume, report and stop commands apply. An authorized
 campaign may execute complete comparisons automatically within its original
 limits. Updating this code does not authorize or start a campaign.
+
+### Cumulative localization improvement
+
+The trusted controller retains frozen real-development models across campaigns.
+An **exploratory incumbent** is a recoverable model, not a claim of confirmed
+superiority. A **supported promotion** requires complete controlled evidence.
+Normal-only weight learning, normal-only calibration, inference-only feedback,
+the final-holdout boundary, sandbox and authorization budgets are unchanged.
+
+`configs/champion_policy.json` is operator-owned and unavailable to candidate
+writers. Its hash and incumbent revision are frozen when a plan is registered.
+Changing it requires a new comparison; it cannot retroactively qualify evidence.
+The initial conservative policy requires:
+
+- At least three fixed challenger training seeds and the exact retained checkpoint
+  among the baseline evaluations. A baseline can have matched independent training
+  seeds, or explicitly declare `fixed_checkpoint_seed` for a single frozen incumbent.
+  In the latter case the actual baseline seed stays fixed; plan seeds identify the
+  challenger pairings, never fabricated independent baseline training. Pin original
+  source, checkpoint and configuration references.
+- Identical development samples, split, evaluator, normal-training fingerprint,
+  inference device, timing protocol and threshold-calibration protocol.
+- Positive logical AU-sPRO@5% **and** pixel-AP differences in every paired seed,
+  with positive lower bounds from a fixed 95% paired-seed bootstrap. The sPRO
+  implementation remains **compatible development**, not verified official code.
+- No increase in normal false positives versus the matched baseline, and at most
+  10% normal FPR (at most 4/47 on this split). At most 10M parameters. No more than
+  10% relative latency or measured process-memory regression; CPU timing/memory
+  are never represented as GPU measurements. Logical detection and structural
+  localization may each decline by at most 0.02 absolute per paired seed.
+- A representative checkpoint chosen by the first fixed seed, never the best
+  observed seed. Its localization must not regress the retained checkpoint.
+
+These defaults are conservative deployment rules, not scientific laws. A promising
+trade-off remains a Pareto alternative even when it cannot replace the incumbent.
+The initial historical incumbent is the highest AU-sPRO candidate meeting the FPR
+and parameter ceilings, with pixel AP breaking ties. No historical single-seed
+result is upgraded to reproducible proof. Later record scores alone never replace
+it. Promotion decisions and explicit trusted-operator rollback (`model_registry.rollback`)
+are append-only; older checkpoints and promotion evidence remain available.
+
+The fixed-incumbent option makes legacy single-seed checkpoints usable without
+modifying their code or inventing audit hooks. Such a promotion is conditional on
+that particular frozen baseline. Baseline seed variation remains unknown; the
+critic cannot make a causal method/architecture claim. Original training settings
+are retained, and unequal training budgets must not be listed as controlled.
+
+Different methods need not share a model implementation. Train them separately
+under their declared plans, then use a multi-arm **frozen** comparison referencing
+each exact checkpoint by seed. Replicate the incumbent using its byte-identical
+source and original learning configuration, with additional seeds explicitly
+declared; do not reimplement a historical method from its name. Existing frozen
+arm support executes the final matrix without retraining either method.
+
+The existing SQLite ledger records retention, immutable champion revisions,
+promotion/rejection reasons, paired-seed uncertainty and rollback. Verified bytes
+are copied under `$LOCO_RUNTIME/controller/retained_models/` with hashes and
+owner-only parent directories. This is integrity checking and recovery storage,
+not protection against the administrator's shared host UID or a disk backup.
+MLflow receives retention provenance and cumulative decisions through its durable
+outbox. Home and Results show the retained model and its confirmation status;
+`loco-lab research status` and `report` include cumulative progress. Read-only
+monitoring never changes the champion. Initialization preserves historical runs,
+metrics and campaign counters. Crash recovery finishes deterministic promotion
+bookkeeping without repeating training, inference or agent calls.
+
+Before proposing methods, Codex receives a whole-history scientific-memory index,
+retained incumbents, Pareto source references, failures, completed ablations and
+incomplete comparisons. Detailed source/evidence snapshots are read-only. No
+five-result window discards older findings. Codex retains scientific freedom;
+these guards constrain execution and promotion, not architectures or hypotheses.
+
+Uncertainty here measures **between-training-seed** variation on the same fixed
+development set. Three seeds give weak distributional evidence; this is not an
+image-population interval, multiplicity correction, or proof of generalization.
+Repeated anomaly-informed method selection can overfit this development split.
+Image-cluster uncertainty, additional normal acquisition or stronger replication
+must be declared and measured when needed. No development promotion guarantees
+improvement on the independent final holdout. Missing confirmation remains
+unavailable, never a fabricated zero or a rising progress curve.

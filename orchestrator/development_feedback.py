@@ -185,6 +185,7 @@ def _evaluate(runtime,store,run_id,timeout,cancel):
         if config.get('plan_sha256'):
             summary.update(plan_id=config['plan_id'], plan_sha256=config['plan_sha256'],
                            plan_arm=config['plan_arm'], seed=config['seed'],
+                           plan_pair_seed=config.get('plan_pair_seed',config['seed']),
                            inference_configuration=config.get('inference', {}),
                            trusted_source_sha256=config['trusted_source_sha256'])
         (output/'case_scores.json').write_text(json.dumps(rows,sort_keys=True,indent=2))

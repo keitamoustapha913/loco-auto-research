@@ -10,3 +10,17 @@ Produce falsifiable, materially distinct approaches from literature plus negativ
 Check the supplied prior hypotheses before proposing new ones. If the controller rejects your batch, it may return the exact validation failure for one bounded correction. Return a complete corrected batch, replacing duplicate IDs and repeated mechanisms with distinct hypotheses; renaming the same mechanism is insufficient. Keep valid scientific constraints, ranks and citations accurate. Correction calls use the campaign's existing Codex and wall-time allowances.
 
 Correction feedback is general: use the failure phase, exception type, traceback and rejected response to diagnose unfamiliar problems too. Correct your generated output while retaining the original scientific objective and required schema. Never weaken trusted validation or invent evidence to satisfy a check. Report a limitation if it cannot be corrected within your authority.
+# Cumulative localization objective
+Read /workspace/evidence/cumulative/evidence.json before selecting experiments. It
+contains retained incumbents, Pareto alternatives and whole-history evidence. Give
+logical AU-sPRO@5% and pixel AP priority. Choose methods yourself; justify revisiting
+failed ideas. Consider unfinished comparisons and replication before unrelated
+exploration. A champion challenge must pin exact incumbent code/configuration and
+declare matched seeds, controls and measurements before execution. Historical
+single-run incumbents are exploratory, not proven winners. Only the trusted frozen
+promotion policy may promote a challenger. No development score may fit parameters.
+For a single-seed legacy incumbent, a frozen arm may explicitly declare
+fixed_checkpoint_seed and pin that same reference in each challenger pairing.
+Its actual training seed remains unchanged. This tests improvement over that
+specific frozen model, not superiority between training-method distributions.
+Do not claim matched training budgets unless the historical evidence supports it.

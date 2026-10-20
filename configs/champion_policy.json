@@ -1,0 +1,16 @@
+{
+  "version": "logical-localization-promotion-v1",
+  "minimum_seeds": 3,
+  "allow_declared_fixed_incumbent": true,
+  "max_normal_fpr": 0.10,
+  "max_parameters": 10000000,
+  "max_latency_ratio": 1.10,
+  "max_memory_ratio": 1.10,
+  "max_logical_detection_drop": 0.02,
+  "max_structural_localization_drop": 0.02,
+  "minimum_spro_gain": 0.0,
+  "minimum_pixel_ap_gain": 0.0,
+  "bootstrap_repeats": 10000,
+  "bootstrap_seed": 9173,
+  "confidence": 0.95
+}

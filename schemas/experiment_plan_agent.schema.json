@@ -181,6 +181,14 @@
                 "baseline_id"
               ]
             }
+          },
+          "fixed_checkpoint_seed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Explicit frozen incumbent training seed; plan seeds index challenger pairs, not independent baseline training."
           }
         },
         "required": [
@@ -190,7 +198,8 @@
           "training_overrides",
           "inference",
           "source_arm_id",
-          "baseline_by_seed"
+          "baseline_by_seed",
+          "fixed_checkpoint_seed"
         ]
       }
     },

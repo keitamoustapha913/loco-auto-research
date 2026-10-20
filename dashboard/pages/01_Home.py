@@ -6,6 +6,8 @@ import time
 import streamlit as st
 
 from dashboard.components import page_intro
+from dashboard.cumulative import progress_card
+from dashboard.data_access import cumulative_progress
 from dashboard.data_access import (
     campaign_summary, dataset_summary, get_events, get_proposals, gpu_status, ledger_summary,
     list_runs, pending_outbox, queue_paused, service_status, tracking_health,
@@ -77,6 +79,8 @@ def live_home():
     consumed = ledger_summary()["gpu_seconds"] / 3600
     budget = float(os.getenv("LOCO_GPU_BUDGET_HOURS", "4"))
     d.metric("GPU budget remaining", f"{max(0, budget - consumed):.2f} h", help=f"{consumed:.2f} of {budget:.2f} approved exclusive GPU slot hours charged across all runs.")
+
+    progress_card(cumulative_progress())
 
     current, direction = st.columns(2, gap="large")
     with current:

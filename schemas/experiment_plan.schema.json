@@ -222,6 +222,14 @@
             "additionalProperties": {
               "type": "string"
             }
+          },
+          "fixed_checkpoint_seed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Explicit frozen incumbent training seed; plan seeds index challenger pairs, not independent baseline training."
           }
         },
         "required": [

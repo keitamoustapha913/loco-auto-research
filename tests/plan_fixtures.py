@@ -8,6 +8,7 @@ def agent_plan(plan):
     def pairs(value):return [{'name':key,'value_json':json.dumps(val)} for key,val in value.items()]
     plan['training']=pairs(plan['training'])
     for arm in plan['arms']:
+        arm.setdefault('fixed_checkpoint_seed',None)
         for key in ('training_overrides','inference'):arm[key]=pairs(arm[key])
         arm['baseline_by_seed']=[{'seed':int(k),'baseline_id':v} for k,v in arm['baseline_by_seed'].items()]
     for d in plan['diagnostics']:d['config']=pairs(d['config'])

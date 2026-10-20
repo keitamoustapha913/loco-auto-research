@@ -21,6 +21,15 @@ def db_path():
     return Path(os.getenv("LOCO_LEDGER", str(runtime_root() / "controller" / "experiments.sqlite"))).resolve()
 
 
+def cumulative_progress():
+    """Ledger-only read; never initialize, promote or inspect model/data files."""
+    if not db_path().is_file():return None
+    from orchestrator.state_store import StateStore
+    from orchestrator.model_registry import progress
+    try:return progress(StateStore(db_path(),read_only=True))
+    except sqlite3.OperationalError:return None
+
+
 def get_connection():
     db = db_path()
     if not db.exists():

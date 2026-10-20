@@ -136,6 +136,19 @@ def _sync_locked(store: StateStore, tracking_uri=None, max_events=100):
                     client.set_tag(mlflow_run_id, 'research.hypothesis_rank', str(proposal['priority_rank']))
             if critique:
                 client.set_tag(mlflow_run_id, 'research.critic_assessment', critique['payload_json'][:4000])
+            with store.connect() as con:
+                cumulative=con.execute("SELECT payload_json FROM events WHERE run_id=? AND kind='CUMULATIVE_REVIEW' ORDER BY id DESC LIMIT 1",(run_id,)).fetchone()
+                retention=con.execute("SELECT payload_json FROM events WHERE run_id=? AND kind='MODEL_RETAINED' ORDER BY id DESC LIMIT 1",(run_id,)).fetchone()
+            if cumulative:
+                client.set_tag(mlflow_run_id,'research.cumulative_decisions',cumulative[0][:4000])
+            if retention:
+                model=json.loads(retention[0])
+                client.set_tag(mlflow_run_id,'research.retention_id',model['retention_id'])
+                client.set_tag(mlflow_run_id,'research.comparison_cohort',model['cohort_id'])
+                client.set_tag(mlflow_run_id,'research.retained_checkpoint_sha256',model['reference']['checkpoint_sha256'])
+                client.set_tag(mlflow_run_id,'research.promotion_policy_sha256',model['policy_sha256'])
+                if hasattr(client,'log_dict'):
+                    client.log_dict(mlflow_run_id,model,'retention/model_record.json')
             if artifact_dir.is_dir():
                 # Allowlisted output types only. Never upload raw source images or test masks.
                 for filename in ("measurement.json", "run_manifest.json", "training_audit.json", "plan_comparison.json", "development_case_metrics.json", "stage6_comparison.json", "normal_preview.png", "synthetic_input.png", "synthetic_mask.png", "synthetic_heatmap.png", "synthetic_overlay.png", "cuda_smoke_stdout.log", "cuda_smoke_stderr.log", "cuda_smoke/summary.json"):

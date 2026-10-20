@@ -41,6 +41,7 @@ def decode_agent_plan(plan):
         return result
     plan['training'] = settings(plan['training'])
     for arm in plan['arms']:
+        if arm.get('fixed_checkpoint_seed') is None:arm.pop('fixed_checkpoint_seed',None)
         for key in ('training_overrides','inference'): arm[key] = settings(arm[key])
         if isinstance(arm['baseline_by_seed'],list):
             values = arm['baseline_by_seed']
@@ -56,6 +57,10 @@ def digest(value):
 
 def training_settings(plan, arm):
     return dict(plan['training'], **arm['training_overrides'])
+
+
+def training_seed(arm, pair_seed):
+    return pair_seed if arm.get('fixed_checkpoint_seed') is None else arm['fixed_checkpoint_seed']
 
 
 def validate_plan(plan, hypothesis_id=None):
@@ -84,6 +89,7 @@ def validate_plan(plan, hypothesis_id=None):
         if set(settings) & RESERVED or any(k.startswith('plan_') for k in settings):
             raise ValueError('training settings cannot override controller or security fields')
         if arm['execution'] == 'train':
+            if arm.get('fixed_checkpoint_seed') is not None:raise ValueError('training arm cannot pretend to be a fixed checkpoint')
             if arm['source_arm_id'] or arm['baseline_by_seed']:
                 raise ValueError('training arm cannot silently load a baseline')
             for name in ('steps', 'batch_size', 'size', 'expected_source_exposures'):
@@ -99,6 +105,8 @@ def validate_plan(plan, hypothesis_id=None):
                     raise ValueError(f'controlled variable {key} differs between arms')
                 controlled[key] = settings[key]
         else:
+            if arm.get('fixed_checkpoint_seed') is not None and not arm['baseline_by_seed']:
+                raise ValueError('fixed incumbent requires exact historical baseline references')
             if arm['training_overrides']:
                 raise ValueError('frozen arm cannot change training settings')
             if bool(arm['source_arm_id']) == bool(arm['baseline_by_seed']):
@@ -109,7 +117,7 @@ def validate_plan(plan, hypothesis_id=None):
                 if set(arm['baseline_by_seed']) != {str(s) for s in plan['seeds']}:
                     raise ValueError('each requested seed needs its own pinned baseline')
                 for seed, bid in arm['baseline_by_seed'].items():
-                    if bid not in baselines or baselines[bid]['seed'] != int(seed):
+                    if bid not in baselines or baselines[bid]['seed'] != training_seed(arm,int(seed)):
                         raise ValueError('frozen baseline seed mismatch')
         seen.add(arm['arm_id'])
     diagnostic_ids = [d['diagnostic_id'] for d in plan['diagnostics']]
@@ -154,7 +162,9 @@ def register_plan(store, campaigns, campaign_id, plan):
                 if prior['plan_sha256'] != digest(plan):
                     raise ValueError('registered scientific protocol is immutable')
                 return prior
-        record = {'plan': plan, 'plan_sha256': digest(plan), 'registered_at': time.time(), 'version': VERSION}
+        from orchestrator.model_registry import plan_context
+        record = {'plan': plan, 'plan_sha256': digest(plan), 'registered_at': time.time(), 'version': VERSION,
+                  'promotion_context': plan_context(store)}
         con.execute('INSERT INTO campaign_events(campaign_id,time,kind,payload_json) VALUES(?,?,?,?)',
                     (campaign_id, record['registered_at'], 'EXPERIMENT_PLAN_REGISTERED', json.dumps(record, sort_keys=True)))
     return record
@@ -214,10 +224,20 @@ def research_evidence(store, repo_root=REPO, requested=()):
     summaries.update({r['run_id']:json.loads(r['payload_json']) for r in records if r['run_id'] in summaries})
     def quality(row):
         return (summaries[row['run_id']] or {}).get('metrics', {}).get('dev_real/logical_au_spro_0_05_compatible', -1)
-    wanted = list(requested) + [r['run_id'] for r in sorted(rows,key=quality,reverse=True)[:3]]
+    from orchestrator.model_registry import states, retained, frontier
+    retained_models=retained(store)
+    persistent_ids=[retained_models[s['retention_id']]['run_id'] for s in states(store).values()]
+    for cid in {m['cohort_id'] for m in retained_models.values()}:
+        group=[m for m in retained_models.values() if m['cohort_id']==cid]
+        persistent_ids += [retained_models[rid]['run_id'] for rid in frontier(group)]
+    wanted = list(requested) + persistent_ids + [r['run_id'] for r in sorted(rows,key=quality,reverse=True)[:3]]
+    for rid in persistent_ids:
+        if not any(r['run_id']==rid for r in rows):
+            row=store.get_run(rid)
+            if row:rows.append(row)
     wanted += [r['run_id'] for r in rows if r['status'] in {'FAILED','OOM','TIMED_OUT','INTERRUPTED'}][:2]
     wanted += [r['run_id'] for r in rows[:3]]
-    chosen = list(dict.fromkeys(wanted))[:12]
+    chosen = list(dict.fromkeys(wanted))
     context, files = [], {}
     for rid in chosen:
         row = next((r for r in rows if r['run_id']==rid), None)
@@ -286,7 +306,7 @@ def comparison_result(plan, runs, feedback=None):
         cfg = json.loads(row['config_json'])
         if cfg.get('plan_sha256') != digest(plan):
             continue
-        key = (cfg.get('plan_arm'), cfg.get('seed'))
+        key = (cfg.get('plan_arm'), cfg.get('plan_pair_seed',cfg.get('seed')))
         if key not in expected or key in found:
             problems.append(f'unexpected or repeated cell {key}')
         found[key] = row
@@ -329,11 +349,13 @@ def comparison_result(plan, runs, feedback=None):
             expected_count = 0 if arm['execution']=='frozen' else cfg.get(requested)
             if run_metrics.get('protocol/'+key) != expected_count:
                 missing.append('training count '+key)
-        if run_metrics.get('protocol/seed') != seed:
+        actual_seed=training_seed(arm,seed)
+        if cfg.get('seed') != actual_seed or run_metrics.get('protocol/seed') != actual_seed:
             missing.append('measured seed')
         if missing:
             problems.append(f"{arm['arm_id']} seed {seed}: {', '.join(missing)}")
         results.append({'arm': arm['arm_id'], 'seed': seed, 'run_id': row['run_id'],
+                        'training_seed':actual_seed,
                         'status': row['status'], 'missing': missing, 'measurements': measurements,
                         'effective_configuration_sha256':digest(cfg), 'source_sha256':cfg.get('model_sha256'),
                         'git_commit':row.get('git_sha'), 'optimizer_updates':run_metrics.get('protocol/optimizer_updates'),
@@ -445,7 +467,8 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
                          'scripts/run_candidate.py','scripts/feedback_infer.py','scripts/candidate_smoke.py',
                          'benchmark/train_adapter.py','benchmark/feedback_metrics.py','benchmark/feedback_data.py',
                          'schemas/experiment_plan.schema.json','configs/development_feedback.json']
-        trusted_files += ['orchestrator/state_store.py','orchestrator/campaign_state.py','orchestrator/budgets.py',
+        trusted_files += ['orchestrator/model_registry.py','configs/champion_policy.json',
+                          'orchestrator/state_store.py','orchestrator/campaign_state.py','orchestrator/budgets.py',
                           'orchestrator/gpu_queue.py','orchestrator/codex_runner.py','orchestrator/codex_sandbox.py',
                           'benchmark/data_guard.py','benchmark/validation.py','benchmark/metrics_v2.py',
                           'benchmark/metrics.py','benchmark/inference_benchmark.py','pyproject.toml',
@@ -499,6 +522,8 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
                              plan_id=plan['plan_id'], plan_sha256=digest(plan), plan_arm=arm['arm_id'],
                              plan_contract_version=VERSION, execution_kind=arm['execution'], model_sha256=source_hash,
                              metric_evaluator_version='development-v2.0')
+            if arm.get('fixed_checkpoint_seed') is not None:
+                effective.update(seed=arm['fixed_checkpoint_seed'],plan_pair_seed=seed)
             candidate_id = plan['hypothesis_id']
             if arm['execution'] == 'frozen':
                 if arm['source_arm_id']:
@@ -508,7 +533,7 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
                     reference = next(b for b in plan['baselines'] if b['baseline_id'] == arm['baseline_by_seed'][str(seed)])
                     _, origin = verify_baseline(store, reference, controller.REPO)
                 origin_cfg = json.loads(origin['config_json'])
-                if origin_cfg.get('seed') != seed:
+                if origin_cfg.get('seed') != effective['seed']:
                     raise ValueError('frozen checkpoint does not belong to requested seed')
                 for key in set(plan['controlled_variables']) | {'size'}:
                     if origin_cfg.get(key) != effective.get(key):
@@ -579,7 +604,8 @@ def review_plan(store, campaigns, campaign_id, plan, result):
         if review['plan_id'] != plan['plan_id'] or review['comparison_status'] != result['status']:
             raise ValueError('critic comparison identity/status contradicts measured completion')
         if ((result['status']=='INCOMPLETE' and (review['hypothesis_outcome']=='supported' or review['recommended_next_action']=='promote_for_review')) or
-            (review['causal_claim'] and (result['status']!='COMPLETE_CONTROLLED' or not plan['paired_comparisons']))):
+            (review['causal_claim'] and (result['status']!='COMPLETE_CONTROLLED' or not plan['paired_comparisons'] or
+                any(a.get('fixed_checkpoint_seed') is not None for a in plan['arms'])))):
             raise ValueError('critic attempted a scientific claim unsupported by completed controlled work')
         return review
     _, review, _ = controller._with_agent_correction(store, (campaigns,campaign_id), 'critic', request, check)
@@ -598,4 +624,11 @@ def review_plan(store, campaigns, campaign_id, plan, result):
     campaigns.update(campaign_id,next_hypothesis=f"evidence-followup:{plan['hypothesis_id']}:{review['recommended_next_action']}",
                      consecutive_failures=0 if not any(r['status'] in {'FAILED','OOM','TIMED_OUT'} for r in rows) else campaigns.get(campaign_id)['consecutive_failures']+1)
     store.set_hypothesis_status(plan['hypothesis_id'],'INCOMPLETE' if result['status']=='INCOMPLETE' else 'COMPLETED')
+    from orchestrator.model_registry import consider_comparison
+    decisions=consider_comparison(store,campaigns,campaign_id,plan,result,controller.REPO)
+    for row in rows:
+        with store.connect() as con:
+            con.execute('INSERT INTO events(run_id,time,kind,payload_json) VALUES(?,?,?,?)',
+                        (row['run_id'],time.time(),'CUMULATIVE_REVIEW',json.dumps(decisions,sort_keys=True)))
+        enqueue_run_tracking(store,row['run_id'],event_key_suffix='cumulative:'+digest(plan))
     return review

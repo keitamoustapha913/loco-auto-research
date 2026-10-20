@@ -374,6 +374,9 @@ def research_command(action, runtime, ledger, config_path=None):
         row = campaigns.latest()
         process = owned_process(runtime, 'research')
         if action == 'start':
+            from orchestrator.model_registry import initialize, recover_comparisons
+            initialize(store)
+            recover_comparisons(store)
             if row and row['status'] in {'RUNNING', 'PAUSED', 'STOPPING'}:
                 if process:
                     return research_summary(campaigns, row, process)
@@ -441,6 +444,8 @@ def research_summary(campaigns, row, process, report=False):
               'next_hypothesis': row['next_hypothesis'], 'active_run_id': row['active_run_id'],
               'reason': row['reason'], 'consecutive_failures': row['consecutive_failures']}
     result['codex_budget'] = campaigns.call_budget(row['id'])
+    from orchestrator.model_registry import progress, status_summary
+    result['cumulative_research'] = progress(campaigns.store) if report else status_summary(campaigns.store)
     with campaigns.store.connect() as con:
         plan_result = con.execute("SELECT payload_json FROM campaign_events WHERE campaign_id=? AND kind='EXPERIMENT_PLAN_RESULT' ORDER BY id DESC LIMIT 1", (row['id'],)).fetchone()
     if plan_result:

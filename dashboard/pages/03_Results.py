@@ -2,6 +2,8 @@
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from dashboard.cumulative import progress_card
+from dashboard.data_access import cumulative_progress
 
 from dashboard.components import page_intro, run_details, development_result_card
 from dashboard.data_access import real_feedback_summaries, real_heatmap_sample, allowed_preview, heatmap_sample, latest_multiseed_comparison, list_runs
@@ -12,6 +14,7 @@ from dashboard.presentation import (
 from orchestrator.decision_engine import pareto_frontier
 
 page_intro("Results", "Measured runs and development previews. Synthetic proxies are never official LOCO scores.")
+progress_card(cumulative_progress())
 runs = list_runs(500)
 summary = research_summary(runs)
 models_tab, heatmaps_tab, compare_tab = st.tabs(["Models", "Heatmaps", "Compare"])

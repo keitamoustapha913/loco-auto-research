@@ -1,5 +1,6 @@
 import sys
 import types
+import json
 from orchestrator.state_store import StateStore
 from orchestrator.mlflow_tracker import enqueue_run_tracking, sync_outbox
 
@@ -12,6 +13,10 @@ def test_mlflow_outbox_sync_with_fake_client(tmp_path, monkeypatch):
     store.set_run_result(rid, {'dev_synthetic/pixel_auroc':0.75})
     store.transition(rid,'COMPLETED')
     enqueue_run_tracking(store,rid)
+    with store.connect() as con:
+        con.execute("INSERT INTO events(run_id,time,kind,payload_json) VALUES(?,0,'MODEL_RETAINED',?)",
+            (rid,json.dumps({'retention_id':'fixture-retained','cohort_id':'fixture-cohort',
+                'reference':{'checkpoint_sha256':'fixture-checkpoint'},'policy_sha256':'fixture-policy'})))
     calls=[]
     class Client:
         def __init__(self,tracking_uri): calls.append(('uri',tracking_uri))
@@ -23,6 +28,7 @@ def test_mlflow_outbox_sync_with_fake_client(tmp_path, monkeypatch):
         def log_param(self,*x): calls.append(('param',x))
         def log_metric(self,*x): calls.append(('metric',x))
         def set_tag(self,*x): calls.append(('tag',x))
+        def log_dict(self,*x): calls.append(('dictionary',x))
         def set_terminated(self,*x,**kw): calls.append(('term',x))
     ml=types.ModuleType('mlflow'); ml.set_tracking_uri=lambda uri:None
     tracking=types.ModuleType('mlflow.tracking'); tracking.MlflowClient=Client
@@ -33,3 +39,7 @@ def test_mlflow_outbox_sync_with_fake_client(tmp_path, monkeypatch):
     assert store.get_run(rid)['mlflow_run_id']=='fake-run'
     assert store.pending_tracking()==[]
     assert any(c[0]=='metric' for c in calls)
+    assert any(c[0]=='tag' and c[1][1]=='research.retention_id' for c in calls)
+    assert any(c[0]=='dictionary' and c[1][2]=='retention/model_record.json' for c in calls)
+    assert sync_outbox(store)['delivered']==0
+    assert sum(c[0]=='create' for c in calls)==1

@@ -50,8 +50,28 @@ def run_worker_once(store, manifest_path, runtime, personal_mode_authorized=Fals
 def _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=None, **kwargs):
     requested = kwargs.pop('evidence_run_ids', ())
     if kwargs.get('personal_mode') and role in {'researcher','implementer','critic'}:
+        from orchestrator.model_registry import initialize, recover_comparisons, scientific_memory, canonical
+        initialize(store,repo_root)
+        recover_comparisons(store,repo_root)
+        memory=scientific_memory(store)
+        folder=store.path.parent/'research_evidence'/'cumulative'/canonical(memory)
+        if folder.parent.is_symlink() or folder.is_symlink():raise PermissionError('unsafe cumulative context')
+        folder.mkdir(parents=True,exist_ok=True,mode=0o700)
+        path=folder/'evidence.json'
+        data=json.dumps(memory,sort_keys=True).encode()
+        if path.exists():
+            if path.is_symlink() or path.read_bytes()!=data:raise PermissionError('cumulative context changed')
+        else:path.write_bytes(data);path.chmod(0o444)
         from orchestrator.experiment_plan import research_evidence
         evidence, files = research_evidence(store, repo_root, requested)
+        files['cumulative/evidence.json']=path
+        prompt += ('\nPersistent whole-history scientific memory is at /workspace/evidence/cumulative/evidence.json. '
+                   'Logical AU-sPRO@5% and pixel AP have priority over detection scores. Preserve the incumbent; '
+                   'only deterministic promotion rules can replace it. Review unfinished comparisons, failures, '
+                   'prior ablations and confirmation needs before choosing research. You choose methods freely. '
+                   'An exploratory record score is not a confirmed improvement. Current retained heads: '+
+                   json.dumps([{k:c[k] for k in ('cohort_id','state','champion')} for c in memory['cohorts']]))
+        kwargs['reference_files']=files
         if evidence:
             prompt += ('\nRelevant committed prior implementations, failures, exact frozen baseline references and '
                        'aggregate results follow. Read their /workspace/evidence/<run_id>/model.py, '
@@ -77,7 +97,6 @@ def _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=None,
             summary = latest_summary(store, r['run_id'])
             if summary:
                 feedback.append(dict(summary, run_id=r['run_id'], candidate_id=r['candidate_id'], hypothesis_id=r['hypothesis_id']))
-        feedback = feedback[:5]
         if feedback:
             prompt += ('\nAuthorized real-development feedback follows. Use aggregate evidence to select methods, '
                        'but never use anomaly images/masks to fit model weights, normalization or thresholds. '
