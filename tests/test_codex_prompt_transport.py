@@ -13,7 +13,7 @@ def test_large_prompt_uses_stdin_without_command_argument_expansion(tmp_path,mon
     import orchestrator.codex_runner as runner
     import orchestrator.codex_sandbox as sandbox
     repo=Path(__file__).resolve().parents[1]
-    schema=tmp_path/'schema.json';schema.write_text(json.dumps({'type':'object'}))
+    schema=tmp_path/'schema.json';schema.write_text(json.dumps({'type':'object','properties':{},'required':[],'additionalProperties':False}))
     captured={};output={}
     def sandbox_command(root,role,schema,response,task,candidate,**kw):
         output['path']=response
@@ -54,7 +54,7 @@ def test_detailed_personal_history_is_available_as_files_not_duplicated_in_promp
 
 def test_provider_schema_subset_preserves_original_and_literal_constraints():
     schema={'type':'object','properties':{'seeds':{'type':'array','uniqueItems':True,'items':{'type':'integer'}},
-        'literal':{'const':{'uniqueItems':True}}},'required':['seeds']}
+        'literal':{'const':{'uniqueItems':True}}},'required':['seeds','literal'],'additionalProperties':False}
     compiled=provider_output_schema(schema)
     assert 'uniqueItems' not in compiled['properties']['seeds']
     assert schema['properties']['seeds']['uniqueItems'] is True
@@ -65,7 +65,7 @@ def test_provider_uniqueitems_omission_never_accepts_duplicate_seeds(tmp_path,mo
     import orchestrator.codex_runner as runner
     repo=Path(__file__).resolve().parents[1]
     schema=tmp_path/'schema.json';schema.write_text(json.dumps({'type':'object','properties':{
-        'seeds':{'type':'array','uniqueItems':True,'items':{'type':'integer'}}},'required':['seeds']}))
+        'seeds':{'type':'array','uniqueItems':True,'items':{'type':'integer'}}},'required':['seeds'],'additionalProperties':False}))
     def run(command,**kwargs):
         provider=Path(command[command.index('--output-schema')+1])
         assert 'uniqueItems' not in json.loads(provider.read_text())['properties']['seeds']

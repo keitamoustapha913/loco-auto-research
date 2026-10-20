@@ -340,3 +340,17 @@ execute within a separately authorized campaign but cannot confirm promotion.
 independent seeds and preregistered real-localization/deployment endpoints. Missing
 work remains `INCOMPLETE`. Measured matching, immutable baseline integrity, paired
 uncertainty and the frozen promotion policy remain necessary after admission.
+
+Provider schema compilation runs a deterministic local preflight **before** a
+campaign/global Codex call reservation. Planning setting names are plain strings;
+trusted Python checks retain reserved-field rejection (including device/category
+and plan_*), valid key names, controlled values, baseline integrity, distinct seeds
+and promotion eligibility. The provider-only removal of uniqueItems never removes
+the original output/semantic validator's uniqueness check.
+
+The preflight scans nested schema branches/references, rejects lookarounds,
+backreferences, unsupported/unreviewed keywords and invalid strict object shapes.
+Schema defects are infrastructure errors and do not trigger an agent repair call.
+Checks follow the [documented Structured Outputs subset](https://developers.openai.com/api/docs/guides/structured-outputs)
+and saved provider errors. Passing these local checks does **not** establish actual
+provider acceptance; that requires a separately authorized successful live call.

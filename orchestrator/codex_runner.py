@@ -4,11 +4,12 @@ import hashlib
 import copy
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
 import uuid
-from jsonschema import validate
+from jsonschema import validate, Draft202012Validator, SchemaError
 
 class AgentFailure(RuntimeError):
     pass
@@ -16,6 +17,67 @@ class AgentFailure(RuntimeError):
 
 class InvalidAgentOutput(AgentFailure):
     """An agent completed but its response needs correction, not host changes."""
+
+
+class ProviderSchemaError(AgentFailure):
+    """Local schema defect: never retry it as an agent-output repair."""
+
+
+def preflight_provider_schema(schema):
+    """Conservative local subset checks, not proof of remote API acceptance.
+
+    Source: https://developers.openai.com/api/docs/guides/structured-outputs
+    Lookaround/backreference rejection also follows saved provider error evidence.
+    Visit schema positions only; enum/const values may contain arbitrary JSON.
+    Unknown keywords fail closed so future additions require explicit review.
+    """
+    try:
+        Draft202012Validator.check_schema(schema)
+    except SchemaError as exc:
+        raise ProviderSchemaError('Invalid JSON schema: '+exc.message) from exc
+    allowed={'$schema','$defs','$ref','type','properties','required','additionalProperties',
+             'items','anyOf','enum','const','title','description','pattern','format',
+             'minLength','maxLength','minimum','maximum','exclusiveMinimum','exclusiveMaximum',
+             'multipleOf','minItems','maxItems'}
+    issues=[]
+    if not isinstance(schema,dict):raise ProviderSchemaError('Provider schema root must be an object schema')
+    if schema.get('type')!='object' or 'anyOf' in schema:
+        issues.append('$: provider root must be an object without anyOf')
+    def walk(node,path='$'):
+        if not isinstance(node,dict):return
+        for key in sorted(set(node)-allowed):
+            issues.append(f'{path}.{key}: unsupported or unreviewed provider keyword')
+        reference=node.get('$ref')
+        if reference is not None:
+            target=schema
+            try:
+                if not reference.startswith('#/'):
+                    raise ValueError('only local JSON-pointer references are supported')
+                for part in reference[2:].split('/'):
+                    target=target[part.replace('~1','/').replace('~0','~')]
+            except (KeyError,TypeError,ValueError) as exc:
+                issues.append(f'{path}.$ref: unresolved or nonlocal reference {reference}: {exc}')
+        pattern=node.get('pattern')
+        if isinstance(pattern,str):
+            if any(token in pattern for token in ('(?=','(?!','(?<=','(?<!','(?P=','(?(', '(?R)')) or re.search(r'\\[1-9]|\\[kg][<{]',pattern):
+                issues.append(f'{path}.pattern: regex lookaround/backreferences are unsupported')
+            try:re.compile(pattern)
+            except re.error as exc:issues.append(f'{path}.pattern: invalid regex: {exc}')
+        types=node.get('type',[])
+        if types=='object' or 'properties' in node or (isinstance(types,list) and 'object' in types):
+            if node.get('additionalProperties') is not False:
+                issues.append(f'{path}.additionalProperties: strict objects require false')
+            if set(node.get('required',[]))!=set(node.get('properties',{})):
+                issues.append(f'{path}.required: every declared property must be required')
+        for name in ('properties','$defs','definitions','patternProperties','dependentSchemas'):
+            for key,child in node.get(name,{}).items():walk(child,f'{path}.{name}.{key}')
+        for name in ('items','additionalProperties','contains','not','if','then','else','propertyNames'):
+            walk(node.get(name),f'{path}.{name}')
+        for name in ('anyOf','allOf','oneOf','prefixItems'):
+            for index,child in enumerate(node.get(name,[])):walk(child,f'{path}.{name}[{index}]')
+    walk(schema)
+    if issues:raise ProviderSchemaError('Provider schema preflight failed: '+'; '.join(issues))
+    return schema
 
 
 def provider_output_schema(schema):
@@ -36,7 +98,7 @@ def provider_output_schema(schema):
         for name in ('anyOf','allOf','oneOf','prefixItems'):
             for child in node.get(name,[]):walk(child)
     walk(result)
-    return result
+    return preflight_provider_schema(result)
 
 
 def invoke(role: str, repo_root: Path, schema_path: Path, prompt: str, timeout=180, worktree=None,

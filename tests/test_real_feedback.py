@@ -135,7 +135,7 @@ def test_feedback_reaches_critic_not_candidate_inputs(tmp_path,monkeypatch):
     from orchestrator import controller
     calls=[]
     monkeypatch.setattr(controller,'invoke',lambda *a,**kw:calls.append(a) or {'response':{}})
-    controller.budgeted_invoke(store,'critic',Path('.'),Path('schema'),'Critique')
+    controller.budgeted_invoke(store,'critic',Path('.'),Path(__file__).resolve().parents[1]/'schemas/review.schema.json','Critique')
     assert '0.75' in calls[0][3] and 'never use anomaly images/masks to fit' in calls[0][3]
     from benchmark.data_guard import validate_manifest,DataAccessError
     with pytest.raises(DataAccessError): validate_manifest({'schema_version':1,'partition':'development'})

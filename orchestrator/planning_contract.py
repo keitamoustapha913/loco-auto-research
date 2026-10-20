@@ -7,7 +7,6 @@ from __future__ import annotations
 import ast
 import copy
 import json
-import re
 from pathlib import Path
 
 
@@ -17,17 +16,15 @@ class PlanningValidationError(ValueError):
         super().__init__('Scientific plan rejected: '+json.dumps(issues,sort_keys=True))
 
 
-def setting_pattern():
-    from orchestrator.experiment_plan import RESERVED
-    return r'^(?!plan_)(?!(?:'+ '|'.join(re.escape(k) for k in sorted(RESERVED))+r')$)\S+$'
-
-
 def local_issues(plan):
     """Semantic key/value checks independent of any candidate implementation."""
     from orchestrator.experiment_plan import RESERVED,training_settings
     issues=[]
     for arm in plan['arms']:
         settings=training_settings(plan,arm)
+        invalid=sorted(k for k in settings if not k or any(c.isspace() for c in k))
+        if invalid:issues.append({'code':'INVALID_TRAINING_FIELD_NAMES','arm':arm['arm_id'],'fields':invalid,
+            'message':'Setting names must be nonempty keys without whitespace; scientific explanations belong outside settings.'})
         bad=sorted(k for k in settings if k in RESERVED or k.startswith('plan_'))
         if bad:issues.append({'code':'RESERVED_TRAINING_FIELDS','arm':arm['arm_id'],'fields':bad,
             'message':'Remove controller-owned keys from scientific settings; the controller supplies them.'})
@@ -163,11 +160,13 @@ def constrain_output_schema(schema, capabilities=()):
         if {'training','controlled_variables','arms','seeds'}<=props.keys():
             pair=props['training'].get('items',{})
             if pair.get('properties',{}).get('name') is not None:
-                pair['properties']['name']['pattern']=setting_pattern()
-                props['controlled_variables']['items']['pattern']=setting_pattern()
+                # Provider names stay plain strings. Reserved names/whitespace
+                # and control semantics are enforced by local_issues, not regex.
+                pair['properties']['name'].pop('pattern',None)
+                props['controlled_variables']['items'].pop('pattern',None)
                 props['controlled_variables']['description']='Actual common training setting key names, with equal recorded values; never prose.'
                 arm=props['arms']['items']
-                arm['properties']['training_overrides']['items']['properties']['name']['pattern']=setting_pattern()
+                arm['properties']['training_overrides']['items']['properties']['name'].pop('pattern',None)
                 if capabilities:
                     train=copy.deepcopy(arm);frozen=copy.deepcopy(arm)
                     train['properties']['execution']={'const':'train','type':'string'}

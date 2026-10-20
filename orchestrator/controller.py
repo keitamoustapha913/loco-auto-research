@@ -119,18 +119,27 @@ def _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=None,
     if role=='researcher':
         from orchestrator.planning_contract import planning_instructions
         prompt += '\nTRUSTED EXECUTABLE PLANNING CONTRACT:\n'+planning_instructions(capabilities)
+    # Compile and inspect the exact generated provider schema before reserving
+    # any campaign/global call. Schema defects are host errors, never agent repairs.
+    schema_value=None
+    if schema is not None:
+        from orchestrator.codex_runner import provider_output_schema
+        schema_value=json.loads(Path(schema).read_text())
+        if role=='researcher':
+            from orchestrator.planning_contract import constrain_output_schema
+            schema_value=constrain_output_schema(schema_value,capabilities)
+        provider_output_schema(schema_value)
     if campaign:
         campaigns.reserve_codex_call(campaign_id, role)
         campaigns.event(campaign_id, 'AGENT_STARTED', role=role)
     else:
         store.reserve_codex_call(role)
     try:
-        if role=='researcher' and schema is not None:
+        if role=='researcher' and schema_value is not None:
             import tempfile
-            from orchestrator.planning_contract import constrain_output_schema
             with tempfile.TemporaryDirectory(prefix='loco-planning-contract-') as folder:
                 generated=Path(folder)/'schema.json'
-                generated.write_text(json.dumps(constrain_output_schema(json.loads(Path(schema).read_text()),capabilities)))
+                generated.write_text(json.dumps(schema_value))
                 result=invoke(role,repo_root,generated,prompt,**kwargs)
         else:
             result = invoke(role, repo_root, schema, prompt, **kwargs)

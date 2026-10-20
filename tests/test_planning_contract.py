@@ -42,11 +42,13 @@ def test_valid_offline_training_comparison_and_eligibility():
 
 
 @pytest.mark.parametrize('field',['device','category','seed','plan_id','baseline_effective_configuration'])
-def test_reserved_training_fields_rejected_in_schema_and_admission(field):
+def test_plain_provider_names_still_reject_reserved_training_fields_in_admission(field):
     p=experiment_plan();p['training'][field]='forbidden'
     assert 'RESERVED_TRAINING_FIELDS' in codes(inspect_plan(p))
     schema=constrain_output_schema(json.loads((REPO/'schemas/experiment_plan_agent.schema.json').read_text()))
-    with pytest.raises(ValidationError):validate(agent_plan(p),schema)
+    # Generation accepts a plain name; trusted semantics remain authoritative.
+    validate(agent_plan(p),schema)
+    assert 'pattern' not in schema['properties']['training']['items']['properties']['name']
 
 
 def test_prose_controls_and_mismatched_values_return_precise_errors():
@@ -132,7 +134,7 @@ def test_agent_boundary_uses_generated_schema_and_instructions_without_real_call
         value=json.loads(Path(schema).read_text())
         assert 'controller-planning-v2' in prompt
         plan_schema=value['$defs']['proposal']['properties']['experiment_plan']
-        assert 'pattern' in plan_schema['properties']['training']['items']['properties']['name']
+        assert 'pattern' not in plan_schema['properties']['training']['items']['properties']['name']
         return {'response':{'offline':True}}
     monkeypatch.setattr(controller,'invoke',offline_invoke)
     result=controller._budgeted_invoke_once(store,'researcher',repo,REPO/'schemas/proposals.schema.json','offline')
