@@ -1,0 +1,290 @@
+{
+  "candidate_id": "categorical_regression_audited_redesign_v3",
+  "changes": "manifest enforcement, observed training counters/pairing hashes, within_source_proxy diagnostics; original architecture, optimizer, loss and readout definitions preserved",
+  "dependencies": [
+    "torch",
+    "numpy",
+    "Pillow"
+  ],
+  "execution_authorized": false,
+  "experiment_plan": {
+    "arms": [
+      {
+        "arm_id": "categorical",
+        "baseline_by_seed": {},
+        "difference": "Fresh audited reference: train both independent trunks using the committed joint loss and deploy categorical conditional cross-entropy.",
+        "execution": "train",
+        "inference": {},
+        "source_arm_id": "",
+        "training_overrides": {
+          "objective": "categorical"
+        }
+      },
+      {
+        "arm_id": "deterministic",
+        "baseline_by_seed": {},
+        "difference": "Identical fresh training procedure and presentations; deploy the independent deterministic trunk and quantized-target squared-error readout.",
+        "execution": "train",
+        "inference": {},
+        "source_arm_id": "",
+        "training_overrides": {
+          "objective": "deterministic"
+        }
+      }
+    ],
+    "baseline_arm_id": "categorical",
+    "baselines": [
+      {
+        "baseline_id": "bfe8fc62-8b6d-4283-a844-8697e40d1125",
+        "checkpoint_manifest_sha256": "19bb9472c36b0ceef110d24a518940f0e3cd9e20f3b2ee15c39314f6035de852",
+        "checkpoint_sha256": "00c27e21f74e86a0834a2e1a9b1c09f10481579b0bfb34f22c092a46d0d4760c",
+        "configuration_sha256": "8e4713960782025b052cb16ff7b0c9d8b2c65132e536f77f8db95ce2aaf231d1",
+        "run_id": "bfe8fc62-8b6d-4283-a844-8697e40d1125",
+        "seed": 7,
+        "source_sha256": "9456cfd663ac7f930bdc8b4a00b625533139f1822b9b469f84288f8027bb7a03"
+      }
+    ],
+    "completion_criteria": [
+      "All six fresh arm-seed jobs complete with authentic source, checkpoint, configuration and manifest hashes; the pinned historical reference remains contextual and unchanged.",
+      "Every job records exactly 120 observed optimizer calls and 960 instrumented source presentations; each seed pair has identical source-order and mask digests.",
+      "All requested normal, real aggregate and diagnostic measurements are finite and present; diagnostic per_image records match all assessment source identities.",
+      "Report each seed, paired seed differences, source-bootstrap proxy intervals, costs, failures and operational acceptance decisions; completion alone supplies no hypothesis support or promotion eligibility.",
+      "Stop before exceeding six jobs, 120 seconds per job, 720 GPU-slot seconds, 10800 wall seconds or 16 future Codex calls."
+    ],
+    "controlled_variables": [
+      "steps",
+      "batch_size",
+      "size",
+      "expected_optimizer_updates",
+      "expected_source_exposures",
+      "completion_grid",
+      "completion_width",
+      "vocabulary_bins"
+    ],
+    "diagnostics": [
+      {
+        "config": {
+          "alternate_generator": "runner_alternate_corruption_seed_7000_plus_source_index",
+          "emit_per_image": true,
+          "interior_erosion_pixels": 2,
+          "photometric_offset": 0.03,
+          "photometric_scale": 0.93,
+          "primary_generator": "runner_synthetic_corruption_seed_5000_plus_source_index"
+        },
+        "diagnostic_id": "within_source_proxy",
+        "required_metrics": [
+          "primary_interior_ap",
+          "alternate_interior_ap",
+          "primary_boundary_ap",
+          "alternate_boundary_ap",
+          "photometric_alarm",
+          "photometric_false_positives",
+          "assessment_sources"
+        ]
+      }
+    ],
+    "evaluation": {
+      "metric_evaluator_version": "development-v2.0",
+      "real_development_feedback": true,
+      "synthetic_diagnostics": true
+    },
+    "failure_criteria": {
+      "max_failed_jobs": 1,
+      "on_job_failure": "stop"
+    },
+    "hypothesis_id": "categorical_regression_audited_redesign_v3",
+    "kind": "exploratory",
+    "paired_comparisons": [
+      {
+        "bootstrap_seed": 9173,
+        "comparison_id": "categorical_minus_regression_primary",
+        "diagnostic_id": "within_source_proxy",
+        "left_arm": "categorical",
+        "metric": "primary_interior_ap",
+        "repeats": 10000,
+        "right_arm": "deterministic"
+      },
+      {
+        "bootstrap_seed": 9173,
+        "comparison_id": "categorical_minus_regression_alternate",
+        "diagnostic_id": "within_source_proxy",
+        "left_arm": "categorical",
+        "metric": "alternate_interior_ap",
+        "repeats": 10000,
+        "right_arm": "deterministic"
+      },
+      {
+        "bootstrap_seed": 9173,
+        "comparison_id": "categorical_minus_regression_control_alarm",
+        "diagnostic_id": "within_source_proxy",
+        "left_arm": "categorical",
+        "metric": "photometric_alarm",
+        "repeats": 10000,
+        "right_arm": "deterministic"
+      }
+    ],
+    "plan_id": "categorical_regression_audited_redesign_v3",
+    "required_measurements": [
+      {
+        "key": "protocol/optimizer_updates",
+        "source": "run"
+      },
+      {
+        "key": "protocol/source_exposures",
+        "source": "run"
+      },
+      {
+        "key": "training/duration_seconds",
+        "source": "run"
+      },
+      {
+        "key": "normal/threshold",
+        "source": "run"
+      },
+      {
+        "key": "normal/image_false_positives",
+        "source": "run"
+      },
+      {
+        "key": "normal/image_assessed",
+        "source": "run"
+      },
+      {
+        "key": "normal/image_fpr_at_threshold",
+        "source": "run"
+      },
+      {
+        "key": "normal/calibration_images",
+        "source": "run"
+      },
+      {
+        "key": "inference/checkpoint_mib",
+        "source": "run"
+      },
+      {
+        "key": "inference/parameters",
+        "source": "run"
+      },
+      {
+        "key": "dev_real/logical_au_spro_0_05_compatible",
+        "source": "real"
+      },
+      {
+        "key": "dev_real/logical_pixel_ap_pooled",
+        "source": "real"
+      },
+      {
+        "key": "dev_real/logical_image_auroc",
+        "source": "real"
+      },
+      {
+        "key": "dev_real/structural_au_spro_0_05_compatible",
+        "source": "real"
+      },
+      {
+        "key": "dev_real/structural_image_auroc",
+        "source": "real"
+      },
+      {
+        "key": "dev_real/normal_false_positives",
+        "source": "real"
+      },
+      {
+        "key": "dev_real/normal_images",
+        "source": "real"
+      },
+      {
+        "key": "dev_real/normal_image_fpr",
+        "source": "real"
+      },
+      {
+        "key": "dev_real/normal_only_threshold",
+        "source": "real"
+      },
+      {
+        "key": "dev_real/inference_e2e_ms_p50",
+        "source": "real"
+      },
+      {
+        "key": "dev_real/inference_e2e_ms_p95",
+        "source": "real"
+      },
+      {
+        "key": "dev_real/peak_cpu_rss_mib",
+        "source": "real"
+      },
+      {
+        "key": "dev_real/parameters",
+        "source": "real"
+      },
+      {
+        "key": "dev_real/serialized_model_bytes",
+        "source": "real"
+      },
+      {
+        "key": "dev_real/evaluation_wall_seconds",
+        "source": "real"
+      },
+      {
+        "key": "within_source_proxy/primary_interior_ap",
+        "source": "diagnostic"
+      },
+      {
+        "key": "within_source_proxy/alternate_interior_ap",
+        "source": "diagnostic"
+      },
+      {
+        "key": "within_source_proxy/primary_boundary_ap",
+        "source": "diagnostic"
+      },
+      {
+        "key": "within_source_proxy/alternate_boundary_ap",
+        "source": "diagnostic"
+      },
+      {
+        "key": "within_source_proxy/photometric_alarm",
+        "source": "diagnostic"
+      },
+      {
+        "key": "within_source_proxy/photometric_false_positives",
+        "source": "diagnostic"
+      },
+      {
+        "key": "within_source_proxy/assessment_sources",
+        "source": "diagnostic"
+      }
+    ],
+    "resource_budget": {
+      "max_gpu_seconds": 720,
+      "max_job_seconds": 120,
+      "max_jobs": 6,
+      "max_wall_seconds": 10800
+    },
+    "schema_version": "1.0",
+    "seeds": [
+      7,
+      19,
+      31
+    ],
+    "training": {
+      "batch_size": 8,
+      "completion_grid": 24,
+      "completion_width": 32,
+      "expected_optimizer_updates": 120,
+      "expected_source_exposures": 960,
+      "size": 128,
+      "steps": 120,
+      "vocabulary_bins": 4
+    }
+  },
+  "experiment_type": "research_pilot",
+  "external_weights": [],
+  "inference_feature_bank": false,
+  "learning_policy": "train/good only; normal-validation calibration is owned by trusted runner",
+  "origin_candidate_id": "categorical_objective_matched_completion_v2",
+  "origin_git_commit": "0005982da2ee124dd2a3b8e350f0840e0c88efe7",
+  "origin_run_id": "bfe8fc62-8b6d-4283-a844-8697e40d1125",
+  "origin_source_sha256": "9456cfd663ac7f930bdc8b4a00b625533139f1822b9b469f84288f8027bb7a03",
+  "plan_sha256": "50656331af3de0705eafab4cf90aa01e237db0fc8705f865ad702c288060c17b",
+  "scientific_evidence_level": "EXPLORATORY"
+}
