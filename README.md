@@ -308,3 +308,9 @@ Image-cluster uncertainty, additional normal acquisition or stronger replication
 must be declared and measured when needed. No development promotion guarantees
 improvement on the independent final holdout. Missing confirmation remains
 unavailable, never a fabricated zero or a rising progress curve.
+
+Home and Results include a retained-localization step chart built from ledger
+retention events. Research attempts leave it flat until a supported promotion;
+operator rollbacks are explicitly identified. The chart starts when retention
+tracking began, with exploratory points in gray. Historical record scores are
+not backfilled as verified promotions; one recorded incumbent appears as one point.

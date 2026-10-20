@@ -419,6 +419,51 @@ def progress(store):
             'caveat':'Custom development split; compatible sPRO, original-scorer equivalence unverified. No final-holdout generalization claim.'}
 
 
+def localization_history(store, models=None):
+    """Observed incumbent history, starting at retention initialization, not backfilled wins.
+
+    Attempts create flat steps. Only recorded promotion/rollback events change the
+    retained model. Same attempt count may have multiple events; keep event order.
+    """
+    models=retained(store) if models is None else models
+    with store.connect() as con:
+        attempts=[dict(r) for r in con.execute("SELECT created_at FROM runs WHERE category!='fixture' AND candidate_id NOT IN ('toy_normal_ae','toy_normal_ae_cuda') AND hypothesis_id NOT IN ('infrastructure-smoke','fixture-demo') AND COALESCE(json_extract(config_json,'$.experiment_type'),'')!='infrastructure_test' ORDER BY created_at,rowid")]
+        events=[dict(r) for r in con.execute("SELECT id,time,kind,payload_json FROM events WHERE kind IN ('CHAMPION_INITIALIZED','CHAMPION_DECISION','CHAMPION_ROLLBACK') ORDER BY time,id")]
+    changes=[]
+    for record in events:
+        value=json.loads(record['payload_json']);kind=record['kind']
+        if kind=='CHAMPION_INITIALIZED':
+            state=value;label='Exploratory incumbent retained'
+        elif kind=='CHAMPION_ROLLBACK':
+            state=value['restored'];label='Operator rollback: '+value['reason']
+        elif value.get('status')=='PROMOTED':
+            state={'retention_id':value['challenger'],'confirmation':'REPEATED_SEED_SUPPORTED'}
+            label='Supported development promotion'
+        else:continue
+        model=models.get(state['retention_id'])
+        if not model:continue
+        changes.append((record['time'],record['id'],model,state,label))
+    timeline={}
+    # Merge admissions and actual retention events chronologically. Never imply
+    # a model was the incumbent before its recorded retention date.
+    stream=[(r['created_at'],0,None) for r in attempts]+[(t,i,(m,s,label)) for t,i,m,s,label in changes]
+    heads={};count=0
+    for timestamp,order,change in sorted(stream,key=lambda row:(row[0],row[1])):
+        if change is None:
+            count+=1
+            updated=list(heads.items())
+            label='Champion retained'
+        else:
+            model,state,label=change;cid=model['cohort_id'];heads[cid]=(model,state)
+            updated=[(cid,(model,state))]
+        for cid,(model,state) in updated:
+            timeline.setdefault(cid,[]).append({'attempt':count,'time':timestamp,
+                'logical_spro':model['metrics'][SPRO],'logical_pixel_ap':model['metrics'][AP],
+                'candidate':model['candidate_id'],'run_id':model['run_id'],
+                'confirmation':state['confirmation'],'event':label,'event_order':order})
+    return timeline
+
+
 def scientific_memory(store):
     """Whole-history compact index plus retained provenance, never anomaly data."""
     result=progress(store)

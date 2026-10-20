@@ -336,3 +336,41 @@ def test_zero_job_incomplete_comparison_is_counted(lab):
     result=comparison_result(p,[])
     c.event(cid,'EXPERIMENT_PLAN_RESULT',result=result)
     assert registry.progress(store)['incomplete_comparisons']==1
+
+
+def test_localization_curve_starts_at_retention_and_failed_challengers_stay_flat(lab):
+    store,c,cid,repo,add=lab
+    add(spro=.3,ap=.2);registry.initialize(store,repo)
+    # A higher exploratory observation is not a promotion.
+    add(name='challenger',spro=.8,ap=.7);registry.initialize(store,repo)
+    failed=store.create_run('fixture','new_failure','juice_bottle')
+    for status in ('IMPLEMENTED','VALIDATED','QUEUED','RUNNING','FAILED'):store.transition(failed,status)
+    before=len(store.events(1000))
+    history=registry.localization_history(StateStore(store.path,read_only=True))
+    points=next(iter(history.values()))
+    assert [r['attempt'] for r in points]==[1,2,3]
+    assert [r['logical_spro'] for r in points]==[.3,.3,.3]
+    assert all(r['confirmation']=='HISTORICAL_EXPLORATORY' for r in points)
+    assert len(store.events(1000))==before
+
+
+def test_localization_curve_uses_recorded_promotions_and_explicit_rollbacks(lab):
+    store,c,cid,repo,add=lab;p,result,old,ids=prepared(lab)
+    registry.consider_comparison(store,c,cid,p,result,repo)
+    cid_,points=next(iter(registry.localization_history(store).items()))
+    assert points[0]['attempt']==1 and points[0]['logical_spro']==.2
+    assert points[-1]['attempt']==7 and points[-1]['logical_spro']==pytest.approx(.3)
+    assert sum(r['event']=='Supported development promotion' for r in points)==1
+    registry.rollback(store,cid_,'fixture correction')
+    points=registry.localization_history(store)[cid_]
+    assert points[-1]['logical_spro']==.2
+    assert points[-1]['event']=='Operator rollback: fixture correction'
+
+
+def test_localization_curve_keeps_incompatible_evaluator_histories_separate(lab):
+    store,c,cid,repo,add=lab
+    add(spro=.3);add(name='challenger',spro=.8,evaluator_version='incompatible-v2')
+    registry.initialize(store,repo)
+    history=registry.localization_history(store)
+    assert len(history)==2
+    assert {v[0]['logical_spro'] for v in history.values()}=={.3,.8}

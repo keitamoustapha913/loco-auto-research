@@ -1,5 +1,7 @@
 """Small read-only cumulative progress component shared by existing pages."""
 import streamlit as st
+import pandas as pd
+import plotly.graph_objects as go
 
 from orchestrator.model_registry import SPRO, AP
 
@@ -21,6 +23,30 @@ def progress_card(summary):
                    f"{len(group['pareto_retention_ids'])} Pareto alternatives · "
                    + ('Confirmed relative development gain; no final-holdout claim.' if confirmed else 'No confirmed champion improvement in this cohort.'))
         if confirmed:st.caption(state.get('comparison_scope','Paired development comparison'))
+        localization_chart(summary.get('localization_history',{}).get(group['cohort_id'],[]),key='localization-history:'+group['cohort_id'])
     st.caption(f"{summary['complete_comparisons']} complete controlled comparisons · "
                f"{summary['incomplete_comparisons']} incomplete · "
                f"{summary['attempts_since_verified_improvement']} attempts since last confirmed improvement")
+
+
+def localization_chart(history,key=None):
+    st.markdown('**Best retained logical localization score**')
+    if not history:
+        st.caption('No recorded retention history yet.')
+        return
+    rows=pd.DataFrame(history)
+    dates=pd.to_datetime(rows['time'],unit='s',utc=True).dt.strftime('%Y-%m-%d %H:%M UTC')
+    custom=list(zip(rows['candidate'],rows['confirmation'],rows['event'],dates))
+    fig=go.Figure(go.Scatter(x=rows['attempt'],y=rows['logical_spro'],mode='lines+markers',
+        line={'shape':'hv','color':'#487aa5','width':2},
+        marker={'size':7,'color':['#487aa5' if c=='REPEATED_SEED_SUPPORTED' else '#8b9298' for c in rows['confirmation']]},
+        customdata=custom,hovertemplate='Research attempt %{x}<br>Retained AU-sPRO: %{y:.4f}<br>%{customdata[0]}<br>%{customdata[1]}<br>%{customdata[2]}<br>%{customdata[3]}<extra></extra>'))
+    fig.update_layout(height=270,margin={'l':10,'r':10,'t':10,'b':10},showlegend=False,
+        xaxis_title='Research attempts',yaxis_title='Logical AU-sPRO@5% · development',
+        yaxis={'range':[0,1]},xaxis={'tickformat':'d','dtick':max(1,int((rows['attempt'].max()-rows['attempt'].min())/6))})
+    st.plotly_chart(fig,width='stretch',key=key)
+    st.caption('Recorded retention history only. Failed or unsuccessful challengers do not raise the line. '
+               'Gray points are exploratory; supported promotions are blue. Explicit operator rollbacks are shown in tooltips. '
+               'Compatible development scorer; not independent-holdout performance.')
+    if not any(row['event']=='Supported development promotion' for row in history):
+        st.caption('No supported promotions recorded yet. Tracking starts at retention initialization; earlier experiments were not retrospectively certified.')

@@ -25,8 +25,12 @@ def cumulative_progress():
     """Ledger-only read; never initialize, promote or inspect model/data files."""
     if not db_path().is_file():return None
     from orchestrator.state_store import StateStore
-    from orchestrator.model_registry import progress
-    try:return progress(StateStore(db_path(),read_only=True))
+    from orchestrator.model_registry import progress, localization_history
+    try:
+        store=StateStore(db_path(),read_only=True)
+        result=progress(store)
+        result['localization_history']=localization_history(store)
+        return result
     except sqlite3.OperationalError:return None
 
 
