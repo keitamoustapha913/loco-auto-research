@@ -166,7 +166,8 @@ def test_completed_overrun_cannot_claim_compliance_if_alarm_delivery_is_delayed(
     assert clock.elapsed>=.02
 
 
-def test_phase_contract_through_full_cpu_runner_in_bubblewrap(tmp_path):
+@pytest.mark.parametrize('target',[False,True])
+def test_phase_contract_through_full_cpu_runner_in_bubblewrap(tmp_path,target):
     import os,shutil,subprocess
     if os.getenv('LOCO_TEST_BWRAP')!='1':pytest.skip('full regression enables explicit Bubblewrap checks')
     from orchestrator.sandbox import BENCHMARK_FILES,command
@@ -192,13 +193,18 @@ def train(config,manifest,output):raise RuntimeError('legacy train must not be u
 def training_steps(config,allowed_manifest,output):
     assert all(x['split']=='train/good' for x in json.loads(Path(allowed_manifest).read_text())['images'])
     net=Objective();optimizer=torch.optim.SGD(net.parameters(),lr=.01)
-    for _ in range(2):
+    count=0
+    while True:
         batch=torch.ones(1,3,16,16)
-        yield TrainingStep(net,optimizer,(batch,))
+        progress=yield TrainingStep(net,optimizer,(batch,),source_exposures=1)
+        count+=1
+        if config.get('training_completion_policy')=='required-training-target-v1':
+            if progress['target_reached']:break
+        elif count==2:break
     time.sleep(.15)
     output=Path(output);output.mkdir(parents=True)
     torch.save(net.state_dict(),output/'model.pt')
-    meta={'seed':config['seed'],'training_audit':{'seed':config['seed'],'optimizer_updates':2,'source_exposures':2}}
+    meta={'seed':config['seed'],'training_audit':{'seed':config['seed'],'optimizer_updates':count,'source_exposures':count}}
     (output/'checkpoint_manifest.json').write_text(json.dumps(meta))
     return meta
 class Predictor:
@@ -232,6 +238,12 @@ assert 0<result['metrics']['training/duration_seconds']<.1
 assert result['provenance']['training_timing_protocol']=='prepared-training-step-v1'
 print('VERIFIED_PHASE_CPU_FIXTURE')
 '''
+    if target:
+        script=script.replace("result=run(","config.update(plan_contract_version='experiment-plan-v3.0',training_completion_policy='required-training-target-v1',training_budget_seconds=.03)\nfrom benchmark.data_guard import sha256_file\nconfig['model_sha256']=sha256_file(Path('/candidate/model.py'))\nresult=run(")
+        script=script.replace("assert result['metrics']['training/phase_steps']==2","assert result['metrics']['training/phase_steps']>=1")
+        script=script.replace("assert result['metrics']['protocol/optimizer_updates']==2","assert result['metrics']['protocol/optimizer_updates']==result['metrics']['training/phase_steps']")
+        script=script.replace("assert result['metrics']['protocol/source_exposures']==2","assert result['metrics']['protocol/source_exposures']==result['metrics']['training/phase_steps']")
+        script=script.replace("assert 0<result['metrics']['training/duration_seconds']<.1","assert result['metrics']['training/duration_seconds']>=.03\nassert result['metrics']['training/target_reached']==1\nassert Path('/output/run/training_receipt.json').is_file()")
     process=subprocess.run(command(copy,module,data,output,['-c',script],use_gpu=False),capture_output=True,text=True,timeout=30)
     assert process.returncode==0,process.stdout+process.stderr
     assert 'VERIFIED_PHASE_CPU_FIXTURE' in process.stdout

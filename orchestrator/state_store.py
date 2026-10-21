@@ -25,6 +25,16 @@ TRANSITIONS = {
 }
 
 
+def actionable_error(reason, limit=2000):
+    """Keep the decisive exception first; complete evidence stays in events/logs."""
+    if len(reason)<=limit:return reason
+    lines=reason.rstrip().splitlines()
+    decisive=lines[-1] if lines else reason[-500:]
+    trace=reason[reason.rfind('Traceback (most recent call last):'):] if 'Traceback (most recent call last):' in reason else reason
+    header=(lines[0][:180]+'\n'+decisive[:700]+'\nRelevant traceback/log tail:\n')
+    return header+trace[-max(0,limit-len(header)):]
+
+
 def default_db_path():
     return Path(os.getenv("LOCO_LEDGER", str(Path(os.getenv("LOCO_RUNTIME", ".runtime")) / "controller" / "experiments.sqlite"))).expanduser()
 
@@ -157,7 +167,7 @@ class StateStore:
             if next_state in {"COMPLETED", "FAILED", "OOM", "TIMED_OUT", "CANCELLED", "INTERRUPTED", "INVALID", "REJECTED", "PROMOTED"}:
                 updates["finished_at"] = now
             if reason:
-                updates["error"] = reason[:2000]
+                updates["error"] = actionable_error(reason)
             query = ",".join(f"{k}=?" for k in updates)
             con.execute(f"UPDATE runs SET {query} WHERE run_id=?", (*updates.values(), run_id))
             con.execute("INSERT INTO events(run_id,time,kind,payload_json) VALUES(?,?,?,?)", (run_id, now, "TRANSITION", json.dumps({"from": old, "to": next_state, "reason": reason})))

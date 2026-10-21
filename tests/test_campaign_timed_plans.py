@@ -27,7 +27,7 @@ def timed_plan():
 
 @pytest.mark.parametrize('file',['experiment_plan_agent.schema.json','proposals.schema.json'])
 def test_actual_generated_schema_has_no_independent_deadlines(file):
-    schema=constrain_output_schema(json.loads((REPO/'schemas'/file).read_text()))
+    schema=constrain_output_schema(json.loads((REPO/'schemas'/file).read_text()),target_training=False)
     generated=provider_output_schema(schema)
     text=json.dumps(generated)
     for key in ('max_job_seconds','max_gpu_seconds','max_wall_seconds','max_jobs','resource_budget'):
@@ -161,7 +161,7 @@ def test_sandbox_planner_reads_the_actual_generated_contract(tmp_path,monkeypatc
     from types import SimpleNamespace
     from orchestrator import codex_runner,codex_sandbox
     from plan_fixtures import agent_plan
-    schema=constrain_output_schema(json.loads((REPO/'schemas/experiment_plan_agent.schema.json').read_text()))
+    schema=constrain_output_schema(json.loads((REPO/'schemas/experiment_plan_agent.schema.json').read_text()),target_training=False)
     path=tmp_path/'generated.json';path.write_text(json.dumps(schema))
     response={}
     def command(root,role,provider,output,task,candidate_dir,**kwargs):

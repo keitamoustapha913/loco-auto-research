@@ -40,6 +40,30 @@ def canonical_diagnostic_measurement(catalog, name):
     return matches[0]
 
 
+def validate_diagnostic_output(declaration, result, source_ids, paired_metrics=()):
+    """One payload contract for cheap preflight, production and paired analysis."""
+    import math
+    if not isinstance(result,dict) or not isinstance(result.get('metrics'),dict):
+        raise CandidateContractError('diagnostic must return a metrics dictionary')
+    values=result['metrics'];declared=set(declaration['required_metrics'])
+    if set(values)!=declared:
+        raise CandidateContractError(f"diagnostic {declaration['diagnostic_id']}: missing {sorted(declared-set(values))}; undeclared {sorted(set(values)-declared)}")
+    def numeric(value):
+        return not isinstance(value,bool) and isinstance(value,(int,float)) and math.isfinite(value)
+    if not all(numeric(v) for v in values.values()):raise CandidateContractError('diagnostic metrics must be finite measured numbers')
+    records=result.get('per_image')
+    if paired_metrics and records is None:raise CandidateContractError('paired diagnostic requires per_image records')
+    if records is not None:
+        if not isinstance(records,list) or not all(isinstance(r,dict) for r in records):raise CandidateContractError('invalid diagnostic per_image records')
+        ids=[r.get('source_id') for r in records]
+        if not all(isinstance(i,str) for i in ids) or len(ids)!=len(source_ids) or len(set(ids))!=len(ids) or set(ids)!=set(source_ids):raise CandidateContractError('diagnostic per-image source identities differ')
+        for record in records:
+            if not isinstance(record.get('metrics'),dict):raise CandidateContractError('diagnostic per_image requires nested metrics dictionary')
+            if set(paired_metrics)-record['metrics'].keys():raise CandidateContractError('paired diagnostic omitted a requested per-image metric')
+            if not all(numeric(v) for v in record['metrics'].values()):raise CandidateContractError('invalid per-image diagnostic metric')
+    return result
+
+
 def load_predictor(module, checkpoint, device, inference_config=None):
     """Never silently discard an explicitly requested prediction intervention."""
     if inference_config:

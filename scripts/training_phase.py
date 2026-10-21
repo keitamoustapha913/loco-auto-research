@@ -15,9 +15,14 @@ import sys
 import time
 
 VERSION = 'prepared-training-step-v1'
+TARGET_VERSION = 'required-training-target-v1'
 
 
 class TrainingTimeUnverifiable(ValueError):
+    pass
+
+
+class TrainingTargetIncomplete(TrainingTimeUnverifiable):
     pass
 
 
@@ -32,14 +37,16 @@ class TrainingStep:
     args: tuple = ()   # fully prepared, device-resident inputs
     kwargs: dict = field(default_factory=dict)
     use_closure: bool = False  # explicit support for closure-based optimizers
+    source_exposures: int | None = None  # required target runs: prepared source presentations
     zero_grad_set_to_none: bool = True
 
 
 class TrainingClock:
-    def __init__(self, path, budget, synchronize=lambda: None):
+    def __init__(self, path, budget, synchronize=lambda: None, *, target=False):
         if budget is not None and (isinstance(budget,bool) or not isinstance(budget,(int,float)) or not math.isfinite(budget) or budget<=0):
             raise ValueError('invalid trusted training-only deadline')
-        self.path=Path(path);self.budget=budget;self.synchronize=synchronize
+        self.path=Path(path);self.budget=budget;self.synchronize=synchronize;self.target=target
+        self.exposures=0;self.last_step_seconds=0.
         self.elapsed=0.;self.steps=0;self.active=False;self.phase_started=None
         self.status='PREPARING';self.verified=False
         self.publish()
@@ -47,6 +54,10 @@ class TrainingClock:
     def publish(self):
         data={'protocol':VERSION,'status':self.status,'verified':self.verified,
               'duration_seconds':self.elapsed,'budget_seconds':self.budget,
+              'completion_policy':TARGET_VERSION if self.target else 'maximum',
+              'target_seconds':self.budget if self.target else None,
+              'source_exposures':self.exposures,'last_step_seconds':self.last_step_seconds,
+              'overshoot_seconds':max(0,self.elapsed-self.budget) if self.target else 0,
               'completed_steps':self.steps,'phase_started_monotonic':self.phase_started}
         temporary=self.path.with_suffix('.tmp')
         temporary.write_text(json.dumps(data,allow_nan=False));temporary.replace(self.path)
@@ -54,7 +65,7 @@ class TrainingClock:
     def measure(self, operation):
         # Drain setup/data-transfer CUDA work before starting this phase.
         self.synchronize()
-        remaining=None if self.budget is None else self.budget-self.elapsed
+        remaining=None if self.budget is None or self.target else self.budget-self.elapsed
         if remaining is not None and remaining<=0:raise TrainingBudgetExceeded('training-time budget exceeded')
         old_handler=None;old_timer=None
         def expired(signum,frame):raise TrainingBudgetExceeded('training-time budget exceeded')
@@ -68,11 +79,12 @@ class TrainingClock:
             result=operation()
             # Wait for queued forward/backward/update kernels inside the deadline.
             self.synchronize()
-            if self.budget is not None and self.elapsed+time.perf_counter()-started>self.budget:
+            if self.budget is not None and not self.target and self.elapsed+time.perf_counter()-started>self.budget:
                 raise TrainingBudgetExceeded('training-time budget exceeded')
             return result
         finally:
-            self.elapsed+=time.perf_counter()-started
+            self.last_step_seconds=time.perf_counter()-started
+            self.elapsed+=self.last_step_seconds
             self.active=False;self.phase_started=None
             if remaining is not None:
                 signal.setitimer(signal.ITIMER_REAL,0)
@@ -81,7 +93,7 @@ class TrainingClock:
             self.status='PREPARING';self.publish()
 
 
-def run_training_phases(module, config, manifest, output, *, budget=None):
+def run_training_phases(module, config, manifest, output, *, budget=None, preflight_steps=None):
     output=Path(output);audit=output.parent/'training_timing.json'
     provider=getattr(module,'training_steps',None)
     if not callable(provider):
@@ -93,7 +105,9 @@ def run_training_phases(module, config, manifest, output, *, budget=None):
     from torch.nn.modules.module import register_module_forward_pre_hook
     device=torch.device(config.get('device','cpu'))
     synchronize=(lambda:torch.cuda.synchronize(device)) if device.type=='cuda' else (lambda:None)
-    clock=TrainingClock(audit,budget,synchronize)
+    target=config.get('training_completion_policy')==TARGET_VERSION and preflight_steps is None
+    if target and budget is None:raise TrainingTimeUnverifiable('required training target is missing')
+    clock=TrainingClock(audit,budget,synchronize,target=target)
     # Guard explicit phase semantics, not self-reported candidate elapsed numbers.
     def io_guard(event,args):
         if clock.active and event in {'open','os.system','subprocess.Popen','os.rename','os.remove','os.mkdir'}:
@@ -104,6 +118,11 @@ def run_training_phases(module, config, manifest, output, *, budget=None):
     def forward_guard(model,args):
         if not clock.active and torch.is_grad_enabled() and model.training and any(p.requires_grad for p in model.parameters()):
             raise TrainingTimeUnverifiable('gradient-enabled forward outside trusted training phase')
+    original_sleep=time.sleep
+    def guarded_sleep(seconds):
+        if target and clock.active:raise TrainingTimeUnverifiable('sleep cannot fill required learning time')
+        return original_sleep(seconds)
+    time.sleep=guarded_sleep
     original_init=torch.nn.Module.__init__
     original_optimizer_init=torch.optim.Optimizer.__init__
     def module_init(model,*args,**kwargs):
@@ -133,18 +152,30 @@ def run_training_phases(module, config, manifest, output, *, budget=None):
             raise TrainingTimeUnverifiable('model parameters/buffers changed during unmeasured preparation or checkpoint saving')
     try:
         iterator=iter(provider(config,manifest,output))
+        progress=None
+        if target and not hasattr(iterator,'send'):raise TrainingTimeUnverifiable('target training requires a progress-aware generator')
         while True:
+            if target and config.get('research_deadline') is not None and time.time()>=config['research_deadline']:
+                raise TrainingBudgetExceeded('overall research deadline reached before training completion')
             # Generator advance performs initialization, batch preparation, logging
             # and checkpoint saving with no training timer running.
             expected=[(model,state_fingerprint(model)) for model in tracked]
-            try:step=next(iterator)
+            try:step=next(iterator) if progress is None else iterator.send(progress)
             except StopIteration as stopped:
                 check_unchanged(expected)
                 if not clock.steps:raise TrainingTimeUnverifiable('no explicit training steps were executed')
+                if target and clock.elapsed<budget:
+                    raise TrainingTargetIncomplete(f'training ended prematurely: {clock.elapsed:.6f} of required {budget:.6f} actual learning seconds')
                 metadata=stopped.value
                 clock.status='COMPLETED';clock.verified=True;clock.publish()
                 return metadata,clock.elapsed
             check_unchanged(expected)
+            if target and config.get('research_deadline') is not None and time.time()>=config['research_deadline']:
+                raise TrainingBudgetExceeded('overall research deadline reached during preparation')
+            if (target and clock.elapsed>=budget) or (preflight_steps is not None and clock.steps>=preflight_steps):
+                raise TrainingTimeUnverifiable('target reached: generator must finalize and return, not request another update')
+            if target and (isinstance(getattr(step,'source_exposures',None),bool) or not isinstance(getattr(step,'source_exposures',None),int) or step.source_exposures<1):
+                raise TrainingTimeUnverifiable('target training must declare positive prepared source_exposures per update')
             if not isinstance(step,TrainingStep) or not isinstance(step.objective,torch.nn.Module) or not isinstance(step.optimizer,torch.optim.Optimizer):
                 raise TrainingTimeUnverifiable('training_steps must yield a prepared TrainingStep with Module objective and Optimizer')
             if not isinstance(step.args,tuple) or not isinstance(step.kwargs,dict):
@@ -180,9 +211,15 @@ def run_training_phases(module, config, manifest, output, *, budget=None):
                 if step.use_closure:step.optimizer.step(closure)
                 else:
                     closure();step.optimizer.step()
-            clock.measure(update);clock.steps+=1;clock.publish()
+            clock.measure(update);clock.steps+=1
+            if target or preflight_steps is not None:
+                clock.exposures+=step.source_exposures or 0
+                progress={'elapsed_seconds':clock.elapsed,'target_seconds':budget,'target_reached':clock.steps>=preflight_steps if preflight_steps is not None else clock.elapsed>=budget,
+                          'optimizer_updates':clock.steps,'source_exposures':clock.exposures}
+            clock.publish()
     except BaseException as exc:
-        clock.status=('TIMED_OUT' if isinstance(exc,TrainingBudgetExceeded) else
+        clock.status=('FAILED' if isinstance(exc,TrainingTargetIncomplete) else
+                      'TIMED_OUT' if isinstance(exc,TrainingBudgetExceeded) else
                       'UNVERIFIABLE' if isinstance(exc,TrainingTimeUnverifiable) else 'FAILED')
         clock.verified=False;clock.publish()
         raise
@@ -192,4 +229,4 @@ def run_training_phases(module, config, manifest, output, *, budget=None):
             if iterator is not None and hasattr(iterator,'close'):iterator.close()
         finally:
             optimizer_hook.remove();forward_hook.remove();torch.nn.Module.__init__=original_init
-            torch.optim.Optimizer.__init__=original_optimizer_init
+            torch.optim.Optimizer.__init__=original_optimizer_init;time.sleep=original_sleep

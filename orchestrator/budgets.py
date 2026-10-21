@@ -38,7 +38,7 @@ def enforce(store, next_gpu_seconds=0, runtime=None, campaign_id=None):
 
 
 def max_job_seconds(config=None):
-    if config and config.get('plan_contract_version')=='experiment-plan-v2.0':
+    if config and config.get('plan_contract_version') in {'experiment-plan-v2.0','experiment-plan-v3.0'}:
         import time
         return max(0, config['research_deadline']-time.time())
     if config and config.get('campaign_id'):

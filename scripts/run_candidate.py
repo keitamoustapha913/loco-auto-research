@@ -11,7 +11,7 @@ import time
 import numpy as np
 from PIL import Image
 from benchmark.data_guard import load_manifest, manifest_fingerprint
-from benchmark.train_adapter import load_candidate, load_predictor, validate_prediction, diagnostic_measurement_catalog
+from benchmark.train_adapter import load_candidate, load_predictor, validate_prediction, diagnostic_measurement_catalog, validate_diagnostic_output
 from benchmark.validation import evaluate_dev_v2
 from benchmark.metrics_v2 import EVALUATOR_VERSION, pixel_ap_report, pixel_auroc
 from benchmark.inference_benchmark import benchmark_predict
@@ -204,13 +204,19 @@ def run(module_file, manifest_file, config, output):
                 raise ValueError(f'planned candidate must record integer training_audit.{name}')
         if training_audit['seed'] != config['seed'] or training_audit['optimizer_updates'] != len(observed):
             raise ValueError('observed optimizer updates or seed differ from training audit')
-        for name, actual in [('expected_optimizer_updates', len(observed)),
-                             ('expected_source_exposures', training_audit['source_exposures'])]:
-            if config[name] != actual:
-                raise ValueError(f'planned {name}={config[name]} but observed/reported {actual}')
-        training_audit = dict(training_audit, observed_optimizer_step_calls=len(observed),
-                              optimizer_classes=sorted(set(observed)),
-                              exposure_measurement_source='candidate instrumented; not an OS-enforced counter')
+        if config.get('training_completion_policy')=='required-training-target-v1':
+            timing=json.loads((output/'training_timing.json').read_text())
+            if timing['completed_steps']!=len(observed) or timing['source_exposures']!=training_audit['source_exposures']:
+                raise ValueError('target optimizer/exposure audit differs from trusted learning steps')
+            training_audit=dict(training_audit,observed_optimizer_step_calls=len(observed),exposure_measurement_source='prepared TrainingStep source_exposures descriptors')
+        else:
+            for name, actual in [('expected_optimizer_updates', len(observed)),
+                                 ('expected_source_exposures', training_audit['source_exposures'])]:
+                if config[name] != actual:
+                    raise ValueError(f'planned {name}={config[name]} but observed/reported {actual}')
+            training_audit = dict(training_audit, observed_optimizer_step_calls=len(observed),
+                                  optimizer_classes=sorted(set(observed)),
+                                  exposure_measurement_source='candidate instrumented; not an OS-enforced counter')
     else:
         checkpoint_meta, training_duration_seconds = train_measured(mod, config, training_manifest_file, output / 'checkpoint')
     timing_audit=json.loads((output/'training_timing.json').read_text()) if (output/'training_timing.json').is_file() else {}
@@ -364,6 +370,15 @@ def run(module_file, manifest_file, config, output):
             raise ValueError('normal assessment changed frozen predictor state')
         diagnostic_module = load_candidate('/diagnostics/model.py') if config.get('diagnostic_provider') else mod
         catalog=diagnostic_measurement_catalog(config.get('diagnostics', []))
+        if config.get('plan_contract_version')=='experiment-plan-v3.0' and config.get('execution_kind')=='train':
+            receipt={'version':'completed-learning-v1','phase':'diagnostics_ready',
+                'config_sha256':hashlib.sha256(json.dumps(config,sort_keys=True).encode()).hexdigest(),
+                'model_module_sha256':sha256_file(module_file),'good_manifest_sha256':manifest_fingerprint(manifest),
+                'checkpoint_sha256':learning_frozen_files['model.pt'],
+                'checkpoint_manifest_sha256':learning_frozen_files['checkpoint_manifest.json'],
+                'training_audit':training_audit,'training_timing':timing_audit,
+                'normal_threshold':metrics['normal/threshold']}
+            (output/'training_receipt.json').write_text(json.dumps(receipt,sort_keys=True))
         for request in config.get('diagnostics', []):
             if not callable(getattr(diagnostic_module, 'diagnose', None)):
                 raise ValueError(f"missing diagnose hook for {request['diagnostic_id']}")
@@ -372,19 +387,19 @@ def run(module_file, manifest_file, config, output):
                 diagnostic = diagnostic_module.diagnose(predictor, normal.copy(), dict(request['config'],
                     diagnostic_id=request['diagnostic_id'], frozen_normal_threshold=metrics['normal/threshold'],
                     assessment_source_ids=assessment_ids))
+            paired=config.get('paired_diagnostic_metrics',{}).get(request['diagnostic_id'],[])
+            if config.get('plan_contract_version')=='experiment-plan-v3.0':
+                validate_diagnostic_output(request,diagnostic,assessment_ids,paired)
             values = diagnostic.get('metrics', {}) if isinstance(diagnostic, dict) else {}
-            if not set(request['required_metrics']).issubset(values):
-                raise ValueError(f"diagnostic {request['diagnostic_id']} omitted required measurements")
-            for key, value in values.items():
-                if isinstance(value, bool) or not isinstance(value, (int,float)) or not np.isfinite(value):
-                    raise ValueError('diagnostic metrics must be finite measured numbers')
+            if not set(request['required_metrics']).issubset(values):raise ValueError('diagnostic omitted required measurements')
+            for key,value in values.items():
                 canonical=f"{request['diagnostic_id']}/{key}"
+                if isinstance(value,bool) or not isinstance(value,(int,float)) or not np.isfinite(value):raise ValueError('diagnostic metrics must be finite measured numbers')
                 if canonical not in catalog:raise ValueError('diagnostic returned undeclared metric: '+canonical)
-                metrics[catalog[canonical]] = float(value)
+                metrics[catalog[canonical]]=float(value)
             if 'per_image' in diagnostic:
-                ids = [r.get('source_id') for r in diagnostic['per_image']]
-                if len(ids)!=len(assessment_ids) or set(ids)!=set(assessment_ids):
-                    raise ValueError('diagnostic per-image identities differ from normal assessment sources')
+                ids=[r.get('source_id') for r in diagnostic['per_image']]
+                if len(ids)!=len(assessment_ids) or set(ids)!=set(assessment_ids):raise ValueError('diagnostic per-image identities differ from normal assessment sources')
             if frozen_state != state_digest(predictor):
                 raise ValueError('diagnostic changed frozen predictor state')
             (output/f"diagnostic_{request['diagnostic_id']}.json").write_text(json.dumps(diagnostic, allow_nan=False))
@@ -399,6 +414,10 @@ def run(module_file, manifest_file, config, output):
     metrics['training/timing_verified']=float(timing_audit.get('verified', config.get('execution_kind')=='frozen'))
     if timing_audit.get('protocol')=='prepared-training-step-v1':
         metrics['training/phase_steps']=timing_audit['completed_steps']
+        if config.get('training_completion_policy')=='required-training-target-v1':
+            metrics['training/target_seconds']=config['training_budget_seconds']
+            metrics['training/target_reached']=float(timing_audit['duration_seconds']>=config['training_budget_seconds'])
+            metrics['training/overshoot_seconds']=timing_audit['overshoot_seconds']
     checkpoint = output / "checkpoint" / "model.pt"
     metrics["inference/checkpoint_mib"] = checkpoint.stat().st_size / 2**20
     try:

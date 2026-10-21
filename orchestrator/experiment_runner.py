@@ -76,12 +76,14 @@ def read_training_timing(path):
     except (OSError,ValueError):return {}
 
 
-def require_training_phases(path):
+def require_training_phases(path, target=False):
     """Static fail-closed admission; candidate code is never imported on the host."""
     import ast
     tree=ast.parse(Path(path).read_text())
     if not any(isinstance(node,ast.FunctionDef) and node.name=='training_steps' for node in tree.body):
         raise ValueError('training-only budget cannot be verified: candidate lacks explicit training_steps interface; frozen source will not be rewritten')
+    if target and not any(isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='TRAINING_PROTOCOL' for t in n.targets) and isinstance(n.value,ast.Constant) and n.value.value=='required-training-target-v1' for n in tree.body):
+        raise ValueError('candidate must explicitly implement progress-aware required-training-target-v1; frozen schedules cannot be silently extended')
 
 
 def probe_candidate_interface(repo_root, module_file, good_root, runtime, candidate_id, timeout=20, cancel=None):
@@ -156,6 +158,59 @@ sys.exit(code)
     return {'tests': 'passed', 'output': result.stdout[-300:]}
 
 
+def verify_completed_learning(run, job_dir):
+    """No candidate execution: verify a completed learning receipt and frozen bytes."""
+    folder=Path(job_dir);config=json.loads(run['config_json'])
+    expected=folder.parent/run['run_id']
+    if folder.is_symlink() or folder.resolve()!=expected.resolve():raise PermissionError('unsafe learning receipt directory')
+    for name in ('training_receipt.json','training_timing.json','checkpoint/model.pt','checkpoint/checkpoint_manifest.json'):
+        path=folder/name
+        if path.is_symlink() or not path.resolve().is_relative_to(folder.resolve()) or not path.is_file():
+            raise ValueError('missing or unsafe completed-learning evidence: '+name)
+    if (folder/'training_receipt.json').stat().st_size>131072 or (folder/'training_timing.json').stat().st_size>16384:
+        raise ValueError('oversized completed-learning evidence')
+    receipt=json.loads((folder/'training_receipt.json').read_text())
+    timing=json.loads((folder/'training_timing.json').read_text())
+    import hashlib
+    cfg_hash=hashlib.sha256(json.dumps(config,sort_keys=True).encode()).hexdigest()
+    if (receipt.get('version')!='completed-learning-v1' or receipt.get('phase')!='diagnostics_ready' or
+        receipt.get('config_sha256')!=cfg_hash or receipt.get('model_module_sha256')!=config.get('model_sha256') or
+        receipt.get('good_manifest_sha256')!=run['manifest_sha256'] or receipt.get('training_timing')!=timing):
+        raise ValueError('learning receipt provenance mismatch')
+    if (timing.get('status')!='COMPLETED' or timing.get('verified') is not True or
+        timing.get('completion_policy')!='required-training-target-v1' or
+        timing.get('duration_seconds',-1)<config.get('training_budget_seconds',float('inf'))):
+        raise ValueError('learning target was not successfully completed')
+    audit=receipt.get('training_audit',{})
+    if (audit.get('seed')!=config['seed'] or audit.get('optimizer_updates')!=timing['completed_steps'] or
+        audit.get('observed_optimizer_step_calls')!=timing['completed_steps'] or audit.get('source_exposures')!=timing['source_exposures']):
+        raise ValueError('learning counters differ from verified phase audit')
+    if receipt['checkpoint_sha256']!=sha256(folder/'checkpoint/model.pt') or receipt['checkpoint_manifest_sha256']!=sha256(folder/'checkpoint/checkpoint_manifest.json'):
+        raise ValueError('checkpoint changed after verified learning')
+    return receipt
+
+
+def certify_completed_learning(store, run, folder):
+    """Host-only certification after child exit; never change failed run status."""
+    receipt=verify_completed_learning(run,folder)
+    from orchestrator.experiment_plan import digest
+    proof=Path(folder)/'host_verified_training.json'
+    if proof.is_symlink():raise PermissionError('unsafe host training certification path')
+    if proof.exists():
+        if json.loads(proof.read_text())!=receipt:raise ValueError('host training certification changed')
+    else:
+        with proof.open('x') as handle:json.dump(receipt,handle,sort_keys=True)
+    value={'receipt_sha256':digest(receipt),'checkpoint_sha256':receipt['checkpoint_sha256']}
+    with store.connect() as con:
+        prior=con.execute("SELECT payload_json FROM events WHERE run_id=? AND kind='TRAINING_CHECKPOINT_VERIFIED'",(run['run_id'],)).fetchall()
+        if prior:
+            if any(json.loads(p[0])!=value for p in prior):raise ValueError('durable training certification changed')
+        else:
+            con.execute('INSERT INTO events(run_id,time,kind,payload_json) VALUES(?,?,?,?)',
+                (run['run_id'],time.time(),'TRAINING_CHECKPOINT_VERIFIED',json.dumps(value)))
+    return receipt
+
+
 def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Path, runtime: Path,
                 personal_mode_authorized=False, cancel=None):
     """Never execute untrusted candidate in controller process.
@@ -167,6 +222,13 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
     from orchestrator.budgets import enforce
     config = json.loads(run['config_json'])
     enforce(store,campaign_id=config.get('campaign_id'),runtime=runtime)
+    if config.get('training_completion_policy')=='required-training-target-v1':
+        from orchestrator.campaign_state import CampaignState
+        from orchestrator.campaign_config import training_execution_estimate,remaining_wall
+        campaign=CampaignState(store).get(config['campaign_id'])
+        estimate=training_execution_estimate(store,json.loads(campaign['config_json']))
+        if remaining_wall(campaign,time.time())<estimate['required_seconds']:
+            raise ValueError('insufficient original campaign time for required training, preparation and evaluation')
     _, paths = load_manifest(manifest_path)
     if not paths:
         raise ValueError("empty good-image manifest")
@@ -214,7 +276,7 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
             pinned_source=bool(config.get('frozen_baseline')), diagnostic_file=diagnostic_file)
         # Bubblewrap clears its environment; no controller or Codex secrets enter.
         environment = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}
-    timeout = (max_job_seconds(config) if config.get('plan_contract_version')=='experiment-plan-v2.0' else
+    timeout = (max_job_seconds(config) if config.get('plan_contract_version') in {'experiment-plan-v2.0','experiment-plan-v3.0'} else
                min(max_job_seconds(config), int(config.get("timeout_seconds", max_job_seconds(config)))))
     stages = []
     if config.get('cuda_smoke_required'):
@@ -253,7 +315,7 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
                         status = "CANCELLED"
                         break
                     timing_file = job_dir / 'training_timing.json'
-                    if stage == 'pilot' and config.get('training_budget_seconds') and timing_file.is_file() and not timing_file.is_symlink():
+                    if stage == 'pilot' and config.get('training_completion_policy')!='required-training-target-v1' and config.get('training_budget_seconds') and timing_file.is_file() and not timing_file.is_symlink():
                         timing = read_training_timing(timing_file)
                         if timing.get('protocol')=='prepared-training-step-v1' and timing.get('status')=='TRAINING':
                             phase=timing.get('completed_steps')
@@ -312,7 +374,7 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
                     timing=read_training_timing(job_dir/'training_timing.json')
                     if timing.get('protocol')!='prepared-training-step-v1' or timing.get('verified') is not True or timing.get('status')!='COMPLETED':
                         raise ValueError('training-only budget cannot be verified from completed phase audit')
-                    if metrics.get('training/duration_seconds')!=timing['duration_seconds'] or timing['duration_seconds']>config['training_budget_seconds']:
+                    if metrics.get('training/duration_seconds')!=timing['duration_seconds'] or ((timing['duration_seconds']<config['training_budget_seconds'] or timing.get('completion_policy')!='required-training-target-v1' or timing['duration_seconds']-config['training_budget_seconds']>timing.get('last_step_seconds',0)+1e-6) if config.get('training_completion_policy')=='required-training-target-v1' else timing['duration_seconds']>config['training_budget_seconds']):
                         raise ValueError('training-only timing metric or deadline mismatch')
                 if not isinstance(metrics, dict):
                     raise ValueError('measurement metrics must be an object')
@@ -350,9 +412,14 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
             reason = f"Candidate process {status}; inspect stderr.log"
             if failed_stage == 'cuda_smoke':
                 log = job_dir / 'cuda_smoke_stderr.log'
-                reason = f"CUDA smoke validation {status}: {log.read_text(errors='replace')[-8000:]}"
+                reason = f"CUDA smoke validation {status}:\n{log.read_text(errors='replace')[-8000:]}"
             elif (job_dir / 'stderr.log').is_file():
                 reason += '\n' + (job_dir / 'stderr.log').read_text(errors='replace')[-8000:]
+            if config.get('plan_contract_version')=='experiment-plan-v3.0' and (job_dir/'training_receipt.json').is_file():
+                try:
+                    certify_completed_learning(store,run,job_dir)
+                except (ValueError,KeyError,TypeError,OSError) as exc:
+                    reason+='\nFrozen-checkpoint reuse rejected: '+str(exc)
             store.transition(run["run_id"], status, reason=reason, expect="RUNNING")
         enqueue_run_tracking(store, run["run_id"], artifact_dir=job_dir)
         return status

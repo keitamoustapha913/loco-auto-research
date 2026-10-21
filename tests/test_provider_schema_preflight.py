@@ -37,7 +37,7 @@ def frozen_plan(lab):
 
 def generated(capabilities=()):
     source=json.loads((REPO/'schemas/proposals.schema.json').read_text())
-    return constrain_output_schema(source,capabilities)
+    return constrain_output_schema(source,capabilities,target_training=False)
 
 
 @pytest.mark.parametrize('single',[False,True])

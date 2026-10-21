@@ -23,7 +23,8 @@ RESERVED = {'device', 'seed', 'category', 'timeout_seconds', 'model_sha256', 'ca
             'campaign_name', 'execution_mode', 'metric_evaluator_version', 'synthetic_evaluation',
             'cuda_smoke_required', 'inference', 'diagnostics', 'frozen_baseline', 'execution_kind', 'diagnostic_provider',
             'trusted_source_sha256','data_pin','baseline_effective_configuration','training_budget_seconds','campaign_configuration_version','research_deadline',
-            'max_job_seconds','max_gpu_seconds','max_wall_seconds','max_jobs'}
+            'max_job_seconds','max_gpu_seconds','max_wall_seconds','max_jobs','training_completion_policy',
+            'training_target_seconds','diagnostic_preflight_required','paired_diagnostic_metrics'}
 REQUIRED_TRAINING_POSITIVE = ('steps', 'batch_size', 'size', 'expected_source_exposures')
 MATCHED_TRAINING_CONTROLS = REQUIRED_TRAINING_POSITIVE + ('expected_optimizer_updates',)
 
@@ -99,16 +100,27 @@ def training_seed(arm, pair_seed):
 
 
 def campaign_timed(plan):
-    return plan.get('schema_version') == '2.0'
+    return plan.get('schema_version') in {'2.0','3.0'}
 
 
 def plan_schema(plan):
     schema = json.loads((REPO / 'schemas/experiment_plan.schema.json').read_text())
     if campaign_timed(plan):
-        schema['properties']['schema_version']['const'] = '2.0'
+        schema['properties']['schema_version']['const'] = plan['schema_version']
         schema['properties'].pop('resource_budget')
         schema['required'].remove('resource_budget')
+    if plan.get('schema_version')=='3.0':
+        schema['properties']['confirmation']={'type':'boolean'}
+        schema['required'].append('confirmation')
     return schema
+
+
+def learning_controls(plan):
+    return ('batch_size','size') if plan.get('schema_version')=='3.0' else MATCHED_TRAINING_CONTROLS
+
+
+def contract_version(plan):
+    return 'experiment-plan-v'+plan['schema_version']
 
 
 def validate_plan(plan, hypothesis_id=None):
@@ -144,10 +156,12 @@ def validate_plan(plan, hypothesis_id=None):
             if arm.get('fixed_checkpoint_seed') is not None:raise ValueError('training arm cannot pretend to be a fixed checkpoint')
             if arm['source_arm_id'] or arm['baseline_by_seed']:
                 raise ValueError('training arm cannot silently load a baseline')
-            for name in REQUIRED_TRAINING_POSITIVE:
+            if plan.get('schema_version')=='3.0' and set(settings)&{'steps','epochs','expected_optimizer_updates','expected_source_exposures'}:
+                raise ValueError('required-duration training cannot declare a fixed stopping schedule; declare phase/initial-block settings and use trusted progress')
+            for name in (('batch_size','size') if plan.get('schema_version')=='3.0' else REQUIRED_TRAINING_POSITIVE):
                 if isinstance(settings.get(name), bool) or not isinstance(settings.get(name), int) or settings[name] < 1:
                     raise ValueError(f'explicit positive training {name} required')
-            updates = settings.get('expected_optimizer_updates')
+            updates = settings.get('expected_optimizer_updates',0)
             if isinstance(updates,bool) or not isinstance(updates,int) or updates < 0:
                 raise ValueError('explicit nonnegative expected_optimizer_updates required')
             for key in plan['controlled_variables']:
@@ -226,7 +240,7 @@ def register_plan(store, campaigns, campaign_id, plan):
         prior=existing(con)
         if prior:return prior
         from orchestrator.model_registry import plan_context
-        record = {'plan': plan, 'plan_sha256': digest(plan), 'registered_at': time.time(), 'version': ('experiment-plan-v2.0' if campaign_timed(plan) else VERSION),
+        record = {'plan': plan, 'plan_sha256': digest(plan), 'registered_at': time.time(), 'version': contract_version(plan),
                   'promotion_context': plan_context(store)}
         con.execute('INSERT INTO campaign_events(campaign_id,time,kind,payload_json) VALUES(?,?,?,?)',
                     (campaign_id, record['registered_at'], 'EXPERIMENT_PLAN_REGISTERED', json.dumps(record, sort_keys=True)))
@@ -238,7 +252,7 @@ def baseline_reference(store, run_id, repo_root=REPO):
     if not re.fullmatch(r'[A-Za-z0-9_-]+',run_id):
         raise PermissionError('invalid frozen baseline run identifier')
     row = store.get_run(run_id)
-    if not row or row['status'] not in {'COMPLETED', 'REVIEWED', 'PROMOTED', 'REJECTED'}:
+    if not row or row['status'] not in {'COMPLETED', 'REVIEWED', 'PROMOTED', 'REJECTED','FAILED','OOM'}:
         raise ValueError('baseline must identify an existing completed frozen run')
     cfg = json.loads(row['config_json'])
     checkpoint = Path(row['artifact_dir']) / 'checkpoint/model.pt'
@@ -249,7 +263,18 @@ def baseline_reference(store, run_id, repo_root=REPO):
         checkpoint.is_symlink() or metadata.is_symlink() or
         not checkpoint.resolve().is_relative_to(expected.resolve()) or not metadata.resolve().is_relative_to(expected.resolve())):
         raise PermissionError('frozen baseline artifacts escape the originating job')
-    provenance = json.loads((Path(row['artifact_dir']) / 'run_manifest.json').read_text())
+    if row['status'] in {'FAILED','OOM'}:
+        from orchestrator.experiment_runner import verify_completed_learning
+        provenance=verify_completed_learning(row,expected)
+        host=expected/'host_verified_training.json'
+        if host.is_symlink() or not host.is_file() or json.loads(host.read_text())!=provenance:
+            raise ValueError('failed run has no trusted completed-learning certification')
+        with store.connect() as con:
+            certified=con.execute("SELECT payload_json FROM events WHERE run_id=? AND kind='TRAINING_CHECKPOINT_VERIFIED' ORDER BY id DESC LIMIT 1",(run_id,)).fetchone()
+        if not certified or json.loads(certified[0]).get('receipt_sha256')!=digest(provenance):
+            raise ValueError('failed checkpoint lacks durable trusted certification')
+    else:
+        provenance = json.loads((Path(row['artifact_dir']) / 'run_manifest.json').read_text())
     source = subprocess.run(['git', '-C', str(repo_root), 'show',
                              f"{row['git_sha']}:candidates/{row['candidate_id']}/model.py"],
                             check=True, capture_output=True).stdout
@@ -412,9 +437,15 @@ def comparison_result(plan, runs, feedback=None):
             if key not in run_metrics:
                 missing.append(key)
         for key, requested in [('optimizer_updates','expected_optimizer_updates'), ('source_exposures','expected_source_exposures')]:
+            actual_count=run_metrics.get('protocol/'+key)
             expected_count = 0 if arm['execution']=='frozen' else cfg.get(requested)
-            if run_metrics.get('protocol/'+key) != expected_count:
+            dynamic = plan.get('schema_version')=='3.0' and arm['execution']=='train'
+            if (dynamic and (isinstance(actual_count,bool) or not isinstance(actual_count,(int,float)) or actual_count<1)) or (not dynamic and actual_count != expected_count):
                 missing.append('training count '+key)
+        if plan.get('schema_version')=='3.0' and arm['execution']=='train':
+            target=cfg.get('training_budget_seconds',0)
+            if not target or run_metrics.get('training/duration_seconds',-1)<target or run_metrics.get('training/target_reached')!=1:
+                missing.append('required actual training duration not verified')
         actual_seed=training_seed(arm,seed)
         if cfg.get('seed') != actual_seed or run_metrics.get('protocol/seed') != actual_seed:
             missing.append('measured seed')
@@ -468,7 +499,7 @@ def comparison_result(plan, runs, feedback=None):
         eligibility['reasons'].append('Requested execution or measured evidence is incomplete.')
     fixed=any(a.get('fixed_checkpoint_seed') is not None for a in plan['arms'])
     return {'scientific_eligibility':eligibility, 'plan_id': plan['plan_id'], 'hypothesis_id': plan['hypothesis_id'],
-            'plan_sha256': digest(plan), 'version': ('experiment-plan-v2.0' if campaign_timed(plan) else VERSION), 'kind': plan['kind'],
+            'plan_sha256': digest(plan), 'version': contract_version(plan), 'kind': plan['kind'],
             'status': 'INCOMPLETE' if problems else ('COMPLETE_CONTROLLED' if plan['kind'] == 'controlled_comparison' and not fixed else 'COMPLETE_EXPLORATORY'),
             'expected_jobs': len(expected), 'recorded_jobs': len(found), 'problems': problems,
             'cells': results, 'paired_seed_differences': differences, 'paired_image_intervals': intervals,
@@ -541,11 +572,19 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
         from orchestrator.campaign_config import time_based, plan_seconds, operation_cancelled
         if time_based(cfg) and plan_seconds(plan,cfg) > limits['max_wall_hours']*3600-usage['wall_seconds']:
             raise BudgetExceeded('complete frozen comparison plus evaluation and critique cannot fit remaining research duration')
+        if plan.get('schema_version')=='3.0':
+            from orchestrator.campaign_config import training_execution_estimate,remaining_wall
+            estimate=training_execution_estimate(store,cfg,jobs=remaining_cells,
+                newly_trained=sum(a['execution']=='train' and not store.get_run(cell_run_id(campaign_id,plan,a['arm_id'],seed)) for a,seed in cells(plan)),
+                real_feedback=plan['evaluation']['real_development_feedback'],critique=True)
+            campaigns.event(campaign_id,'TRAINING_TARGET_ADMISSION',plan_id=plan['plan_id'],estimate=estimate)
+            if remaining_wall(campaigns.get(campaign_id),time.time())<estimate['required_seconds']:
+                raise ValueError('insufficient research time for complete required-duration matrix, preparation, evaluation and critique; revise plan, never shorten training')
         train_arms = [a for a in plan['arms'] if a['execution'] == 'train']
         module = candidate_file(controller.REPO, plan['hypothesis_id']) if train_arms or plan['diagnostics'] else None
         if train_arms and time_based(cfg):
             from orchestrator.experiment_runner import require_training_phases
-            require_training_phases(module)
+            require_training_phases(module,target=True) if plan.get('schema_version')=='3.0' else require_training_phases(module)
         source_hash = sha256(module) if module else ''
         trusted_files = ['orchestrator/autonomy.py','orchestrator/controller.py','orchestrator/experiment_plan.py',
                          'orchestrator/planning_contract.py','orchestrator/experiment_runner.py','orchestrator/sandbox.py','orchestrator/development_feedback.py',
@@ -613,7 +652,7 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
             verify_inputs()
             effective.update(seed=seed, inference=arm['inference'], diagnostics=plan['diagnostics'],
                              plan_id=plan['plan_id'], plan_sha256=digest(plan), plan_arm=arm['arm_id'],
-                             plan_contract_version=('experiment-plan-v2.0' if campaign_timed(plan) else VERSION), execution_kind=arm['execution'], model_sha256=source_hash,
+                             plan_contract_version=contract_version(plan), execution_kind=arm['execution'], model_sha256=source_hash,
                              metric_evaluator_version='development-v2.0')
             if arm.get('fixed_checkpoint_seed') is not None:
                 effective.update(seed=arm['fixed_checkpoint_seed'],plan_pair_seed=seed)
@@ -636,6 +675,8 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
                 if plan['diagnostics']:
                     effective['diagnostic_provider'] = {'candidate_id':plan['hypothesis_id'],'source_sha256':source_hash}
                 candidate_id = origin['candidate_id']
+            if plan.get('schema_version')=='3.0':
+                effective['paired_diagnostic_metrics']={d['diagnostic_id']:sorted({x['metric'] for x in plan['paired_comparisons'] if x['diagnostic_id']==d['diagnostic_id']}) for d in plan['diagnostics']}
             effective['trusted_source_sha256'] = trusted_hashes
             effective['data_pin'] = data_pin
             rid = controller.queue_candidate(store, plan['hypothesis_id'], candidate_id, 'juice_bottle', 'pilot', 'cuda',

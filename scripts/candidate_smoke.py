@@ -14,7 +14,7 @@ import torch
 from benchmark.data_guard import load_manifest, sha256_file
 from benchmark.train_adapter import load_candidate, validate_prediction
 from scripts.feedback_infer import state_digest
-from scripts.run_candidate import load_image
+from scripts.run_candidate import load_image, split_validation_paths
 
 
 def run(module_file, manifest_file, config, output):
@@ -41,7 +41,8 @@ def run(module_file, manifest_file, config, output):
         smoke_budget = (config['training_budget_seconds']
                         if config.get('plan_contract_version')=='experiment-plan-v2.0' else None)
         smoke_config.pop('training_budget_seconds',None)
-        run_training_phases(module,smoke_config,smoke_manifest,checkpoint_dir,budget=smoke_budget)
+        run_training_phases(module,smoke_config,smoke_manifest,checkpoint_dir,budget=smoke_budget,
+                            preflight_steps=2 if config.get('plan_contract_version')=='experiment-plan-v3.0' else None)
     else:
         module.train(smoke_config, smoke_manifest, checkpoint_dir)
     training_cuda_bytes = torch.cuda.max_memory_allocated()
@@ -65,6 +66,21 @@ def run(module_file, manifest_file, config, output):
         for _, path in selected:
             batch = load_image(path, size)[None]
             validate_prediction(predictor.predict(batch), batch.shape)
+    if config.get('diagnostic_preflight_required'):
+        import numpy as np
+        from benchmark.train_adapter import validate_diagnostic_output
+        valid=[p for e,p in zip(manifest['images'],paths) if e['split']=='validation/good' and e['category']==config['category']]
+        calibrate,assess=split_validation_paths(valid)
+        if not calibrate or not assess:raise ValueError('diagnostic preflight requires disjoint authorized normal calibration/assessment')
+        normal=np.stack([load_image(p,size) for p in assess]);ids=[sha256_file(p) for p in assess]
+        with torch.inference_mode():
+            threshold=max(float(np.max(predictor.predict(load_image(p,size)[None])['anomaly_maps'])) for p in calibrate)
+            for declaration in config.get('diagnostics',[]):
+                result=module.diagnose(predictor,normal.copy(),dict(declaration['config'],
+                    diagnostic_id=declaration['diagnostic_id'],frozen_normal_threshold=threshold,assessment_source_ids=ids,validation_smoke=True))
+                validate_diagnostic_output(declaration,result,ids,config.get('paired_diagnostic_metrics',{}).get(declaration['diagnostic_id'],[]))
+        if before!=(sha256_file(checkpoint),sha256_file(metadata)) or state_before!=state_digest(predictor):
+            raise ValueError('diagnostic preflight mutated frozen model state')
     torch.cuda.synchronize()
     if before != (sha256_file(checkpoint), sha256_file(metadata)) or state_before != state_digest(predictor):
         raise ValueError('CUDA smoke inference mutated checkpoint or predictor state')

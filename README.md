@@ -41,9 +41,12 @@ Bubblewrap risk acceptance remains false unless explicitly authorized by the ope
   updates. Model/optimizer initialization, batch loading/preparation/transfers, checkpoint
   saving, coding, calibration, evaluation and critique are excluded. CUDA setup work is
   synchronized before timing; queued learning kernels finish inside the measured phase.
-  Codex chooses steps, epochs and exposures and must justify its estimated training
-  duration or a shorter schedule. This is a ceiling/target, not fabricated training time:
-  convergence or a justified experiment can finish earlier. Actual duration is recorded.
+  For newly generated v3 plans this is a **required target**, not just a ceiling.
+  Every successful new model learns for the full configured duration. Early-ending or
+  unverifiable procedures fail; no sleep, dummy work or automatic model restart fills time.
+  The final synchronized optimizer update finishes before stopping, so measured overshoot
+  is at most that last update. Actual duration, updates, source presentations and overshoot
+  are recorded. Frozen v1/v2 plans keep their original schedules and ceiling semantics.
 - **Previous best** verifies eligible retained references for the same dataset and
   supplies accumulated evidence. Incompatible evaluation cohorts stay separate.
   Missing eligible references cause a clear error; choose `new` for an independent
@@ -52,8 +55,8 @@ Bubblewrap risk acceptance remains false unless explicitly authorized by the ope
   deleting history or automatically starting from their weights. Past findings remain
   available as scientific evidence.
 
-The existing scheduler serializes jobs. Trusted code enforces separate training and
-whole-job deadlines, reserves time for complete comparisons, normal-only CPU feedback
+The existing scheduler serializes jobs. Trusted code enforces the required learning target and
+original campaign deadline, estimates time for complete comparisons, normal-only CPU feedback
 and critique, and stops rather than reducing arms, seeds or training settings. Frozen
 scientific plans retain their original schedules and resource ceilings. Incomplete work
 stays INCOMPLETE and cannot support promotion. Scout, Researcher, Implementer, Critic,
@@ -87,13 +90,13 @@ failed/time-limited learning attempts, and synchronized through the existing out
 
 ### Scientific plan timing
 
-New simplified campaigns generate version 2.0 plans with no `resource_budget`,
+New simplified campaigns generate version 3.0 plans with no `resource_budget`,
 `max_job_seconds`, `max_gpu_seconds`, independent plan deadline, or job-count
 allowance. The complete arm × seed matrix determines the jobs. Preparation,
 CUDA smoke validation, diagnostics and frozen real-development evaluation share
 only the campaign's original research deadline; each model's actual training has
-its separate training-only ceiling. Disposable smoke models have their own training
-clock and their weights never enter the scientific experiment.
+its separate required training-only target. Disposable smoke validation stops after two
+updates and exercises the diagnostic contracts; its weights never enter the scientific experiment.
 
 Invalid plans return precise recoverable validation errors and use the existing
 ten-failure recovery policy; they do not terminate the campaign as `LIMIT_REACHED`.
@@ -103,13 +106,32 @@ The checked-in v1 schemas remain compatibility definitions for frozen historical
 plans; the controller compiles the new provider/admission schema deterministically.
 Previously frozen plans and their explicit resource restrictions are not rewritten.
 
+New v3 plans declare `confirmation: true` only for confirmation studies. Trusted
+admission checks the existing promotion policy's seeds, controls and exact real metric
+keys before execution; exploration remains allowed without promotion eligibility.
+
+Before a target run, admission reserves its full learning target plus estimated
+preparation/diagnostic and feedback costs, using recent recorded stage durations.
+The complete arm/seed matrix must reasonably fit. These are scheduling estimates,
+not additional time limits; execution still shares the original campaign deadline.
+
+Failures preserve complete logs and put the decisive exception/traceback in concise
+agent feedback. A completed learning receipt is independently checked by the host
+before certifying a failed diagnostic run's checkpoint. A new explicit frozen repair
+plan can reuse that exact source/checkpoint/configuration; the original run stays FAILED.
+Missing evidence, altered weights/configuration or incomplete learning prohibit reuse.
+
 ### Training-only candidate contract
 
 Time-based learning requires `training_steps(config, allowed_train_manifest, output_dir)`:
 a generator that yields `scripts.training_phase.TrainingStep` objects. Initialize the
 objective (`torch.nn.Module` returning a scalar differentiable loss) and optimizer before
 yielding, prepare device-resident inputs between yields, and save checkpoint/metadata
-after the final yield. Return checkpoint metadata from the generator. The trusted loop
+after the final yield. Return checkpoint metadata from the generator. For v3 declare `TRAINING_PROTOCOL = "required-training-target-v1"`. Each yield receives
+trusted progress via generator.send: elapsed_seconds, target_seconds, target_reached,
+optimizer_updates and source_exposures. Declare prepared source_exposures on every
+TrainingStep; continue until target_reached, then finalize and save the actual counters.
+Legacy finite generators are never silently extended. The trusted loop
 runs forward/loss, backward and the optimizer update; it never times generator setup or
 finalization. Closure-based optimizers are supported through explicit `use_closure=True`.
 The existing train/load/predict contract is retained for legacy callers and inference.

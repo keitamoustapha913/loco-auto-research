@@ -65,7 +65,7 @@ def operation_cancelled(campaigns, campaign_id):
 
 def plan_seconds(plan, config):
     """Conservative admission allowance, not a change to a frozen plan."""
-    if plan.get('schema_version')=='2.0':return 0  # No independent plan reservation.
+    if plan.get('schema_version') in {'2.0','3.0'}:return 0  # No independent plan reservation.
     if time_based(config):return plan['resource_budget']['max_wall_seconds']
     jobs = len(plan['arms']) * len(plan['seeds'])
     feedback = config['research'].get('feedback_cpu_timeout_seconds', 600) if plan['evaluation']['real_development_feedback'] else 0
@@ -91,3 +91,24 @@ def starting_context(store, config, strict=False):
         if strict and not result['models']:
             raise ValueError('No eligible retained model for this dataset; use start_from: new.')
     return result
+
+
+def training_execution_estimate(store, config, *, jobs=1, newly_trained=1, real_feedback=True, critique=False):
+    """Admission estimates from recorded stages, never extra execution deadlines."""
+    import json
+    overhead=[];evaluation=[]
+    with store.connect() as con:
+        for row in con.execute("SELECT * FROM runs WHERE category=? AND status IN ('COMPLETED','REVIEWED','PROMOTED','REJECTED') ORDER BY created_at DESC LIMIT 30",(config['campaign']['dataset'],)):
+            metrics=json.loads(row['metrics_json']);learning=metrics.get('training/duration_seconds')
+            if learning is not None and row['finished_at'] and row['started_at']:
+                overhead.append(max(0,row['finished_at']-row['started_at']-learning))
+        for row in con.execute("SELECT payload_json FROM events WHERE kind='REAL_DEVELOPMENT_FEEDBACK' ORDER BY id DESC LIMIT 30"):
+            value=json.loads(row[0]).get('metrics',{}).get('dev_real/evaluation_wall_seconds')
+            if isinstance(value,(int,float)) and value>=0:evaluation.append(value)
+    # Initial estimates are conservative admission allowances, not stage timeouts.
+    setup=max([60.]+overhead);feedback=max([180.]+evaluation) if real_feedback else 0.
+    target=config['limits']['training_minutes_per_experiment']*60
+    return {'training_seconds_per_model':target,'preparation_and_diagnostics_estimate_seconds':setup,
+            'feedback_estimate_seconds':feedback,'critique_estimate_seconds':90. if critique else 0.,
+            'required_seconds':newly_trained*target+jobs*(setup+feedback)+(90. if critique else 0.),
+            'basis':'maximum of recent measured stages and initial admission estimates; not extra time limits'}
