@@ -474,6 +474,7 @@ def record_result(store, campaigns, campaign_id, plan, runs, runtime, error=''):
     result = comparison_result(plan, runs, {r['run_id']: latest_summary(store, r['run_id']) or {} for r in runs})
     if error:
         result['status'] = 'INCOMPLETE'; result['problems'].append(error)
+        result['scientific_eligibility'].update(promotion_eligible=False,evidence_level='INCOMPLETE')
     campaigns.event(campaign_id, 'EXPERIMENT_PLAN_RESULT', result=result)
     for row in runs:
         if json.loads(row['config_json']).get('plan_sha256') != digest(plan):
@@ -520,7 +521,7 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
             budget['max_gpu_seconds'] > limits['max_gpu_hours']*3600 or
             budget['max_wall_seconds'] > limits['max_wall_hours']*3600):
             raise ValueError('scientific plan exceeds authorized campaign ceilings; no defaults substituted')
-        from orchestrator.campaign_config import time_based, plan_seconds
+        from orchestrator.campaign_config import time_based, plan_seconds, operation_cancelled
         if time_based(cfg) and plan_seconds(plan,cfg) > limits['max_wall_hours']*3600-usage['wall_seconds']:
             raise BudgetExceeded('complete frozen comparison plus evaluation and critique cannot fit remaining research duration')
         train_arms = [a for a in plan['arms'] if a['execution'] == 'train']
@@ -548,20 +549,20 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
             pinned = con.execute("SELECT payload_json FROM campaign_events WHERE campaign_id=? AND kind='PLAN_SOURCE_PINNED' ORDER BY id", (campaign_id,)).fetchall()
         prior_pin = next((json.loads(r[0]) for r in pinned if json.loads(r[0])['plan_sha256'] == digest(plan)), None)
         if prior_pin and prior_pin['source_sha256'] != source_hash:
-            raise ValueError('candidate source changed during a registered comparison')
+            raise PermissionError('candidate source changed during a registered comparison')
         if prior_pin and (prior_pin['trusted_source_sha256']!=trusted_hashes or prior_pin['data_pin']!=data_pin):
-            raise ValueError('trusted evaluator/protocol or ordered evaluation sources changed during comparison')
+            raise PermissionError('trusted evaluator/protocol or ordered evaluation sources changed during comparison')
         if not prior_pin:
             campaigns.event(campaign_id, 'PLAN_SOURCE_PINNED', plan_sha256=digest(plan), source_sha256=source_hash,
                             trusted_source_sha256=trusted_hashes,data_pin=data_pin)
         def verify_inputs():
             current_manifest=json.loads((runtime/'good_manifest.json').read_text())
             if {'fingerprint':manifest_fingerprint(current_manifest),'ordered_entries_sha256':digest(current_manifest['images'])} != data_pin:
-                raise ValueError('training/calibration/assessment source order changed during comparison')
+                raise PermissionError('training/calibration/assessment source order changed during comparison')
             if any(sha256(REPO/f)!=value for f,value in trusted_hashes.items()):
-                raise ValueError('trusted evaluation code changed during comparison')
+                raise PermissionError('trusted evaluation code changed during comparison')
             if module and sha256(module)!=source_hash:
-                raise ValueError('candidate or shared diagnostic source changed during comparison')
+                raise PermissionError('candidate or shared diagnostic source changed during comparison')
         for arm, seed in cells(plan):
             await_authorized_stage(campaigns, campaign_id)
             rows = campaigns.runs(campaign_id)
@@ -620,7 +621,7 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
             campaigns.attach_run(campaign_id, rid)
             campaigns.event(campaign_id, 'EXPERIMENT_QUEUED', run_id=rid, plan_id=plan['plan_id'], arm=arm['arm_id'], seed=seed)
             outcome = controller.run_worker_once(store, runtime/'good_manifest.json', runtime,
-                personal_mode_authorized=True, cancel=lambda: campaigns.get(campaign_id)['status']=='STOPPING', expected_run_id=rid)
+                personal_mode_authorized=True, cancel=lambda: operation_cancelled(campaigns,campaign_id), expected_run_id=rid)
             if outcome.get('run_id') != rid:
                 raise RuntimeError('guarded queue returned a different planned job')
             row = store.get_run(rid)
@@ -633,8 +634,9 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
                     remaining = min(limits['max_wall_hours']*3600-campaigns.usage(campaign_id)['wall_seconds'],
                                     budget['max_wall_seconds']-(time.time()-record['registered_at']))
                     if remaining < 1: raise BudgetExceeded('wall budget reached before required feedback')
-                    summary = evaluate_run(runtime, store, rid, timeout=min(900, cfg['research'].get('feedback_cpu_timeout_seconds',600), int(remaining)),
-                        personal_mode_authorized=True, cancel=lambda: campaigns.get(campaign_id)['status']=='STOPPING')
+                    summary = evaluate_run(runtime, store, rid, timeout=(remaining if time_based(cfg) else min(900, cfg['research'].get('feedback_cpu_timeout_seconds',600), int(remaining))),
+                        deadline=min(campaigns.get(campaign_id)['created_at']+limits['max_wall_hours']*3600,record['registered_at']+budget['max_wall_seconds']),
+                        personal_mode_authorized=True, cancel=lambda: operation_cancelled(campaigns,campaign_id))
                     campaigns.event(campaign_id,'REAL_DEVELOPMENT_FEEDBACK',run_id=rid,summary=summary)
             elif plan['failure_criteria']['on_job_failure'] == 'stop':
                 break
@@ -691,8 +693,24 @@ def review_plan(store, campaigns, campaign_id, plan, result):
                     evidence_plan=plan['plan_id'],evidence_run=rows[-1]['run_id'] if rows else '',
                     reason=review['objective_measured_results'],comparison_status=result['status'],
                     next_hypothesis=f"evidence-followup:{plan['hypothesis_id']}:{review['recommended_next_action']}")
-    campaigns.update(campaign_id,next_hypothesis=f"evidence-followup:{plan['hypothesis_id']}:{review['recommended_next_action']}",
-                     consecutive_failures=0 if not any(r['status'] in {'FAILED','OOM','TIMED_OUT'} for r in rows) else campaigns.get(campaign_id)['consecutive_failures']+1)
+    campaigns.update(campaign_id,next_hypothesis=f"evidence-followup:{plan['hypothesis_id']}:{review['recommended_next_action']}")
+    from orchestrator.campaign_config import time_based
+    timed=time_based(json.loads(campaigns.get(campaign_id)['config_json']))
+    if not timed:
+        campaigns.update(campaign_id,consecutive_failures=0 if not any(r['status'] in {'FAILED','OOM','TIMED_OUT'} for r in rows) else campaigns.get(campaign_id)['consecutive_failures']+1)
+    elif result['status']=='INCOMPLETE':
+        campaigns.recoverable_failure(campaign_id,'comparison INCOMPLETE; preserved for critique, ineligible for promotion')
+    if timed and result['status']!='INCOMPLETE':
+        from orchestrator.development_feedback import latest_summary
+        references=[]
+        for row in rows:
+            feedback=latest_summary(store,row['run_id']) or {}
+            if row['status'] in {'COMPLETED','REVIEWED','PROMOTED','REJECTED'} and feedback.get('checkpoint_unchanged') is True:
+                reference,_,_=baseline_reference(store,row['run_id'],controller.REPO)
+                references.append(reference)
+        if references:
+            campaigns.event(campaign_id,'VERIFIED_RESEARCH_STATE',plan_id=plan['plan_id'],references=references,
+                            result_status=result['status'],critique=review)
     store.set_hypothesis_status(plan['hypothesis_id'],'INCOMPLETE' if result['status']=='INCOMPLETE' else 'COMPLETED')
     from orchestrator.model_registry import consider_comparison
     decisions=consider_comparison(store,campaigns,campaign_id,plan,result,controller.REPO)

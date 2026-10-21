@@ -74,10 +74,25 @@ def run_bounded(command, log_path, seconds, cancel=None):
             raise RuntimeError(f'evaluation stage failed with exit {process.returncode}; inspect {log_path.name}')
 
 
-def evaluate_run(runtime,store,run_id,*,timeout=600,cancel=None,personal_mode_authorized=False):
+def evaluate_run(runtime,store,run_id,*,timeout=600,cancel=None,personal_mode_authorized=False,deadline=None):
     if not personal_mode_authorized:
         raise PermissionError('bounded evaluation requires explicit personal Bubblewrap authorization')
-    if not 1<=timeout<=900: raise ValueError('CPU evaluation timeout must be within 1..900 seconds')
+    run=store.get_run(run_id)
+    configuration=json.loads(run['config_json']) if run else {}
+    timed=False
+    if configuration.get('campaign_id'):
+        from orchestrator.campaign_state import CampaignState
+        from orchestrator.campaign_config import operation_seconds,operation_cancelled,time_based
+        campaigns=CampaignState(store);row=campaigns.get(configuration['campaign_id'])
+        if row and time_based(json.loads(row['config_json'])):
+            timed=True
+            timeout=operation_seconds(row,timeout)
+            original_cancel=cancel
+            cancel=lambda:operation_cancelled(campaigns,row['id']) or bool(original_cancel and original_cancel())
+    if deadline is not None:timeout=min(timeout,deadline-time.time())
+    if timeout<=0:raise TimeoutError('campaign research deadline reached before feedback')
+    if not timed and not 1<=timeout<=900:
+        raise ValueError('CPU evaluation timeout must be within 1..900 seconds')
     runtime=Path(runtime).resolve(strict=True)
     lock_path=runtime/'controller/feedback.lock'
     with lock_path.open('a+') as lock:
@@ -97,6 +112,10 @@ def _evaluate(runtime,store,run_id,timeout,cancel):
     from orchestrator.experiment_plan import execution_source
     module=execution_source(run, store, runtime, REPO)
     config=json.loads(run['config_json'])
+    from orchestrator.campaign_state import CampaignState
+    from orchestrator.campaign_config import time_based
+    campaign=CampaignState(store).get(config['campaign_id']) if config.get('campaign_id') else None
+    timed=bool(campaign and time_based(json.loads(campaign['config_json'])))
     provenance=json.loads((job/'run_manifest.json').read_text())
     checkpoint=job/'checkpoint/model.pt'; checkpoint_meta=job/'checkpoint/checkpoint_manifest.json'
     good,_=load_manifest(runtime/'good_manifest.json')
@@ -136,7 +155,7 @@ def _evaluate(runtime,store,run_id,timeout,cancel):
                  '--inference-config-json',json.dumps(config.get('inference', {}))],use_gpu=False,
                 input_files={'model.pt':checkpoint,'checkpoint_manifest.json':checkpoint_meta,
                              'image.png':data_root/entry['path']}, pinned_source=bool(config.get('frozen_baseline')))
-            run_bounded(command, folder/'worker.log', min(30,remaining), cancel)
+            run_bounded(command, folder/'worker.log', remaining if timed else min(30,remaining), cancel)
             validate_worker_outputs(folder, entry['width'], entry['height'])
             result=json.loads((folder/'inference.json').read_text())
             heatmap=np.load(folder/'map.npy',allow_pickle=False)

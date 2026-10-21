@@ -56,8 +56,20 @@ The existing scheduler serializes jobs. Trusted code enforces separate training 
 whole-job deadlines, reserves time for complete comparisons, normal-only CPU feedback
 and critique, and stops rather than reducing arms, seeds or training settings. Frozen
 scientific plans retain their original schedules and resource ceilings. Incomplete work
-stays INCOMPLETE and cannot support promotion. Three consecutive operational failures
-still stop a campaign; disk limits, sandbox gates and bounded repairs remain in force.
+stays INCOMPLETE and cannot support promotion. Scout, Researcher, Implementer, Critic,
+CPU contract checks and real-development evaluation share the remaining original campaign
+deadline; legacy agent caps and `feedback_cpu_timeout_seconds` do not shorten a time-based
+campaign. Explicit resource ceilings in an already frozen scientific plan still apply.
+
+Validated research stages reset the consecutive-failure counter. Completed literature,
+validated candidate source and recorded experiment cells are reused after recoverable
+failures/restarts. Ten consecutive failed attempts trigger an audited recovery round:
+the attempt is marked FAILED, unfinished comparisons remain INCOMPLETE, and immutable
+references to the last fully evaluated/reviewed research state (or retained previous best)
+are restored to the research context. Codex receives exact failures and must revise its
+approach; abandoned plans are not replayed or rewritten. This restores evidence, not an
+implicit warm start of model weights or a promotion. No retry or recovery resets the
+campaign clock. Safety/integrity failures halt; disk and sandbox protections remain.
 
 **Migration:** replace the entire old `limits` block with the two fields above; do
 not mix formats. Existing seven-limit authorizations are still accepted **as legacy

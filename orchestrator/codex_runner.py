@@ -9,6 +9,8 @@ from pathlib import Path
 import subprocess
 import tempfile
 import uuid
+import signal
+import time
 from jsonschema import validate, Draft202012Validator, SchemaError
 
 class AgentFailure(RuntimeError):
@@ -19,8 +21,39 @@ class InvalidAgentOutput(AgentFailure):
     """An agent completed but its response needs correction, not host changes."""
 
 
+class AgentUnavailable(AgentFailure):
+    """Missing host executable requires operator maintenance, not research retries."""
+
+
 class ProviderSchemaError(AgentFailure):
     """Local schema defect: never retry it as an agent-output repair."""
+
+
+def run_cancellable(command, *, timeout, cancel=None, deadline=None, **kwargs):
+    """Poll cancellation and reap the whole owned process group on every exit."""
+    task=kwargs.pop('input',None)
+    kwargs.pop('capture_output',None)
+    end=min(time.time()+timeout,deadline if deadline is not None else float('inf'))
+    partial_out=partial_err=None
+    with subprocess.Popen(command,stdin=subprocess.PIPE if task is not None else subprocess.DEVNULL,
+                          stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True,**kwargs) as process:
+        try:
+            while True:
+                if (cancel and cancel()) or time.time()>=end:
+                    raise subprocess.TimeoutExpired(command,timeout,output=partial_out,stderr=partial_err)
+                try:
+                    out,err=process.communicate(input=task,timeout=min(.25,max(.001,end-time.time())))
+                    return subprocess.CompletedProcess(command,process.returncode,out,err)
+                except subprocess.TimeoutExpired as exc:
+                    partial_out,partial_err=exc.output,exc.stderr
+                    task=None  # communicate retains pending stdin; never resend the prompt.
+        finally:
+            if process.poll() is None:
+                try:os.killpg(process.pid,signal.SIGTERM)
+                except ProcessLookupError:pass
+                try:process.wait(timeout=.5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid,signal.SIGKILL);process.wait()
 
 
 def preflight_provider_schema(schema):
@@ -102,7 +135,7 @@ def provider_output_schema(schema):
 
 
 def invoke(role: str, repo_root: Path, schema_path: Path, prompt: str, timeout=180, worktree=None,
-           personal_mode=False, reference_files=None):
+           personal_mode=False, reference_files=None, cancel=None, deadline=None):
     if role not in {"scout", "researcher", "implementer", "critic"}:
         raise ValueError("unknown agent role")
     root = Path(repo_root).resolve(strict=True)
@@ -139,9 +172,13 @@ def invoke(role: str, repo_root: Path, schema_path: Path, prompt: str, timeout=1
         try:
             # Whole-history evidence can exceed Linux's per-argument size limit.
             # The CLI's stdin prompt mode preserves the exact task and sandbox.
-            done = subprocess.run(command, input=task, cwd=cwd, env=env, capture_output=True, text=True, timeout=min(int(timeout), 600), check=False)
+            if cancel is not None or deadline is not None:
+                done=run_cancellable(command,input=task,cwd=cwd,env=env,text=True,
+                                     timeout=timeout,cancel=cancel,deadline=deadline)
+            else:
+                done = subprocess.run(command, input=task, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout, check=False)
         except FileNotFoundError as exc:
-            raise AgentFailure("Codex CLI not installed on server") from exc
+            raise AgentUnavailable("Codex CLI not installed on server") from exc
         except subprocess.TimeoutExpired as exc:
             detail = (exc.stderr or b'')
             if isinstance(detail, bytes):

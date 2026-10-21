@@ -10,7 +10,6 @@ limits:
 research:
   synthetic_diagnostics: false
   real_development_feedback: true
-  feedback_cpu_timeout_seconds: 600
   fresh_literature: true
   fresh_hypotheses: true
   require_torch_cuda: true

@@ -110,19 +110,23 @@ def _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=None,
                        "schedule in evaluation_plan. Training time excludes initialization, data preparation, checkpoint saving, validation, smoke checks and scoring. "
                        "The plan job timeout must include its estimated smoke, import and validation overhead, separate from training. "
                        "Preserve all declared arms, seeds and controls; never stretch or truncate a frozen plan.")
-        remaining = int(row['created_at'] + limits['max_wall_hours'] * 3600 - __import__('time').time())
+        remaining = row['created_at'] + limits['max_wall_hours'] * 3600 - __import__('time').time()
         if time_based(config):
-            reserve = 50 if role=='implementer' else 0  # 20s import probe + 30s mandatory CPU tests
-            if remaining < reserve+10:
+            if remaining <= 0:
                 from orchestrator.autonomy import CampaignHalted
                 campaigns.set_status(campaign_id,'LIMIT_REACHED','insufficient research duration for '+role+' and required validation')
                 raise CampaignHalted('insufficient research duration for '+role+' and required validation')
-            remaining -= reserve
         elif remaining < 10:
             raise RuntimeError('campaign wall-time budget exhausted before Codex call')
-        kwargs['timeout'] = min(int(kwargs.get('timeout', 180)), remaining)
+        if time_based(config):
+            from orchestrator.campaign_config import operation_seconds,operation_cancelled
+            kwargs['timeout']=operation_seconds(row,180)
+            kwargs['deadline']=row['created_at']+limits['max_wall_hours']*3600
+            kwargs['cancel']=lambda:operation_cancelled(campaigns,campaign_id)
+        else:
+            kwargs['timeout'] = min(int(kwargs.get('timeout', 180)), remaining)
         recent_failures = [e for e in campaigns.events(campaign_id,100)
-                           if e['kind'] in {'ATTEMPT_FAILED','VALIDATION_FAILED','PLAN_REVIEW_FAILED'}][:5]
+                           if e['kind'] in {'ATTEMPT_FAILED','VALIDATION_FAILED','PLAN_REVIEW_FAILED','CONTROLLER_ERROR','RECOVERY_RESTORED'}][:10]
         if recent_failures:
             prompt += '\nRecent exact campaign failures (do not erase or rename them): '+json.dumps(recent_failures)
     if role in {'researcher', 'critic'} and not kwargs.get('personal_mode'):
@@ -253,6 +257,10 @@ def _with_agent_correction(store, campaign, role, request, validate, *,
     from orchestrator.autonomy import CampaignHalted, await_authorized_stage
     feedback = ('\nTrusted candidate execution failure to correct:\n' + initial_feedback) if initial_feedback else ''
     attempts = 1 if initial_feedback is not None else 2
+    timed=False
+    if campaign:
+        from orchestrator.campaign_config import time_based
+        timed=time_based(json.loads(campaign[0].get(campaign[1])['config_json']))
     for attempt in range(attempts):
         if campaign:
             await_authorized_stage(campaign[0], campaign[1], finishing=True)
@@ -262,6 +270,7 @@ def _with_agent_correction(store, campaign, role, request, validate, *,
             response = request(feedback, attempt)
             phase = 'generated_work_validation'
             validation = validate(response)
+            if timed:campaign[0].validated_stage(campaign[1],role,hypothesis_id=hypothesis_id)
             return response, validation, initial_feedback is not None or attempt > 0
         except Exception as exc:
             # These controls must never become instructions to change the host,
@@ -417,11 +426,15 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
     if campaign:
         from orchestrator.campaign_config import time_based, plan_seconds, remaining_wall
         campaign_row=campaign[0].get(campaign[1]);configuration=json.loads(campaign_row['config_json'])
-        if time_based(configuration) and remaining_wall(campaign_row,__import__('time').time()) < plan_seconds(proposal['experiment_plan'],configuration)+60:
+        if time_based(configuration) and remaining_wall(campaign_row,__import__('time').time()) < plan_seconds(proposal['experiment_plan'],configuration):
             from orchestrator.autonomy import CampaignHalted
             campaign[0].set_status(campaign[1],'LIMIT_REACHED','insufficient research duration to implement and execute complete plan')
             raise CampaignHalted('insufficient research duration to implement and execute complete plan')
-    if repair_feedback is None:
+    reuse=False
+    if campaign:
+        from orchestrator.campaign_config import time_based
+        reuse=time_based(json.loads(campaign[0].get(campaign[1])['config_json'])) and (REPO/'candidates/worktrees'/hypothesis_id).is_dir()
+    if repair_feedback is None and not reuse:
         tree = create_candidate_worktree(REPO, hypothesis_id)
     else:
         tree = (REPO / 'candidates' / 'worktrees' / hypothesis_id).resolve(strict=True)
@@ -491,9 +504,8 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
             from orchestrator.campaign_config import time_based, plan_seconds, remaining_wall
             row=campaign[0].get(campaign[1]);configuration=json.loads(row['config_json'])
             if time_based(configuration):
-                needed=plan_seconds(proposal['experiment_plan'],configuration)+50
-                timeout=min(timeout,int(remaining_wall(row,__import__('time').time())-needed))
-                if timeout < 10:
+                timeout=remaining_wall(row,__import__('time').time())
+                if timeout <= 0:
                     from orchestrator.autonomy import CampaignHalted
                     campaign[0].set_status(campaign[1],'LIMIT_REACHED','insufficient research duration to implement and execute complete plan')
                     raise CampaignHalted('insufficient research duration to implement and execute complete plan')
@@ -530,8 +542,14 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
         if validation_runtime is not None:
             from orchestrator.experiment_runner import probe_candidate_interface, run_candidate_unit_tests
             good_root = Path(os.environ['LOCO_GOOD_ROOT'])
-            probe_candidate_interface(REPO, allowed_file, good_root, validation_runtime, hypothesis_id)
-            cpu_result = run_candidate_unit_tests(REPO, allowed_file, good_root, validation_runtime, hypothesis_id)
+            timing={}
+            if campaign and time_based(json.loads(campaign[0].get(campaign[1])['config_json'])):
+                from orchestrator.campaign_config import operation_seconds,operation_cancelled
+                timing={'timeout':operation_seconds(campaign[0].get(campaign[1]),30),
+                        'cancel':lambda:operation_cancelled(campaign[0],campaign[1])}
+            probe_candidate_interface(REPO, allowed_file, good_root, validation_runtime, hypothesis_id,**timing)
+            if timing:timing['timeout']=operation_seconds(campaign[0].get(campaign[1]),30)
+            cpu_result = run_candidate_unit_tests(REPO, allowed_file, good_root, validation_runtime, hypothesis_id,**timing)
             if campaign:
                 campaign[0].event(campaign[1], 'CANDIDATE_TESTS', hypothesis_id=hypothesis_id, **cpu_result)
             return cpu_result

@@ -126,7 +126,8 @@ def test_complete_plan_admission_includes_evaluation_and_critique(laboratory):
     store,c,cid,runtime,repo,calls,_=laboratory
     cfg=json.loads(c.get(cid)['config_json']);cfg['limits']['max_wall_hours']=.04
     with store.connect() as con:con.execute('UPDATE campaigns SET config_json=? WHERE id=?',(json.dumps(cfg),cid))
-    result=execute_plan(store,c,cid,runtime,experiment_plan())
+    plan=experiment_plan();plan['resource_budget']['max_wall_seconds']=144
+    result=execute_plan(store,c,cid,runtime,plan)
     assert result['status']=='INCOMPLETE' and calls==[]
     assert c.get(cid)['status']=='LIMIT_REACHED'
     assert any('complete frozen comparison' in p for p in result['problems'])

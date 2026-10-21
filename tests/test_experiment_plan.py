@@ -138,7 +138,9 @@ def test_changing_order_during_comparison_stops_before_mixing_assessment_sources
             path=runtime/'good_manifest.json';m=json.loads(path.read_text());m['images'].reverse();path.write_text(json.dumps(m))
         return result
     monkeypatch.setattr(controller,'run_worker_once',change)
-    result=execute_plan(store,c,cid,runtime,p)
+    with pytest.raises(PermissionError,match='source order changed'):
+        execute_plan(store,c,cid,runtime,p)
+    result=next(json.loads(e['payload_json'])['result'] for e in c.events(cid) if e['kind']=='EXPERIMENT_PLAN_RESULT')
     assert result['status']=='INCOMPLETE' and len(calls)==1
     assert any('source order changed' in x for x in result['problems'])
     assert execute_plan(store,c,cid,runtime,p)==result and len(calls)==1
@@ -221,7 +223,7 @@ def test_critic_cannot_certify_incomplete_comparison(laboratory,monkeypatch):
     monkeypatch.setattr(controller,'_budgeted_invoke_once',critic)
     review=review_plan(store,c,cid,p,result)
     assert len(calls)==2 and not review['causal_claim']
-    assert store.list_runs()==[] and c.events(cid)[0]['kind']=='NEXT_DECISION'
+    assert store.list_runs()==[] and any(e['kind']=='NEXT_DECISION' for e in c.events(cid))
 
 
 def test_paired_image_intervals_use_identical_units_and_stay_separate_from_seed_variation(laboratory):

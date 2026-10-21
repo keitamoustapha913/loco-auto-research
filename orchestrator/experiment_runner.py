@@ -84,7 +84,7 @@ def require_training_phases(path):
         raise ValueError('training-only budget cannot be verified: candidate lacks explicit training_steps interface; frozen source will not be rewritten')
 
 
-def probe_candidate_interface(repo_root, module_file, good_root, runtime, candidate_id):
+def probe_candidate_interface(repo_root, module_file, good_root, runtime, candidate_id, timeout=20, cancel=None):
     """Import untrusted code only inside the no-network CPU sandbox before GPU queueing."""
     from orchestrator.sandbox import command as sandbox_command
     safe_candidate_id(candidate_id)
@@ -102,8 +102,10 @@ def probe_candidate_interface(repo_root, module_file, good_root, runtime, candid
               "print('interface import OK')")
     cmd = sandbox_command(repo_root, module_file, good_root, probe_dir, ['-c', script], use_gpu=False)
     try:
-        result = subprocess.run(cmd, cwd=repo_root, env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'},
-                                capture_output=True, text=True, timeout=20, check=False)
+        from orchestrator.codex_runner import run_cancellable
+        result = run_cancellable(cmd,cwd=repo_root,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
+                                 text=True,timeout=timeout,cancel=cancel) if cancel else subprocess.run(
+            cmd,cwd=repo_root,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},capture_output=True,text=True,timeout=timeout,check=False)
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError('candidate CPU interface probe timed out') from exc
     if result.returncode or 'interface import OK' not in result.stdout:
@@ -111,7 +113,7 @@ def probe_candidate_interface(repo_root, module_file, good_root, runtime, candid
     return True
 
 
-def run_candidate_unit_tests(repo_root, module_file, good_root, runtime, candidate_id):
+def run_candidate_unit_tests(repo_root, module_file, good_root, runtime, candidate_id, timeout=30, cancel=None):
     """Require executable candidate CPU tests in the no-network boundary."""
     from orchestrator.sandbox import command as sandbox_command
     module = Path(module_file).resolve(strict=True)
@@ -143,8 +145,10 @@ sys.exit(code)
                           ['-c', test_script],
                           use_gpu=False)
     try:
-        result = subprocess.run(cmd, cwd=repo_root, env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'},
-                                capture_output=True, text=True, timeout=30, check=False)
+        from orchestrator.codex_runner import run_cancellable
+        result = run_cancellable(cmd,cwd=repo_root,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
+                                 text=True,timeout=timeout,cancel=cancel) if cancel else subprocess.run(
+            cmd,cwd=repo_root,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},capture_output=True,text=True,timeout=timeout,check=False)
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError('candidate CPU unit tests timed out') from exc
     if result.returncode:
@@ -161,7 +165,8 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
     """
     from benchmark.data_guard import load_manifest
     from orchestrator.budgets import enforce
-    enforce(store)
+    config = json.loads(run['config_json'])
+    enforce(store,campaign_id=config.get('campaign_id'),runtime=runtime)
     _, paths = load_manifest(manifest_path)
     if not paths:
         raise ValueError("empty good-image manifest")
@@ -171,7 +176,6 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
         raise PermissionError("Non-toy candidate execution disabled until operator verifies OS-level isolation (deploy/SECURITY.md)")
     job_dir = runtime / "jobs" / run["run_id"]
     job_dir.mkdir(parents=True, exist_ok=False)
-    config = json.loads(run["config_json"])
     if config.get('execution_kind') == 'frozen':
         import shutil
         from orchestrator.experiment_plan import verify_baseline
@@ -221,7 +225,7 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
         smoke_command[smoke_command.index('--output', index)+1] = '/output/cuda_smoke' if isolated else str(job_dir / 'cuda_smoke')
         result_index = smoke_command.index('--result', index)
         del smoke_command[result_index:result_index+2]
-        stages.append(('cuda_smoke', smoke_command, min(30, timeout)))
+        stages.append(('cuda_smoke', smoke_command, timeout if config.get('campaign_configuration_version')=='campaign-time-v1' else min(30, timeout)))
     stages.append(('pilot', command, timeout))
     started = time.monotonic()
     deadline = started + timeout  # Both stages share the original job allowance.

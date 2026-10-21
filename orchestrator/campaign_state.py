@@ -113,6 +113,26 @@ class CampaignState:
             con.execute("INSERT INTO campaign_events(campaign_id,time,kind,payload_json) VALUES(?,?,?,?)",
                         (campaign_id, time.time(), kind, json.dumps(payload, sort_keys=True, default=str)))
 
+    def validated_stage(self, campaign_id, stage, **evidence):
+        """Only trusted validation, never a raw agent completion, resets retries."""
+        with self.store.connect() as con:
+            con.execute('BEGIN IMMEDIATE')
+            con.execute('UPDATE campaigns SET consecutive_failures=0,updated_at=? WHERE id=?',
+                        (time.time(),campaign_id))
+            con.execute('INSERT INTO campaign_events(campaign_id,time,kind,payload_json) VALUES(?,?,?,?)',
+                (campaign_id,time.time(),'STAGE_VALIDATED',json.dumps(dict(stage=stage,**evidence))))
+
+    def recoverable_failure(self, campaign_id, error):
+        with self.store.connect() as con:
+            con.execute('BEGIN IMMEDIATE')
+            con.execute('UPDATE campaigns SET consecutive_failures=consecutive_failures+1,updated_at=? WHERE id=?',
+                        (time.time(),campaign_id))
+            count=con.execute('SELECT consecutive_failures FROM campaigns WHERE id=?',(campaign_id,)).fetchone()[0]
+            con.execute('INSERT INTO campaign_events(campaign_id,time,kind,payload_json) VALUES(?,?,?,?)',
+                (campaign_id,time.time(),'ATTEMPT_FAILED',json.dumps({'status':'FAILED','error':str(error),
+                     'consecutive_failures':count})))
+        return count
+
     def events(self, campaign_id, limit=100):
         with self.store.connect() as con:
             records = con.execute("SELECT * FROM campaign_events WHERE campaign_id=? ORDER BY id DESC LIMIT ?", (campaign_id, limit)).fetchall()

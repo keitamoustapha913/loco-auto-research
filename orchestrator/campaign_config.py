@@ -4,6 +4,7 @@ import copy
 import math
 
 TIME_VERSION = 'campaign-time-v1'
+MAX_CONSECUTIVE_RETRIES = 10
 LEGACY_LIMITS = ('max_gpu_hours', 'max_wall_hours', 'max_experiments', 'max_codex_calls',
                  'max_job_seconds', 'max_consecutive_failures', 'max_parallel_gpu_jobs')
 
@@ -32,7 +33,7 @@ def normalize(config):
         config['limits'] = dict(research_hours=hours, training_minutes_per_experiment=minutes,
             max_wall_hours=hours, max_gpu_hours=hours, max_experiments=None, max_codex_calls=None,
             max_job_seconds=math.ceil(hours*3600),
-            max_consecutive_failures=3, max_parallel_gpu_jobs=1)
+            max_consecutive_failures=MAX_CONSECUTIVE_RETRIES, max_parallel_gpu_jobs=1)
     else:
         for key in LEGACY_LIMITS:
             value = limits.get(key)
@@ -49,8 +50,22 @@ def remaining_wall(row, now):
     return max(0., row['created_at'] + json.loads(row['config_json'])['limits']['max_wall_hours']*3600 - now)
 
 
+def operation_seconds(row, legacy_limit):
+    """All simplified research operations share the original absolute deadline."""
+    import json,time
+    remaining=remaining_wall(row,time.time())
+    return remaining if time_based(json.loads(row['config_json'])) else min(legacy_limit,remaining)
+
+
+def operation_cancelled(campaigns, campaign_id):
+    import time
+    row=campaigns.get(campaign_id)
+    return row['status'] not in {'RUNNING','PAUSED'} or remaining_wall(row,time.time())<=0
+
+
 def plan_seconds(plan, config):
     """Conservative admission allowance, not a change to a frozen plan."""
+    if time_based(config):return plan['resource_budget']['max_wall_seconds']
     jobs = len(plan['arms']) * len(plan['seeds'])
     feedback = config['research'].get('feedback_cpu_timeout_seconds', 600) if plan['evaluation']['real_development_feedback'] else 0
     critique = 180  # The scientific-plan controller always requires a final review.

@@ -99,8 +99,9 @@ def preflight(config, runtime, *, require_authorization=True, verify_hashes=True
     if config['research'].get('real_development_feedback'):
         from benchmark.feedback_data import verify_import, imported_root
         verify_import(imported_root(runtime))
+        from orchestrator.campaign_config import time_based
         seconds = config['research'].get('feedback_cpu_timeout_seconds', 600)
-        if not isinstance(seconds, int) or not 1 <= seconds <= 900:
+        if not time_based(config) and (not isinstance(seconds, int) or not 1 <= seconds <= 900):
             raise ValueError('feedback CPU limit must be within 1..900 seconds')
     return {"manifest_path": manifest_path, "fingerprint": manifest_fingerprint(manifest), "images": len(manifest["images"])}
 
@@ -123,7 +124,7 @@ def stop_reason(campaigns, campaign_id):
     global_budget = campaigns.call_budget(campaign_id)['global']
     if global_budget['remaining'] == 0:
         return "BUDGET_EXHAUSTED", f"global Codex call budget exhausted ({global_budget['used']}/{global_budget['limit']}); LOCO_CODEX_MAX_CALLS"
-    if row["consecutive_failures"] >= limits["max_consecutive_failures"]:
+    if not time_based(json.loads(row['config_json'])) and row["consecutive_failures"] >= limits["max_consecutive_failures"]:
         return "LIMIT_REACHED", "consecutive failure limit reached"
     return None, ""
 
@@ -227,6 +228,71 @@ def choose_proposal(store, excluded=(), allowed_ids=None):
     return available[0] if available else None
 
 
+def prepare_plan_candidate(store,campaigns,campaign_id,runtime,plan,research):
+    """Resume validated implementation; never recreate or edit pinned comparisons."""
+    if not any(a['execution']=='train' for a in plan['arms']) and not plan['diagnostics']:return
+    from orchestrator import controller
+    from orchestrator.experiment_runner import candidate_file,sha256
+    from orchestrator.codex_runner import commit_candidate_snapshot
+    hid=plan['hypothesis_id']
+    implemented=next((json.loads(e['payload_json']) for e in campaigns.events(campaign_id,10000)
+                      if e['kind']=='IMPLEMENTED' and json.loads(e['payload_json']).get('hypothesis_id')==hid),None)
+    if implemented:
+        if implemented.get('source_sha256') and sha256(candidate_file(controller.REPO,hid))!=implemented['source_sha256']:
+            raise PermissionError('validated candidate source integrity changed before resume')
+        return
+    result=controller.implement_proposal(store,hid,campaign=(campaigns,campaign_id),personal_mode=True,
+        require_torch_cuda=bool(research.get('require_torch_cuda')) and any(a['execution']=='train' for a in plan['arms']),
+        validation_runtime=runtime)
+    commit=commit_candidate_snapshot(controller.REPO,hid)
+    campaigns.event(campaign_id,'CANDIDATE_SNAPSHOT',hypothesis_id=hid,git_commit=commit)
+    campaigns.event(campaign_id,'IMPLEMENTED',hypothesis_id=hid,module=result['candidate_module'],
+                    source_sha256=sha256(Path(result['candidate_module'])))
+
+
+def recover_research_attempt(store,campaigns,campaign_id,runtime):
+    """Abandon a failed attempt, not its campaign, using durable immutable evidence."""
+    import subprocess
+    from orchestrator.campaign_config import time_based,MAX_CONSECUTIVE_RETRIES
+    from orchestrator.experiment_plan import plan_history,record_result,verify_baseline
+    row=campaigns.get(campaign_id);config=json.loads(row['config_json'])
+    if not time_based(config) or row['consecutive_failures']<MAX_CONSECUTIVE_RETRIES:return False
+    # Resolve/check immutable references before changing any recovery state.
+    evidence=campaigns.events(campaign_id,100000)
+    checkpoint=next((json.loads(e['payload_json']) for e in evidence if e['kind']=='VERIFIED_RESEARCH_STATE'),None)
+    try:
+        if checkpoint:
+            for reference in checkpoint.get('references',[]):verify_baseline(store,reference,REPO)
+        else:
+            from orchestrator.campaign_config import starting_context
+            checkpoint=starting_context(store,config,strict=config['campaign'].get('start_from')=='previous_best')
+    except (ValueError,OSError,subprocess.SubprocessError) as exc:
+        raise PermissionError('verified recovery state integrity unavailable: '+str(exc)) from exc
+    reviewed={json.loads(e['payload_json']).get('plan_id') for e in evidence if e['kind'] in {'CRITIQUE','PLAN_ABANDONED'}}
+    abandoned=[]
+    for entry in plan_history(campaigns,campaign_id):
+        plan=entry['plan']
+        if plan['plan_id'] in reviewed:continue
+        record_result(store,campaigns,campaign_id,plan,campaigns.runs(campaign_id),runtime,
+                      'retry allowance exhausted; attempt abandoned, unverified results ineligible for promotion')
+        store.set_hypothesis_status(plan['hypothesis_id'],'FAILED')
+        abandoned.append(plan['plan_id'])
+    # State reset and abandoned-plan markers are atomic: crash recovery is idempotent.
+    with store.connect() as con:
+        con.execute('BEGIN IMMEDIATE')
+        current=con.execute('SELECT consecutive_failures FROM campaigns WHERE id=?',(campaign_id,)).fetchone()[0]
+        if current<MAX_CONSECUTIVE_RETRIES:return False
+        for plan_id in abandoned:
+            con.execute('INSERT INTO campaign_events(campaign_id,time,kind,payload_json) VALUES(?,?,?,?)',
+                        (campaign_id,time.time(),'PLAN_ABANDONED',json.dumps({'plan_id':plan_id,'status':'FAILED'})))
+        con.execute('INSERT INTO campaign_events(campaign_id,time,kind,payload_json) VALUES(?,?,?,?)',
+                    (campaign_id,time.time(),'RECOVERY_RESTORED',json.dumps({'status':'FAILED','failures':current,
+                      'verified_state':checkpoint,'abandoned_plans':abandoned,
+                      'instruction':'Revise using the recorded failure evidence; never repeat abandoned plans or alter frozen plans. No automatic weight reuse.'})))
+        con.execute("UPDATE campaigns SET consecutive_failures=0,current_hypothesis='',active_run_id='',next_hypothesis='recovery:revise_from_verified_evidence',updated_at=? WHERE id=?",(time.time(),campaign_id))
+    return True
+
+
 def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, runtime: Path):
     """Perform at most one measured attempt; caller persists and repeats."""
     study = json.loads(campaigns.get(campaign_id)['config_json'])['research'].get('study')
@@ -248,7 +314,7 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
     # Resume the immutable comparison, never regenerate or replay a recorded cell.
     with store.connect() as con:
         reviewed_plans = {json.loads(r[0]).get('plan_id') for r in con.execute(
-            "SELECT payload_json FROM campaign_events WHERE campaign_id=? AND kind='CRITIQUE'", (campaign_id,))}
+            "SELECT payload_json FROM campaign_events WHERE campaign_id=? AND kind IN ('CRITIQUE','PLAN_ABANDONED')", (campaign_id,))}
     for registered in plan_history(campaigns, campaign_id):
         pending = registered['plan']
         if pending['plan_id'] not in reviewed_plans:
@@ -257,6 +323,7 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
             result = next((json.loads(r[0])['result'] for r in previous_result
                            if json.loads(r[0])['result']['plan_id']==pending['plan_id']), None)
             if result is None:
+                prepare_plan_candidate(store,campaigns,campaign_id,runtime,pending,research)
                 result = execute_plan(store, campaigns, campaign_id, runtime, pending)
             store.set_hypothesis_status(pending['hypothesis_id'], 'INCOMPLETE' if result['status']=='INCOMPLETE' else 'COMPLETED')
             await_authorized_stage(campaigns, campaign_id, finishing=True)
@@ -270,11 +337,15 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
                  if p['hypothesis_id'] in ids and p['status'] == 'PROPOSED']
         fresh.sort(key=lambda p: json.loads(p['proposal_json']).get('priority_rank', 999))
         if not fresh:
-            raise RuntimeError('all fresh campaign hypotheses are exhausted; refusing stale proposals')
-        proposal = fresh[0]
+            fresh_events=[]  # Request revised, distinct hypotheses with preserved failure evidence.
+        else:proposal = fresh[0]
     if not prior and research.get('fresh_hypotheses') and not fresh_events:
         scout_file = REPO / 'literature' / 'scout_notes.json'
-        if research.get('fresh_literature') or not scout_file.is_file():
+        cached=next((json.loads(e['payload_json'])['leads'] for e in campaigns.events(campaign_id,100000)
+                     if e['kind']=='LITERATURE'),None)
+        if cached is not None:
+            leads=cached
+        elif research.get('fresh_literature') or not scout_file.is_file():
             leads = scout_literature(store, campaign=context, personal_mode=True)
             campaigns.event(campaign_id, 'LITERATURE', leads=leads)
         else:
@@ -402,13 +473,7 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
         validate_plan(plan, hypothesis_id)
         register_plan(store, campaigns, campaign_id, plan)
         await_authorized_stage(campaigns, campaign_id)
-        if any(a['execution']=='train' for a in plan['arms']) or plan['diagnostics']:
-            implemented = implement_proposal(store, hypothesis_id, campaign=context, personal_mode=True,
-                require_torch_cuda=bool(research.get('require_torch_cuda')) and any(a['execution']=='train' for a in plan['arms']), validation_runtime=runtime)
-            from orchestrator.codex_runner import commit_candidate_snapshot
-            candidate_commit = commit_candidate_snapshot(REPO, hypothesis_id)
-            campaigns.event(campaign_id, 'CANDIDATE_SNAPSHOT', hypothesis_id=hypothesis_id, git_commit=candidate_commit)
-            campaigns.event(campaign_id, 'IMPLEMENTED', hypothesis_id=hypothesis_id, module=implemented['candidate_module'])
+        prepare_plan_candidate(store,campaigns,campaign_id,runtime,plan,research)
         result = execute_plan(store, campaigns, campaign_id, runtime, plan)
         store.set_hypothesis_status(hypothesis_id, 'INCOMPLETE' if result['status']=='INCOMPLETE' else 'COMPLETED')
         await_authorized_stage(campaigns, campaign_id, finishing=True)
@@ -421,15 +486,16 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
     except CodexBudgetExhausted:
         raise
     except Exception as exc:
-        if detail.get('experiment_plan') and result is None:
+        from orchestrator.campaign_config import time_based
+        timed=time_based(config)
+        if detail.get('experiment_plan') and result is None and not timed:
             record_result(store, campaigns, campaign_id, detail['experiment_plan'], campaigns.runs(campaign_id), runtime,
                           f'{type(exc).__name__}: {exc}')
         elif result is not None:
             campaigns.event(campaign_id,'PLAN_REVIEW_FAILED',plan_id=result['plan_id'],error=str(exc))
-        store.set_hypothesis_status(hypothesis_id, 'INCOMPLETE')
-        failures = campaigns.get(campaign_id)['consecutive_failures'] + 1
-        campaigns.update(campaign_id, consecutive_failures=failures, active_run_id='')
-        campaigns.event(campaign_id, 'ATTEMPT_FAILED', hypothesis_id=hypothesis_id, error=str(exc))
+        if not timed:store.set_hypothesis_status(hypothesis_id, 'INCOMPLETE')
+        campaigns.update(campaign_id,active_run_id='')
+        if not timed:campaigns.event(campaign_id, 'ATTEMPT_FAILED', hypothesis_id=hypothesis_id, error=str(exc))
         raise
 
 
@@ -473,8 +539,8 @@ def run_forever(campaign_id: str, runtime: Path, ledger: Path, idle_seconds=2):
             close_unfinished_comparisons(store,campaigns,campaign_id,runtime,reason)
             campaigns.set_status(campaign_id, state, reason)
             return
-        failures_before = campaigns.get(campaign_id)["consecutive_failures"]
         try:
+            recover_research_attempt(store,campaigns,campaign_id,runtime)
             run_cycle(store, campaigns, campaign_id, runtime)
         except CampaignHalted as exc:
             close_unfinished_comparisons(store,campaigns,campaign_id,runtime,str(exc))
@@ -482,14 +548,25 @@ def run_forever(campaign_id: str, runtime: Path, ledger: Path, idle_seconds=2):
                 campaigns.set_status(campaign_id,'LIMIT_REACHED',str(exc))
             return
         except CodexBudgetExhausted as exc:
-            campaigns.set_status(campaign_id, 'BUDGET_EXHAUSTED', str(exc))
+            state,reason=stop_reason(campaigns,campaign_id)
+            campaigns.set_status(campaign_id, state or 'BUDGET_EXHAUSTED', reason or str(exc))
             return
         except Exception as exc:
-            if campaigns.get(campaign_id)["consecutive_failures"] == failures_before:
-                campaigns.update(campaign_id, consecutive_failures=failures_before + 1)
+            import sqlite3
+            from orchestrator.codex_runner import ProviderSchemaError,AgentUnavailable
+            transient_db=isinstance(exc,sqlite3.Error) and getattr(exc,'sqlite_errorcode',None) in {sqlite3.SQLITE_BUSY,sqlite3.SQLITE_LOCKED}
+            if (isinstance(exc,(PermissionError,ProviderSchemaError,AgentUnavailable)) or
+                (isinstance(exc,sqlite3.Error) and not transient_db) or
+                (isinstance(exc,OSError) and not isinstance(exc,(TimeoutError,BlockingIOError)))):
+                campaigns.event(campaign_id,'SAFETY_HALTED',error=str(exc))
+                close_unfinished_comparisons(store,campaigns,campaign_id,runtime,str(exc))
+                campaigns.set_status(campaign_id,'FAILED','nonrecoverable safety/integrity/host error: '+str(exc))
+                return
+            campaigns.recoverable_failure(campaign_id,exc)
             campaigns.event(campaign_id, "CONTROLLER_ERROR", error=str(exc))
             state, reason = stop_reason(campaigns, campaign_id)
             if state:
-                campaigns.set_status(campaign_id, state, reason)
+                close_unfinished_comparisons(store,campaigns,campaign_id,runtime,reason)
+                campaigns.set_status(campaign_id, 'STOPPED' if state=='STOPPING' else state, reason)
                 return
             time.sleep(idle_seconds)
