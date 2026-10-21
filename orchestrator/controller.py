@@ -29,7 +29,8 @@ def run_worker_once(store, manifest_path, runtime, personal_mode_authorized=Fals
             if not expected or expected['status'] != 'QUEUED':
                 raise ValueError('expected campaign job is not queued')
             expected_config = json.loads(expected['config_json'])
-            duration = min(max_job_seconds(expected_config), int(expected_config.get('timeout_seconds', max_job_seconds(expected_config))))
+            duration = (0 if expected_config.get('plan_contract_version')=='experiment-plan-v2.0' else
+                        min(max_job_seconds(expected_config), int(expected_config.get('timeout_seconds', max_job_seconds(expected_config)))))
         else:
             duration = max_job_seconds()
         job = claim_next(store, max_duration=duration, expected_run_id=expected_run_id)
@@ -108,7 +109,7 @@ def _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=None,
                        "Choose model, optimizer steps/epochs and exposures to make scientifically useful use of that allowance; "
                        "do not copy a historical short schedule by default. Justify estimated training time and any shorter "
                        "schedule in evaluation_plan. Training time excludes initialization, data preparation, checkpoint saving, validation, smoke checks and scoring. "
-                       "The plan job timeout must include its estimated smoke, import and validation overhead, separate from training. "
+                       "Preparation, initialization, smoke and evaluation use the remaining overall research deadline, never the training-only allowance. "
                        "Preserve all declared arms, seeds and controls; never stretch or truncate a frozen plan.")
         remaining = row['created_at'] + limits['max_wall_hours'] * 3600 - __import__('time').time()
         if time_based(config):
@@ -143,7 +144,7 @@ def _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=None,
                        + json.dumps(feedback))
     if role=='researcher':
         from orchestrator.planning_contract import planning_instructions
-        prompt += '\nTRUSTED EXECUTABLE PLANNING CONTRACT:\n'+planning_instructions(capabilities)
+        prompt += '\nTRUSTED EXECUTABLE PLANNING CONTRACT:\n'+planning_instructions(capabilities, time_only=not campaign or time_based(config))
     # Compile and inspect the exact generated provider schema before reserving
     # any campaign/global call. Schema defects are host errors, never agent repairs.
     schema_value=None
@@ -152,7 +153,7 @@ def _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=None,
         schema_value=json.loads(Path(schema).read_text())
         if role=='researcher':
             from orchestrator.planning_contract import constrain_output_schema
-            schema_value=constrain_output_schema(schema_value,capabilities)
+            schema_value=constrain_output_schema(schema_value,capabilities, time_only=not campaign or time_based(config))
         provider_output_schema(schema_value)
     if campaign:
         campaigns.reserve_codex_call(campaign_id, role)
@@ -212,7 +213,7 @@ def _validate_research_proposals(store, proposals, count, require_gpu_pilot):
             raise ValueError('new hypothesis cannot silently reuse a parent identity')
         minutes = proposal.get('estimated_gpu_minutes')
         if require_gpu_pilot and (isinstance(minutes, bool) or not isinstance(minutes, (int, float))
-                                  or not 0 < minutes <= 240
+                                  or not __import__('math').isfinite(minutes) or minutes <= 0
                                   or 'cpu-only' in proposal.get('evaluation_plan', '').lower()):
             raise ValueError('CUDA pilot requires GPU-trained hypotheses within authorized limits; CPU-only proposals remain research leads')
         if any(not isinstance(dep, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+(?:[<>=!~]+[0-9][A-Za-z0-9_.-]*)?', dep)
@@ -304,10 +305,10 @@ def add_research_proposals(store, prompt, count=3, campaign=None, personal_mode=
         {key: p.get(key, '') for key in ('hypothesis_id', 'claim', 'controlled_change')} for p in previous])
     instruction += (' Return distinct mechanisms; renaming the same idea is insufficient. '
                     'Use unique hypothesis IDs and valid priority ranks.')
-    instruction += (' Every proposal requires experiment_plan matching schemas/experiment_plan.schema.json. '
+    instruction += (' Every proposal requires experiment_plan matching the controller-generated structured-output schema (the on-disk v1 schema is retained only for legacy compatibility). '
                     'Declare every arm, seed, complete training settings including steps, size, batch_size, '
                     'expected_optimizer_updates and expected_source_exposures, prediction settings, required '
-                    'measurements, executable diagnose hook requests, controlled variables and bounded resources. '
+                    'measurements, executable diagnose hook requests, controlled variables and resource estimates (not independent deadlines). '
                     'Frozen baselines must use the exact supplied run ID, source/checkpoint/configuration hashes '
                     'and seed, never a historical hypothesis name. Do not claim future measurements are available. '
                     'COMPLETE only means requested work executed; missing arms or diagnostics mean INCOMPLETE. '
@@ -323,7 +324,11 @@ def add_research_proposals(store, prompt, count=3, campaign=None, personal_mode=
         remaining = {'max_jobs': (max(0, int(wall)) if limits['max_experiments'] is None else limits['max_experiments']-usage['experiments']),
                      'max_gpu_seconds':min(wall, limits['max_gpu_hours']*3600-usage['gpu_seconds']),
                      'max_wall_seconds':wall, 'max_job_seconds':limits['max_job_seconds']}
-        instruction += '\nRemaining ceilings for ONE comparison (not spending targets): '+json.dumps(remaining)
+        from orchestrator.campaign_config import time_based
+        if time_based(json.loads(campaigns.get(cid)['config_json'])):
+            instruction += '\nRemaining overall research seconds: '+str(wall)+'. Use schema_version 2.0 without resource_budget. Job count is the complete arms × seeds matrix.'
+        else:
+            instruction += '\nRemaining ceilings for ONE comparison (not spending targets): '+json.dumps(remaining)
     def request(feedback, attempt):
         output = budgeted_invoke(store, "researcher", REPO, schema, instruction + feedback, timeout=240,
                                  campaign=campaign, personal_mode=personal_mode)["response"]
@@ -340,7 +345,7 @@ def add_research_proposals(store, prompt, count=3, campaign=None, personal_mode=
         for proposal in output['proposals']:
             plan = proposal['experiment_plan']
             for reference in plan['baselines']: verify_baseline(store, reference, REPO)
-            if campaign and any(plan['resource_budget'][key] > allowance for key,allowance in remaining.items()):
+            if campaign and plan.get('resource_budget') and any(plan['resource_budget'][key] > allowance for key,allowance in remaining.items()):
                 raise ValueError('proposed comparison exceeds remaining authorized campaign allowance')
             if campaign:
                 from orchestrator.campaign_config import time_based, plan_seconds
@@ -581,6 +586,8 @@ def queue_candidate(store, hypothesis_id, candidate_id, category, stage, device,
         record=next((json.loads(r[0]) for r in registered if json.loads(r[0])['plan_sha256']==effective_config['plan_sha256']),None)
         if record is None:raise ValueError('planned queue admission requires a registered validated protocol')
         admit_plan(record['plan'],store,REPO)
+        if (record['plan']['schema_version']=='2.0') != (effective_config.get('plan_contract_version')=='experiment-plan-v2.0'):
+            raise ValueError('effective timing contract differs from registered scientific plan')
     frozen = (effective_config or {}).get('frozen_baseline')
     if frozen:
         from orchestrator.experiment_plan import verify_baseline
@@ -601,8 +608,10 @@ def queue_candidate(store, hypothesis_id, candidate_id, category, stage, device,
     if campaign_config and time_based(campaign_config) and not frozen:
         from orchestrator.experiment_runner import require_training_phases
         require_training_phases(module)
-    enforce(store, next_gpu_seconds=seconds if device == "cuda" else 0, campaign_id=campaign_id)
-    timeout = min(int(seconds), campaign_config['limits']['max_job_seconds'] if campaign_config and time_based(campaign_config) else max_job_seconds())
+    campaign_timed = bool(effective_config and effective_config.get('plan_contract_version')=='experiment-plan-v2.0')
+    enforce(store, next_gpu_seconds=seconds if device == "cuda" and not campaign_timed else 0, campaign_id=campaign_id)
+    timeout = (None if campaign_timed else min(int(seconds),
+               campaign_config['limits']['max_job_seconds'] if campaign_config and time_based(campaign_config) else max_job_seconds()))
     if effective_config is None and seed is not None and (candidate_id != 'masked_context_ablation' or seed not in {7, 17, 29}):
         raise ValueError('seed is restricted to the predeclared masked-context study seeds')
     cfg = {"device": device, "size": 128, "epochs": 1, "seed": 7 if seed is None else seed,
@@ -630,6 +639,9 @@ def queue_candidate(store, hypothesis_id, candidate_id, category, stage, device,
     if campaign_config and time_based(campaign_config):
         cfg['campaign_configuration_version'] = campaign_config['configuration_version']
         cfg['training_budget_seconds'] = campaign_config['limits']['training_minutes_per_experiment']*60
+    if campaign_timed:
+        cfg.pop('timeout_seconds',None)
+        cfg['research_deadline'] = campaign_row['created_at']+campaign_config['limits']['max_wall_hours']*3600
     candidate_tree = REPO / "candidates" / "worktrees" / candidate_id
     if frozen:
         git_sha = origin['git_sha']

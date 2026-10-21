@@ -65,6 +65,7 @@ def operation_cancelled(campaigns, campaign_id):
 
 def plan_seconds(plan, config):
     """Conservative admission allowance, not a change to a frozen plan."""
+    if plan.get('schema_version')=='2.0':return 0  # No independent plan reservation.
     if time_based(config):return plan['resource_budget']['max_wall_seconds']
     jobs = len(plan['arms']) * len(plan['seeds'])
     feedback = config['research'].get('feedback_cpu_timeout_seconds', 600) if plan['evaluation']['real_development_feedback'] else 0

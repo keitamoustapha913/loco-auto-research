@@ -85,6 +85,24 @@ Technical GPU-slot/call counters remain available in System diagnostics and ledg
 records. Training timing protocol is recorded in `training_timing.json`, including
 failed/time-limited learning attempts, and synchronized through the existing outbox.
 
+### Scientific plan timing
+
+New simplified campaigns generate version 2.0 plans with no `resource_budget`,
+`max_job_seconds`, `max_gpu_seconds`, independent plan deadline, or job-count
+allowance. The complete arm × seed matrix determines the jobs. Preparation,
+CUDA smoke validation, diagnostics and frozen real-development evaluation share
+only the campaign's original research deadline; each model's actual training has
+its separate training-only ceiling. Disposable smoke models have their own training
+clock and their weights never enter the scientific experiment.
+
+Invalid plans return precise recoverable validation errors and use the existing
+ten-failure recovery policy; they do not terminate the campaign as `LIMIT_REACHED`.
+Only expiry of the original campaign clock does that. Interrupted comparisons stay
+INCOMPLETE and cannot justify promotion. No retry resets the campaign clock.
+The checked-in v1 schemas remain compatibility definitions for frozen historical
+plans; the controller compiles the new provider/admission schema deterministically.
+Previously frozen plans and their explicit resource restrictions are not rewritten.
+
 ### Training-only candidate contract
 
 Time-based learning requires `training_steps(config, allowed_train_manifest, output_dir)`:

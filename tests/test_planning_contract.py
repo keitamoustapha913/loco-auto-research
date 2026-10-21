@@ -45,7 +45,7 @@ def test_valid_offline_training_comparison_and_eligibility():
 def test_plain_provider_names_still_reject_reserved_training_fields_in_admission(field):
     p=experiment_plan();p['training'][field]='forbidden'
     assert 'RESERVED_TRAINING_FIELDS' in codes(inspect_plan(p))
-    schema=constrain_output_schema(json.loads((REPO/'schemas/experiment_plan_agent.schema.json').read_text()))
+    schema=constrain_output_schema(json.loads((REPO/'schemas/experiment_plan_agent.schema.json').read_text()),time_only=False)
     # Generation accepts a plain name; trusted semantics remain authoritative.
     validate(agent_plan(p),schema)
     assert 'pattern' not in schema['properties']['training']['items']['properties']['name']
@@ -104,7 +104,7 @@ def test_unsupported_baseline_inference_is_rejected_even_if_recorded(lab,monkeyp
 def test_schema_exact_baseline_inference_and_training_branches(lab):
     p,store,repo,ref=frozen_plan(lab)
     cap=baseline_capability(store,ref,repo)
-    schema=constrain_output_schema(json.loads((REPO/'schemas/experiment_plan_agent.schema.json').read_text()),[cap])
+    schema=constrain_output_schema(json.loads((REPO/'schemas/experiment_plan_agent.schema.json').read_text()),[cap],time_only=False)
     validate(agent_plan(p),schema)
     wire=agent_plan(p);wire['arms'][0]['inference'][0]['value_json']='"invented"'
     with pytest.raises(ValidationError):validate(wire,schema)

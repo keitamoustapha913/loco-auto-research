@@ -12,7 +12,7 @@ import shutil
 
 
 def command(repo_root: Path, role: str, schema: Path, output: Path, task: str,
-            candidate_dir: Path | None = None, reference_files=None) -> list[str]:
+            candidate_dir: Path | None = None, reference_files=None, planning_reference=None) -> list[str]:
     bwrap = shutil.which("bwrap")
     if not bwrap:
         raise RuntimeError("Bubblewrap is required for personal-server Codex calls")
@@ -57,7 +57,8 @@ def command(repo_root: Path, role: str, schema: Path, output: Path, task: str,
     for filename in ("train_adapter.py", "validation.py"):
         args += ["--ro-bind", repo / "benchmark" / filename, "/workspace/benchmark/" + filename]
     args += ['--ro-bind', repo / 'scripts' / 'run_candidate.py', '/workspace/scripts/run_candidate.py']
-    args += ['--ro-bind', repo / 'schemas' / 'experiment_plan_agent.schema.json', '/workspace/experiment_plan.schema.json']
+    args += ['--ro-bind', Path(planning_reference).resolve(strict=True) if planning_reference else
+             repo / 'schemas' / 'experiment_plan_agent.schema.json', '/workspace/experiment_plan.schema.json']
     if reference_files:
         import re
         allowed = Path(os.environ.get('LOCO_LEDGER', str(Path(os.environ.get('LOCO_RUNTIME', '.runtime'))/'controller/experiments.sqlite'))).resolve().parent/'research_evidence'

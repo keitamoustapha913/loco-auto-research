@@ -88,10 +88,10 @@ def evidence_classification(plan, rows=None):
 
 def inspect_plan(plan, store=None, repo_root=None):
     """Collect all previously observed failure classes, without modifying input."""
-    from orchestrator.experiment_plan import REPO,validate_plan
+    from orchestrator.experiment_plan import REPO,validate_plan,plan_schema
     from jsonschema import validate, ValidationError
     try:
-        validate(plan,json.loads((REPO/'schemas/experiment_plan.schema.json').read_text()))
+        validate(plan,plan_schema(plan))
     except ValidationError as exc:
         return {'valid':False,'errors':[{'code':'PLAN_SCHEMA','message':exc.message,'path':list(exc.path)}],
                 'notices':[],'scientific_eligibility':{'promotion_eligible':False},'baseline_capabilities':{}}
@@ -141,10 +141,11 @@ def admit_plan(plan, store, repo_root=None):
     return report
 
 
-def planning_instructions(capabilities=()):
+def planning_instructions(capabilities=(), *, time_only=True):
     from orchestrator.experiment_plan import RESERVED,REQUIRED_TRAINING_POSITIVE,MATCHED_TRAINING_CONTROLS
     return json.dumps({'contract':'controller-planning-v2','controller_owned_fields':sorted(RESERVED),
-        'controller_owned_prefix':'plan_','required_positive_training_keys':list(REQUIRED_TRAINING_POSITIVE),
+        'controller_owned_prefix':'plan_',
+        'timing':('New plans use schema_version 2.0, no resource_budget or independent job/GPU/plan deadlines. Jobs are exactly arms times seeds. Only the remaining campaign research deadline and actual training-only allowance apply. Preserve complete comparisons; report INCOMPLETE if interrupted.' if time_only else 'Legacy schema_version 1.0 plans retain their explicitly authorized resource_budget restrictions.'),'required_positive_training_keys':list(REQUIRED_TRAINING_POSITIVE),
         'required_nonnegative_training_key':'expected_optimizer_updates',
         'controlled_variables':'Names of real training keys, not sentences. Values must be declared, equal across arms and recorded in every frozen baseline.',
         'matched_training_controls_for_confirmation':list(MATCHED_TRAINING_CONTROLS),
@@ -156,13 +157,19 @@ def planning_instructions(capabilities=()):
         'frozen_baselines':list(capabilities)},sort_keys=True)
 
 
-def constrain_output_schema(schema, capabilities=()):
+def constrain_output_schema(schema, capabilities=(), *, time_only=True):
     """Generate wire constraints from the same rules used by admission."""
     result=copy.deepcopy(schema)
     def visit(node):
         if not isinstance(node,dict):return
         props=node.get('properties',{})
+        if time_only and 'estimated_gpu_minutes' in props:
+            props['estimated_gpu_minutes'].pop('maximum',None)
         if {'training','controlled_variables','arms','seeds'}<=props.keys():
+            if time_only:
+                props['schema_version'] = {'type':'string','const':'2.0'}
+                props.pop('resource_budget',None)
+                node['required'] = [key for key in node.get('required',[]) if key!='resource_budget']
             pair=props['training'].get('items',{})
             if pair.get('properties',{}).get('name') is not None:
                 # Provider names stay plain strings. Reserved names/whitespace

@@ -36,9 +36,12 @@ def run(module_file, manifest_file, config, output):
     checkpoint_dir = output / 'checkpoint'
     if config.get('training_budget_seconds') is not None:
         from scripts.training_phase import run_training_phases
-        # Disposable smoke is bounded by the host job and excluded from pilot training time.
+        # Separate disposable model: never reuse its weights or learning clock.
+        # New plans enforce the same per-model training-only ceiling here too.
+        smoke_budget = (config['training_budget_seconds']
+                        if config.get('plan_contract_version')=='experiment-plan-v2.0' else None)
         smoke_config.pop('training_budget_seconds',None)
-        run_training_phases(module,smoke_config,smoke_manifest,checkpoint_dir,budget=None)
+        run_training_phases(module,smoke_config,smoke_manifest,checkpoint_dir,budget=smoke_budget)
     else:
         module.train(smoke_config, smoke_manifest, checkpoint_dir)
     training_cuda_bytes = torch.cuda.max_memory_allocated()

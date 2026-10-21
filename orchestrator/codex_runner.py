@@ -163,8 +163,16 @@ def invoke(role: str, repo_root: Path, schema_path: Path, prompt: str, timeout=1
             candidate_dir = cwd / "candidates" / cwd.name if role == "implementer" else None
             if candidate_dir is not None:
                 candidate_dir.mkdir(parents=True, exist_ok=True)
+            planning_reference = None
+            if role == 'researcher':
+                generated = json.loads(provider_schema_file.read_text())
+                plan = generated.get('$defs',{}).get('proposal',{}).get('properties',{}).get('experiment_plan')
+                if plan is None and 'arms' in generated.get('properties',{}):plan = generated
+                if plan is not None:
+                    planning_reference = Path(temp)/'experiment-plan.json'
+                    planning_reference.write_text(json.dumps(plan))
             command = sandbox_command(root, role, provider_schema_file, response_file, task, candidate_dir,
-                                      reference_files=reference_files)
+                                      reference_files=reference_files, planning_reference=planning_reference)
             env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
         else:
             command = ["codex", "exec", "--cd", str(cwd), "--sandbox", "workspace-write" if role == "implementer" else "read-only", "--output-schema", str(provider_schema_file), "--output-last-message", str(response_file), '-']

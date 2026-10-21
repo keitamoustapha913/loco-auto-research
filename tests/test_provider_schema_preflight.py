@@ -13,11 +13,26 @@ from orchestrator.planning_contract import constrain_output_schema,inspect_plan,
 from orchestrator.state_store import StateStore
 from orchestrator.campaign_state import CampaignState
 from orchestrator.autonomy import load_campaign_config
-from test_planning_contract import frozen_plan
+from test_planning_contract import frozen_plan as legacy_frozen_plan
 from test_model_registry import lab
-from plan_fixtures import agent_plan,experiment_plan
+from plan_fixtures import agent_plan,experiment_plan as legacy_experiment_plan
 
 REPO=Path(__file__).resolve().parents[1]
+
+
+def current_plan(plan):
+    plan['schema_version']='2.0'
+    del plan['resource_budget']
+    return plan
+
+
+def experiment_plan():
+    return current_plan(legacy_experiment_plan())
+
+
+def frozen_plan(lab):
+    plan,store,repo,ref=legacy_frozen_plan(lab)
+    return current_plan(plan),store,repo,ref
 
 
 def generated(capabilities=()):

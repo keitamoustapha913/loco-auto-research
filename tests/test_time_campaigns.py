@@ -129,7 +129,7 @@ def test_complete_plan_admission_includes_evaluation_and_critique(laboratory):
     plan=experiment_plan();plan['resource_budget']['max_wall_seconds']=144
     result=execute_plan(store,c,cid,runtime,plan)
     assert result['status']=='INCOMPLETE' and calls==[]
-    assert c.get(cid)['status']=='LIMIT_REACHED'
+    assert c.get(cid)['status']=='RUNNING'  # A rejected plan is not the campaign deadline.
     assert any('complete frozen comparison' in p for p in result['problems'])
     assert result['scientific_eligibility']['promotion_eligible'] is False
 

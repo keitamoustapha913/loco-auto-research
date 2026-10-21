@@ -214,7 +214,8 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
             pinned_source=bool(config.get('frozen_baseline')), diagnostic_file=diagnostic_file)
         # Bubblewrap clears its environment; no controller or Codex secrets enter.
         environment = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}
-    timeout = min(max_job_seconds(config), int(config.get("timeout_seconds", max_job_seconds(config))))
+    timeout = (max_job_seconds(config) if config.get('plan_contract_version')=='experiment-plan-v2.0' else
+               min(max_job_seconds(config), int(config.get("timeout_seconds", max_job_seconds(config)))))
     stages = []
     if config.get('cuda_smoke_required'):
         if not config.get('device', '').startswith('cuda'):
@@ -228,7 +229,7 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
         stages.append(('cuda_smoke', smoke_command, timeout if config.get('campaign_configuration_version')=='campaign-time-v1' else min(30, timeout)))
     stages.append(('pilot', command, timeout))
     started = time.monotonic()
-    deadline = started + timeout  # Both stages share the original job allowance.
+    deadline = started + timeout  # v2 shares the original campaign deadline; legacy shares its job allowance.
     smoke_seconds = 0.0
     status = 'COMPLETED'
     failed_stage = ''
