@@ -282,7 +282,7 @@ def test_disposable_smoke_checks_real_diagnostic_hook_before_full_training(tmp_p
         plan_contract_version='experiment-plan-v3.0',diagnostic_preflight_required=True,
         diagnostics=[{'diagnostic_id':'check','config':{},'required_metrics':['ap']}],paired_diagnostic_metrics={'check':['ap']})
     with pytest.raises(ValueError):candidate_smoke.run(Path('fixture'),manifest,config,tmp_path/'smoke')
-    assert calls==[{'budget':None,'preflight_steps':2}]
+    assert calls==[{'budget':None,'preflight_steps':32}]
 
 
 def test_host_certifies_post_training_failure_idempotently_without_retraining(registry_lab):

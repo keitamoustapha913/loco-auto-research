@@ -576,7 +576,8 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
             from orchestrator.campaign_config import training_execution_estimate,remaining_wall
             estimate=training_execution_estimate(store,cfg,jobs=remaining_cells,
                 newly_trained=sum(a['execution']=='train' and not store.get_run(cell_run_id(campaign_id,plan,a['arm_id'],seed)) for a,seed in cells(plan)),
-                real_feedback=plan['evaluation']['real_development_feedback'],critique=True)
+                real_feedback=plan['evaluation']['real_development_feedback'],critique=True,
+                source_sha256=sha256(candidate_file(controller.REPO,plan['hypothesis_id'])) if any(a['execution']=='train' for a in plan['arms']) else None)
             campaigns.event(campaign_id,'TRAINING_TARGET_ADMISSION',plan_id=plan['plan_id'],estimate=estimate)
             if remaining_wall(campaigns.get(campaign_id),time.time())<estimate['required_seconds']:
                 raise ValueError('insufficient research time for complete required-duration matrix, preparation, evaluation and critique; revise plan, never shorten training')

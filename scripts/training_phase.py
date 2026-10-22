@@ -49,9 +49,15 @@ class TrainingClock:
         self.exposures=0;self.last_step_seconds=0.
         self.elapsed=0.;self.steps=0;self.active=False;self.phase_started=None
         self.status='PREPARING';self.verified=False
+        from collections import deque
+        self.created=time.perf_counter();self.samples=deque(maxlen=64)
+        self.costs=dict(preparation_seconds=0.,integrity_seconds=0.,validation_seconds=0.,
+                        audit_io_seconds=0.,setup_sync_seconds=0.,learning_sync_seconds=0.)
+        self.initial_preparation_seconds=0.;self.finalization_seconds=0.
         self.publish()
 
     def publish(self):
+        started=time.perf_counter()
         data={'protocol':VERSION,'status':self.status,'verified':self.verified,
               'duration_seconds':self.elapsed,'budget_seconds':self.budget,
               'completion_policy':TARGET_VERSION if self.target else 'maximum',
@@ -59,12 +65,20 @@ class TrainingClock:
               'source_exposures':self.exposures,'last_step_seconds':self.last_step_seconds,
               'overshoot_seconds':max(0,self.elapsed-self.budget) if self.target else 0,
               'completed_steps':self.steps,'phase_started_monotonic':self.phase_started}
+        data['execution_profile']={'version':'training-throughput-v1','costs':dict(self.costs),
+            'initial_preparation_seconds':self.initial_preparation_seconds,
+            'finalization_seconds':self.finalization_seconds,'observed_wall_seconds':started-self.created,
+            'sampled_updates':len(self.samples),'sampled_learning_seconds':sum(s[0] for s in self.samples),
+            'sampled_step_wall_seconds':sum(s[1] for s in self.samples),
+            'semantics':'wall preparation/integrity/I-O excluded; post-learning CUDA sync included in learning; first four updates excluded from steady samples'}
         temporary=self.path.with_suffix('.tmp')
         temporary.write_text(json.dumps(data,allow_nan=False));temporary.replace(self.path)
+        self.costs['audit_io_seconds']+=time.perf_counter()-started
 
     def measure(self, operation):
         # Drain setup/data-transfer CUDA work before starting this phase.
-        self.synchronize()
+        synchronization=time.perf_counter();self.synchronize()
+        self.costs['setup_sync_seconds']+=time.perf_counter()-synchronization
         remaining=None if self.budget is None or self.target else self.budget-self.elapsed
         if remaining is not None and remaining<=0:raise TrainingBudgetExceeded('training-time budget exceeded')
         old_handler=None;old_timer=None
@@ -75,17 +89,21 @@ class TrainingClock:
             old_handler=signal.signal(signal.SIGALRM,expired)
             old_timer=signal.setitimer(signal.ITIMER_REAL,remaining)
         started=time.perf_counter();self.active=True
+        learning_finished=None;learning_sync=0.
         try:
             result=operation()
             # Wait for queued forward/backward/update kernels inside the deadline.
-            self.synchronize()
-            if self.budget is not None and not self.target and self.elapsed+time.perf_counter()-started>self.budget:
+            synchronization=time.perf_counter();self.synchronize()
+            learning_finished=time.perf_counter()
+            learning_sync=learning_finished-synchronization
+            if self.budget is not None and not self.target and self.elapsed+learning_finished-started>self.budget:
                 raise TrainingBudgetExceeded('training-time budget exceeded')
             return result
         finally:
-            self.last_step_seconds=time.perf_counter()-started
+            self.last_step_seconds=(learning_finished if learning_finished is not None else time.perf_counter())-started
             self.elapsed+=self.last_step_seconds
             self.active=False;self.phase_started=None
+            self.costs['learning_sync_seconds']+=learning_sync
             if remaining is not None:
                 signal.setitimer(signal.ITIMER_REAL,0)
                 signal.signal(signal.SIGALRM,old_handler)
@@ -155,21 +173,33 @@ def run_training_phases(module, config, manifest, output, *, budget=None, prefli
         progress=None
         if target and not hasattr(iterator,'send'):raise TrainingTimeUnverifiable('target training requires a progress-aware generator')
         while True:
+            iteration_started=time.perf_counter()
             if target and config.get('research_deadline') is not None and time.time()>=config['research_deadline']:
                 raise TrainingBudgetExceeded('overall research deadline reached before training completion')
             # Generator advance performs initialization, batch preparation, logging
             # and checkpoint saving with no training timer running.
+            section=time.perf_counter()
             expected=[(model,state_fingerprint(model)) for model in tracked]
+            clock.costs['integrity_seconds']+=time.perf_counter()-section
+            section=time.perf_counter()
             try:step=next(iterator) if progress is None else iterator.send(progress)
             except StopIteration as stopped:
+                clock.finalization_seconds=time.perf_counter()-section
+                section=time.perf_counter()
                 check_unchanged(expected)
+                clock.costs['integrity_seconds']+=time.perf_counter()-section
                 if not clock.steps:raise TrainingTimeUnverifiable('no explicit training steps were executed')
                 if target and clock.elapsed<budget:
                     raise TrainingTargetIncomplete(f'training ended prematurely: {clock.elapsed:.6f} of required {budget:.6f} actual learning seconds')
                 metadata=stopped.value
                 clock.status='COMPLETED';clock.verified=True;clock.publish()
                 return metadata,clock.elapsed
+            preparation=time.perf_counter()-section;clock.costs['preparation_seconds']+=preparation
+            if not clock.steps:clock.initial_preparation_seconds=preparation
+            section=time.perf_counter()
             check_unchanged(expected)
+            clock.costs['integrity_seconds']+=time.perf_counter()-section
+            section=time.perf_counter()
             if target and config.get('research_deadline') is not None and time.time()>=config['research_deadline']:
                 raise TrainingBudgetExceeded('overall research deadline reached during preparation')
             if (target and clock.elapsed>=budget) or (preflight_steps is not None and clock.steps>=preflight_steps):
@@ -200,6 +230,7 @@ def run_training_phases(module, config, manifest, output, *, budget=None, prefli
             owned=[p for group in step.optimizer.param_groups for p in group['params']]
             if not owned or any(id(p) not in parameters or p.device.type!=device.type for p in owned):
                 raise TrainingTimeUnverifiable('optimizer parameters must belong to the prepared objective on the declared device')
+            clock.costs['validation_seconds']+=time.perf_counter()-section
             def update():
                 def closure():
                     step.optimizer.zero_grad(set_to_none=step.zero_grad_set_to_none)
@@ -217,6 +248,7 @@ def run_training_phases(module, config, manifest, output, *, budget=None, prefli
                 progress={'elapsed_seconds':clock.elapsed,'target_seconds':budget,'target_reached':clock.steps>=preflight_steps if preflight_steps is not None else clock.elapsed>=budget,
                           'optimizer_updates':clock.steps,'source_exposures':clock.exposures}
             clock.publish()
+            if clock.steps>4:clock.samples.append((clock.last_step_seconds,time.perf_counter()-iteration_started))
     except BaseException as exc:
         clock.status=('FAILED' if isinstance(exc,TrainingTargetIncomplete) else
                       'TIMED_OUT' if isinstance(exc,TrainingBudgetExceeded) else

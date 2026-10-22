@@ -93,22 +93,84 @@ def starting_context(store, config, strict=False):
     return result
 
 
-def training_execution_estimate(store, config, *, jobs=1, newly_trained=1, real_feedback=True, critique=False):
-    """Admission estimates from recorded stages, never extra execution deadlines."""
+def throughput_ratio(profile):
+    """Conservative steady end-to-end/learning ratio; never a new timer."""
+    if not isinstance(profile,dict) or profile.get('version')!='training-throughput-v1':
+        raise ValueError('missing trusted training-throughput-v1 preflight profile')
+    n=profile.get('sampled_updates');learning=profile.get('sampled_learning_seconds');wall=profile.get('sampled_step_wall_seconds')
+    if isinstance(n,bool) or not isinstance(n,int) or n<16:
+        raise ValueError('at least 16 post-warmup updates required for throughput admission')
+    for x in (learning,wall):
+        if isinstance(x,bool) or not isinstance(x,(float,int)) or not math.isfinite(x) or x<=0:
+            raise ValueError('invalid observed throughput duration')
+    if wall<learning:raise ValueError('observed step wall time cannot exclude learning')
+    return max(1.,wall/learning)*1.25  # Admission uncertainty margin, not an execution limit.
+
+
+def remaining_plan_work(store, config):
+    """All remaining declared cells, including the currently disposable-smoked cell."""
     import json
-    overhead=[];evaluation=[]
     with store.connect() as con:
-        for row in con.execute("SELECT * FROM runs WHERE category=? AND status IN ('COMPLETED','REVIEWED','PROMOTED','REJECTED') ORDER BY created_at DESC LIMIT 30",(config['campaign']['dataset'],)):
-            metrics=json.loads(row['metrics_json']);learning=metrics.get('training/duration_seconds')
-            if learning is not None and row['finished_at'] and row['started_at']:
-                overhead.append(max(0,row['finished_at']-row['started_at']-learning))
+        events=con.execute("SELECT payload_json FROM campaign_events WHERE campaign_id=? AND kind='EXPERIMENT_PLAN_REGISTERED' ORDER BY id DESC",(config['campaign_id'],)).fetchall()
+        plan=next((json.loads(e[0])['plan'] for e in events if json.loads(e[0])['plan']['plan_id']==config.get('plan_id')),None)
+        if plan is None:
+            if config.get('plan_sha256'):raise ValueError('throughput admission requires the registered complete experiment matrix')
+            return dict(jobs=1,newly_trained=1)
+        done={}
+        for r in con.execute('SELECT r.config_json,r.status FROM runs r JOIN campaign_runs cr ON cr.run_id=r.run_id WHERE cr.campaign_id=?',(config['campaign_id'],)):
+            effective=json.loads(r['config_json'])
+            if effective.get('plan_sha256')==config.get('plan_sha256'):
+                done[(effective['plan_arm'],effective.get('plan_pair_seed',effective['seed']))]=r['status']
+    remaining=[a for a in plan['arms'] for seed in plan['seeds'] if done.get((a['arm_id'],seed)) not in {'COMPLETED','REVIEWED','PROMOTED','REJECTED'}]
+    return dict(jobs=len(remaining),newly_trained=sum(a['execution']=='train' for a in remaining))
+
+
+def training_execution_estimate(store, config, *, jobs=1, newly_trained=1, real_feedback=True,
+                                critique=False, source_sha256=None, throughput=None,training_settings=None):
+    """End-to-end target projection, including cancelled partial-training evidence.
+
+    Unknown implementations require measured queued preflight before full training.
+    CPU observations never predict CUDA throughput. No extra execution deadline.
+    """
+    import json
+    evaluation=[];ratios=[];exact=[]
+    device=config['campaign'].get('gpu_device','cuda')
+    with store.connect() as con:
+        for row in con.execute("SELECT * FROM runs WHERE category=? ORDER BY created_at DESC LIMIT 100",(config['campaign']['dataset'],)):
+            effective=json.loads(row['config_json']);metrics=json.loads(row['metrics_json'])
+            learning=metrics.get('training/duration_seconds')
+            if effective.get('execution_kind')=='frozen' or effective.get('device','cpu')!=device:continue
+            if (isinstance(learning,bool) or not isinstance(learning,(float,int)) or not math.isfinite(learning)
+                or learning<1 or not row['finished_at'] or not row['started_at']):continue
+            wall=row['finished_at']-row['started_at']
+            if wall<learning:continue
+            value=wall/learning*1.25
+            ratios.append(value)
+            if source_sha256 and effective.get('model_sha256')==source_sha256:exact.append(value)
         for row in con.execute("SELECT payload_json FROM events WHERE kind='REAL_DEVELOPMENT_FEEDBACK' ORDER BY id DESC LIMIT 30"):
             value=json.loads(row[0]).get('metrics',{}).get('dev_real/evaluation_wall_seconds')
-            if isinstance(value,(int,float)) and value>=0:evaluation.append(value)
-    # Initial estimates are conservative admission allowances, not stage timeouts.
-    setup=max([60.]+overhead);feedback=max([180.]+evaluation) if real_feedback else 0.
+            if isinstance(value,(int,float)) and not isinstance(value,bool) and math.isfinite(value) and value>=0:evaluation.append(value)
+    if throughput is not None:
+        if throughput.get('source_sha256')!=source_sha256 or throughput.get('device')!=device:
+            raise ValueError('throughput source/device differs from effective candidate')
+        if training_settings and any(throughput.get(k)!=training_settings[k] for k in ('batch_size','size')):
+            raise ValueError('throughput probe batch size/resolution differs from planned training')
+        ratio=throughput_ratio(throughput);basis='queued source/device-matched measured preflight; 25% uncertainty margin'
+        observed=True
+    elif exact:
+        ratio=max(exact);basis='source/device-matched historical end-to-end observations, including cancelled runs';observed=True
+    elif source_sha256:
+        ratio=1.;basis='unmeasured new source: preliminary learning floor only; queued throughput admission required';observed=False
+    else:
+        ratio=max([1.]+ratios);basis='preliminary dataset/device historical end-to-end observations, including cancelled runs';observed=bool(ratios)
+    setup=60.;feedback=max([180.]+evaluation) if real_feedback else 0.
+    if throughput:
+        initial=throughput.get('initial_preparation_seconds',0)
+        if isinstance(initial,(int,float)) and not isinstance(initial,bool) and math.isfinite(initial):setup=max(setup,initial)
     target=config['limits']['training_minutes_per_experiment']*60
-    return {'training_seconds_per_model':target,'preparation_and_diagnostics_estimate_seconds':setup,
+    return {'training_seconds_per_model':target,'execution_to_learning_ratio':ratio,
+            'projected_training_execution_seconds_per_model':target*ratio,
+            'preparation_and_diagnostics_estimate_seconds':setup,'throughput_observed':observed,
             'feedback_estimate_seconds':feedback,'critique_estimate_seconds':90. if critique else 0.,
-            'required_seconds':newly_trained*target+jobs*(setup+feedback)+(90. if critique else 0.),
-            'basis':'maximum of recent measured stages and initial admission estimates; not extra time limits'}
+            'required_seconds':newly_trained*target*ratio+jobs*(setup+feedback)+(90. if critique else 0.),
+            'basis':basis+'; scheduling estimates only, original campaign deadline unchanged'}

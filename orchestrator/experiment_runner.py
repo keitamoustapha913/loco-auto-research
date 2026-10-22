@@ -76,6 +76,13 @@ def read_training_timing(path):
     except (OSError,ValueError):return {}
 
 
+def read_training_throughput(job_dir):
+    folder=Path(job_dir);path=folder/'cuda_smoke/summary.json'
+    if path.is_symlink() or not path.resolve().is_relative_to(folder.resolve()) or path.stat().st_size>16384:
+        raise ValueError('unsafe or oversized throughput preflight summary')
+    return json.loads(path.read_text())['training_throughput']
+
+
 def require_training_phases(path, target=False):
     """Static fail-closed admission; candidate code is never imported on the host."""
     import ast
@@ -226,7 +233,7 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
         from orchestrator.campaign_state import CampaignState
         from orchestrator.campaign_config import training_execution_estimate,remaining_wall
         campaign=CampaignState(store).get(config['campaign_id'])
-        estimate=training_execution_estimate(store,json.loads(campaign['config_json']))
+        estimate=training_execution_estimate(store,json.loads(campaign['config_json']),source_sha256=config.get('model_sha256'))
         if remaining_wall(campaign,time.time())<estimate['required_seconds']:
             raise ValueError('insufficient original campaign time for required training, preparation and evaluation')
     _, paths = load_manifest(manifest_path)
@@ -295,6 +302,7 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
     smoke_seconds = 0.0
     status = 'COMPLETED'
     failed_stage = ''
+    admission_error = ''
     for stage, stage_command, stage_limit in stages:
         if cancel and cancel():
             status = 'CANCELLED'
@@ -352,13 +360,31 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
                 con.execute('INSERT INTO events(run_id,time,kind,payload_json) VALUES(?,?,?,?)',
                             (run['run_id'], time.time(), 'CUDA_SMOKE_VALIDATION',
                              json.dumps({'status': status, 'seconds': smoke_seconds, 'timeout_seconds': stage_limit})))
+            if status=='COMPLETED' and config.get('plan_contract_version')=='experiment-plan-v3.0':
+                # Disposable smoke is measured, charged and never a scientific model.
+                # Admit the entire remaining comparison before its first full target.
+                from orchestrator.campaign_state import CampaignState
+                from orchestrator.campaign_config import training_execution_estimate,remaining_wall,remaining_plan_work
+                campaign=CampaignState(store).get(config['campaign_id'])
+                try:
+                    profile=read_training_throughput(job_dir)
+                    estimate=training_execution_estimate(store,json.loads(campaign['config_json']),
+                        source_sha256=config['model_sha256'],throughput=profile,critique=True,training_settings=config,
+                        **remaining_plan_work(store,config))
+                    with store.connect() as con:
+                        con.execute('INSERT INTO events(run_id,time,kind,payload_json) VALUES(?,?,?,?)',
+                            (run['run_id'],time.time(),'TRAINING_THROUGHPUT_PREFLIGHT',json.dumps({'profile':profile,'estimate':estimate})))
+                    if remaining_wall(campaign,time.time())<estimate['required_seconds']:
+                        raise ValueError('complete remaining comparison cannot fit original research deadline at measured end-to-end throughput; revise the plan or preparation, never shorten required learning')
+                except (ValueError,KeyError,TypeError,OSError) as exc:
+                    status='FAILED';admission_error='Recoverable planning/throughput admission: '+str(exc)
         if status != 'COMPLETED':
-            failed_stage = stage
+            failed_stage = 'throughput_admission' if admission_error else stage
             break
     elapsed = time.monotonic() - started
     if status == "FAILED":
         error_log = job_dir / ('cuda_smoke_stderr.log' if failed_stage == 'cuda_smoke' else 'stderr.log')
-        err_tail = error_log.read_bytes()[-20000:].lower()
+        err_tail = error_log.read_bytes()[-20000:].lower() if error_log.is_file() else b''
         if b"training-time budget exceeded" in err_tail:
             status = "TIMED_OUT"
         if b"out of memory" in err_tail or b"cuda error: out of memory" in err_tail:
@@ -404,7 +430,11 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
                 duration=timing.get('duration_seconds')
                 if duration is not None:
                     store.set_run_result(run['run_id'], {'training/duration_seconds':duration,'training/timing_verified':float(timing.get('verified',False))}, gpu_seconds=charged, artifact_dir=str(job_dir))
-            if failed_stage == 'cuda_smoke':
+            if failed_stage == 'throughput_admission':
+                store.set_run_result(run['run_id'], {'validation/cuda_smoke_passed':1,
+                    'validation/cuda_smoke_seconds':smoke_seconds,'validation/throughput_admitted':0},
+                    gpu_seconds=charged,artifact_dir=str(job_dir))
+            elif failed_stage == 'cuda_smoke':
                 store.set_run_result(run['run_id'], {'validation/cuda_smoke_passed': 0,
                     'validation/cuda_smoke_seconds': smoke_seconds}, gpu_seconds=charged, artifact_dir=str(job_dir))
             else:
@@ -415,6 +445,7 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
                 reason = f"CUDA smoke validation {status}:\n{log.read_text(errors='replace')[-8000:]}"
             elif (job_dir / 'stderr.log').is_file():
                 reason += '\n' + (job_dir / 'stderr.log').read_text(errors='replace')[-8000:]
+            if admission_error:reason=admission_error
             if config.get('plan_contract_version')=='experiment-plan-v3.0' and (job_dir/'training_receipt.json').is_file():
                 try:
                     certify_completed_learning(store,run,job_dir)

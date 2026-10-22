@@ -350,7 +350,8 @@ def add_research_proposals(store, prompt, count=3, campaign=None, personal_mode=
                 cfg=json.loads(campaigns.get(cid)['config_json'])
                 estimate=training_execution_estimate(store,cfg,jobs=len(plan['arms'])*len(plan['seeds']),
                     newly_trained=sum(a['execution']=='train' for a in plan['arms'])*len(plan['seeds']),
-                    real_feedback=plan['evaluation']['real_development_feedback'],critique=True)
+                    real_feedback=plan['evaluation']['real_development_feedback'],critique=True,
+                    source_sha256='not-implemented-yet')
                 if estimate['required_seconds']>remaining['max_wall_seconds']:
                     raise ValueError('required-duration matrix cannot fit remaining research time including preparation/evaluation; revise the plan, not the target')
             if campaign and plan.get('resource_budget') and any(plan['resource_budget'][key] > allowance for key,allowance in remaining.items()):
@@ -615,7 +616,7 @@ def queue_candidate(store, hypothesis_id, candidate_id, category, stage, device,
         campaign_config = json.loads(campaign_row['config_json'])
     if effective_config and effective_config.get('plan_contract_version')=='experiment-plan-v3.0' and not frozen:
         from orchestrator.campaign_config import training_execution_estimate,remaining_wall
-        estimate=training_execution_estimate(store,campaign_config)
+        estimate=training_execution_estimate(store,campaign_config,source_sha256=sha256(module))
         if remaining_wall(campaign_row,__import__('time').time())<estimate['required_seconds']:
             raise ValueError('insufficient research time for required training plus preparation and evaluation')
     if campaign_config and time_based(campaign_config) and not frozen:

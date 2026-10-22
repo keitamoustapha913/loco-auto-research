@@ -95,8 +95,7 @@ New simplified campaigns generate version 3.0 plans with no `resource_budget`,
 allowance. The complete arm × seed matrix determines the jobs. Preparation,
 CUDA smoke validation, diagnostics and frozen real-development evaluation share
 only the campaign's original research deadline; each model's actual training has
-its separate required training-only target. Disposable smoke validation stops after two
-updates and exercises the diagnostic contracts; its weights never enter the scientific experiment.
+its separate required training-only target. For new v3 runs, disposable validation uses 32 updates with the actual pilot batch, fitting split and resolution, exercises diagnostic contracts and measures throughput; its weights never enter the scientific experiment. Legacy smoke remains two updates.
 
 Invalid plans return precise recoverable validation errors and use the existing
 ten-failure recovery policy; they do not terminate the campaign as `LIMIT_REACHED`.
@@ -110,8 +109,7 @@ New v3 plans declare `confirmation: true` only for confirmation studies. Trusted
 admission checks the existing promotion policy's seeds, controls and exact real metric
 keys before execution; exploration remains allowed without promotion eligibility.
 
-Before a target run, admission reserves its full learning target plus estimated
-preparation/diagnostic and feedback costs, using recent recorded stage durations.
+Before a target run, admission projects its full learning target through observed end-to-end throughput plus setup/diagnostic and feedback costs. Cancelled partial learning is included; CPU rates cannot certify CUDA throughput. New source estimates are preliminary until queued, matching-configuration preflight measures the whole remaining matrix.
 The complete arm/seed matrix must reasonably fit. These are scheduling estimates,
 not additional time limits; execution still shares the original campaign deadline.
 
@@ -227,9 +225,7 @@ suites with no successful test bodies (all skipped or xfailed) are rejected. CUD
 skip decorators belong on individual GPU tests rather than the entire test class.
 
 For autonomous CUDA pilots, the queued job first launches a disposable CUDA
-train/load/predict check on two authorized `train/good` images, requesting two
-optimizer steps, one epoch and batch size one at the pilot preprocessing size.
-The smoke stage has a maximum 30-second deadline within the original job timeout.
+train/load/predict check. New v3 throughput preflight requests 32 updates using the actual pilot fitting split, batch size and preprocessing, within the original campaign deadline. Legacy smoke requests two updates on two good images with batch size one and retains its original timeout.
 It verifies finite aligned predictions, checkpoint/state integrity and observed
 CUDA allocation/parameter placement. These checks are protocol diagnostics, not
 a proof of arbitrary candidate behavior. Smoke weights are never used for pilot
@@ -485,3 +481,11 @@ duplicate/conflicting requests and undeclared paired/output metrics are rejected
 Canonicalization is idempotent and occurs before plan hashing/registration;
 original agent responses remain in the audit history, and offline admission reports
 include the exact name changes and canonical plan.
+
+### Training throughput
+
+Training timing artifacts include bounded steady-update throughput samples and separate preparation, integrity, audit I/O, setup synchronization and post-learning synchronization costs. Preparation remains excluded from the required learning target. The model-state and checkpoint integrity checks remain unchanged.
+
+Candidates can use a bounded, immutable `DecodedTrainingCache` for invariant normal-training pixels only. Never cache stochastic edits, alter RNG/source order, or retain training images/features in inference state. New v3 queued preflight uses the pilot fitting split and batch size; after warmup it projects all remaining arms/seeds with an uncertainty margin before full-duration learning. An unfit comparison stays INCOMPLETE and returns recoverable planning evidence, not LIMIT_REACHED. All stages still share the original research deadline.
+
+See [measured throughput audit and CUDA verification limitations](deploy/TRAINING_THROUGHPUT.md).

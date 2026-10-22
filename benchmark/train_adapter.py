@@ -40,6 +40,36 @@ def canonical_diagnostic_measurement(catalog, name):
     return matches[0]
 
 
+class DecodedTrainingCache:
+    """Per-training decoded pixels only; never attach this cache to a predictor.
+
+    The caller's reader and source ordering are unchanged. The trusted runner has
+    already verified the good-only manifest and mounted its data read-only. Every
+    entry is immutable and bounded; stacking a batch creates separate writable data.
+    """
+    def __init__(self, max_bytes=128 * 2**20):
+        from collections import OrderedDict
+        if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 1:
+            raise ValueError('positive decoded-cache byte capacity required')
+        self.capacity=max_bytes;self.bytes=0;self.entries=OrderedDict()
+        self.hits=0;self.misses=0
+
+    def get(self, key, reader):
+        import numpy as np
+        if key in self.entries:
+            self.hits+=1;self.entries.move_to_end(key);return self.entries[key]
+        value=np.asarray(reader())
+        if value.dtype.hasobject:raise ValueError('decoded cache requires numeric pixels')
+        # Immutable bytes, not just a resettable NumPy writeable flag.
+        frozen=np.frombuffer(value.tobytes(order='C'),dtype=value.dtype).reshape(value.shape)
+        self.misses+=1
+        if frozen.nbytes<=self.capacity:
+            while self.bytes+frozen.nbytes>self.capacity:
+                _,old=self.entries.popitem(last=False);self.bytes-=old.nbytes
+            self.entries[key]=frozen;self.bytes+=frozen.nbytes
+        return frozen
+
+
 def validate_diagnostic_output(declaration, result, source_ids, paired_metrics=()):
     """One payload contract for cheap preflight, production and paired analysis."""
     import math
