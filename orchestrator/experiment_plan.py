@@ -100,7 +100,7 @@ def training_seed(arm, pair_seed):
 
 
 def campaign_timed(plan):
-    return plan.get('schema_version') in {'2.0','3.0'}
+    return plan.get('schema_version') in {'2.0','3.0','4.0'}
 
 
 def plan_schema(plan):
@@ -109,14 +109,14 @@ def plan_schema(plan):
         schema['properties']['schema_version']['const'] = plan['schema_version']
         schema['properties'].pop('resource_budget')
         schema['required'].remove('resource_budget')
-    if plan.get('schema_version')=='3.0':
+    if plan.get('schema_version') in {'3.0','4.0'}:
         schema['properties']['confirmation']={'type':'boolean'}
         schema['required'].append('confirmation')
     return schema
 
 
 def learning_controls(plan):
-    return ('batch_size','size') if plan.get('schema_version')=='3.0' else MATCHED_TRAINING_CONTROLS
+    return ('batch_size','size') if plan.get('schema_version') in {'3.0','4.0'} else MATCHED_TRAINING_CONTROLS
 
 
 def contract_version(plan):
@@ -156,9 +156,9 @@ def validate_plan(plan, hypothesis_id=None):
             if arm.get('fixed_checkpoint_seed') is not None:raise ValueError('training arm cannot pretend to be a fixed checkpoint')
             if arm['source_arm_id'] or arm['baseline_by_seed']:
                 raise ValueError('training arm cannot silently load a baseline')
-            if plan.get('schema_version')=='3.0' and set(settings)&{'steps','epochs','expected_optimizer_updates','expected_source_exposures'}:
+            if plan.get('schema_version') in {'3.0','4.0'} and set(settings)&{'steps','epochs','expected_optimizer_updates','expected_source_exposures'}:
                 raise ValueError('required-duration training cannot declare a fixed stopping schedule; declare phase/initial-block settings and use trusted progress')
-            for name in (('batch_size','size') if plan.get('schema_version')=='3.0' else REQUIRED_TRAINING_POSITIVE):
+            for name in (('batch_size','size') if plan.get('schema_version') in {'3.0','4.0'} else REQUIRED_TRAINING_POSITIVE):
                 if isinstance(settings.get(name), bool) or not isinstance(settings.get(name), int) or settings[name] < 1:
                     raise ValueError(f'explicit positive training {name} required')
             updates = settings.get('expected_optimizer_updates',0)
@@ -439,13 +439,17 @@ def comparison_result(plan, runs, feedback=None):
         for key, requested in [('optimizer_updates','expected_optimizer_updates'), ('source_exposures','expected_source_exposures')]:
             actual_count=run_metrics.get('protocol/'+key)
             expected_count = 0 if arm['execution']=='frozen' else cfg.get(requested)
-            dynamic = plan.get('schema_version')=='3.0' and arm['execution']=='train'
+            dynamic = plan.get('schema_version') in {'3.0','4.0'} and arm['execution']=='train'
             if (dynamic and (isinstance(actual_count,bool) or not isinstance(actual_count,(int,float)) or actual_count<1)) or (not dynamic and actual_count != expected_count):
                 missing.append('training count '+key)
-        if plan.get('schema_version')=='3.0' and arm['execution']=='train':
+        if plan.get('schema_version') in {'3.0','4.0'} and arm['execution']=='train':
             target=cfg.get('training_budget_seconds',0)
             if not target or run_metrics.get('training/duration_seconds',-1)<target or run_metrics.get('training/target_reached')!=1:
                 missing.append('required actual training duration not verified')
+            if plan.get('schema_version')=='4.0' and (cfg.get('training_completion_policy')!='elapsed-training-loop-v1' or
+                run_metrics.get('training/loop_elapsed_seconds')!=run_metrics.get('training/duration_seconds') or
+                run_metrics.get('training/timing_verified')!=1):
+                missing.append('elapsed training-loop timing definition not verified')
         actual_seed=training_seed(arm,seed)
         if cfg.get('seed') != actual_seed or run_metrics.get('protocol/seed') != actual_seed:
             missing.append('measured seed')
@@ -572,12 +576,12 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
         from orchestrator.campaign_config import time_based, plan_seconds, operation_cancelled
         if time_based(cfg) and plan_seconds(plan,cfg) > limits['max_wall_hours']*3600-usage['wall_seconds']:
             raise BudgetExceeded('complete frozen comparison plus evaluation and critique cannot fit remaining research duration')
-        if plan.get('schema_version')=='3.0':
+        if plan.get('schema_version') in {'3.0','4.0'}:
             from orchestrator.campaign_config import training_execution_estimate,remaining_wall
             estimate=training_execution_estimate(store,cfg,jobs=remaining_cells,
                 newly_trained=sum(a['execution']=='train' and not store.get_run(cell_run_id(campaign_id,plan,a['arm_id'],seed)) for a,seed in cells(plan)),
                 real_feedback=plan['evaluation']['real_development_feedback'],critique=True,
-                source_sha256=sha256(candidate_file(controller.REPO,plan['hypothesis_id'])) if any(a['execution']=='train' for a in plan['arms']) else None)
+                source_sha256=sha256(candidate_file(controller.REPO,plan['hypothesis_id'])) if any(a['execution']=='train' for a in plan['arms']) else None,loop_timed=plan.get('schema_version')=='4.0')
             campaigns.event(campaign_id,'TRAINING_TARGET_ADMISSION',plan_id=plan['plan_id'],estimate=estimate)
             if remaining_wall(campaigns.get(campaign_id),time.time())<estimate['required_seconds']:
                 raise ValueError('insufficient research time for complete required-duration matrix, preparation, evaluation and critique; revise plan, never shorten training')
@@ -585,7 +589,7 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
         module = candidate_file(controller.REPO, plan['hypothesis_id']) if train_arms or plan['diagnostics'] else None
         if train_arms and time_based(cfg):
             from orchestrator.experiment_runner import require_training_phases
-            require_training_phases(module,target=True) if plan.get('schema_version')=='3.0' else require_training_phases(module)
+            require_training_phases(module,target=True,loop=plan.get('schema_version')=='4.0') if plan.get('schema_version') in {'3.0','4.0'} else require_training_phases(module)
         source_hash = sha256(module) if module else ''
         trusted_files = ['orchestrator/autonomy.py','orchestrator/controller.py','orchestrator/experiment_plan.py',
                          'orchestrator/planning_contract.py','orchestrator/experiment_runner.py','orchestrator/sandbox.py','orchestrator/development_feedback.py',
@@ -676,7 +680,7 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
                 if plan['diagnostics']:
                     effective['diagnostic_provider'] = {'candidate_id':plan['hypothesis_id'],'source_sha256':source_hash}
                 candidate_id = origin['candidate_id']
-            if plan.get('schema_version')=='3.0':
+            if plan.get('schema_version') in {'3.0','4.0'}:
                 effective['paired_diagnostic_metrics']={d['diagnostic_id']:sorted({x['metric'] for x in plan['paired_comparisons'] if x['diagnostic_id']==d['diagnostic_id']}) for d in plan['diagnostics']}
             effective['trusted_source_sha256'] = trusted_hashes
             effective['data_pin'] = data_pin

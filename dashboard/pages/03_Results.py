@@ -33,7 +33,7 @@ with models_tab:
             development_result_card(selected_feedback)
             selected_run=next((r for r in runs if r['run_id']==selected_feedback['run_id']),{})
             duration=training_seconds(selected_run)
-            st.metric('Training duration', 'Unavailable' if duration is None else f'{duration:.1f} s')
+            st.metric('Training-loop duration', 'Unavailable' if duration is None else f'{duration:.1f} s')
             st.write('**Localization preview**')
             sample_index = st.number_input('Development sample',0,164,47,1,key='card_sample')
             try:

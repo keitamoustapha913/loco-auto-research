@@ -83,14 +83,14 @@ def read_training_throughput(job_dir):
     return json.loads(path.read_text())['training_throughput']
 
 
-def require_training_phases(path, target=False):
+def require_training_phases(path, target=False, loop=False):
     """Static fail-closed admission; candidate code is never imported on the host."""
     import ast
     tree=ast.parse(Path(path).read_text())
     if not any(isinstance(node,ast.FunctionDef) and node.name=='training_steps' for node in tree.body):
         raise ValueError('training-only budget cannot be verified: candidate lacks explicit training_steps interface; frozen source will not be rewritten')
-    if target and not any(isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='TRAINING_PROTOCOL' for t in n.targets) and isinstance(n.value,ast.Constant) and n.value.value=='required-training-target-v1' for n in tree.body):
-        raise ValueError('candidate must explicitly implement progress-aware required-training-target-v1; frozen schedules cannot be silently extended')
+    if target and not any(isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='TRAINING_PROTOCOL' for t in n.targets) and isinstance(n.value,ast.Constant) and n.value.value==('elapsed-training-loop-v1' if loop else 'required-training-target-v1') for n in tree.body):
+        raise ValueError('candidate must explicitly implement '+('elapsed-training-loop-v1 with TrainingLoopStart' if loop else 'progress-aware required-training-target-v1')+'; frozen schedules cannot be silently changed')
 
 
 def probe_candidate_interface(repo_root, module_file, good_root, runtime, candidate_id, timeout=20, cancel=None):
@@ -185,7 +185,7 @@ def verify_completed_learning(run, job_dir):
         receipt.get('good_manifest_sha256')!=run['manifest_sha256'] or receipt.get('training_timing')!=timing):
         raise ValueError('learning receipt provenance mismatch')
     if (timing.get('status')!='COMPLETED' or timing.get('verified') is not True or
-        timing.get('completion_policy')!='required-training-target-v1' or
+        timing.get('completion_policy')!=config.get('training_completion_policy','required-training-target-v1') or
         timing.get('duration_seconds',-1)<config.get('training_budget_seconds',float('inf'))):
         raise ValueError('learning target was not successfully completed')
     audit=receipt.get('training_audit',{})
@@ -229,11 +229,11 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
     from orchestrator.budgets import enforce
     config = json.loads(run['config_json'])
     enforce(store,campaign_id=config.get('campaign_id'),runtime=runtime)
-    if config.get('training_completion_policy')=='required-training-target-v1':
+    if config.get('training_completion_policy') in {'required-training-target-v1','elapsed-training-loop-v1'}:
         from orchestrator.campaign_state import CampaignState
         from orchestrator.campaign_config import training_execution_estimate,remaining_wall
         campaign=CampaignState(store).get(config['campaign_id'])
-        estimate=training_execution_estimate(store,json.loads(campaign['config_json']),source_sha256=config.get('model_sha256'))
+        estimate=training_execution_estimate(store,json.loads(campaign['config_json']),source_sha256=config.get('model_sha256'),loop_timed=config.get('training_completion_policy')=='elapsed-training-loop-v1')
         if remaining_wall(campaign,time.time())<estimate['required_seconds']:
             raise ValueError('insufficient original campaign time for required training, preparation and evaluation')
     _, paths = load_manifest(manifest_path)
@@ -283,7 +283,7 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
             pinned_source=bool(config.get('frozen_baseline')), diagnostic_file=diagnostic_file)
         # Bubblewrap clears its environment; no controller or Codex secrets enter.
         environment = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}
-    timeout = (max_job_seconds(config) if config.get('plan_contract_version') in {'experiment-plan-v2.0','experiment-plan-v3.0'} else
+    timeout = (max_job_seconds(config) if config.get('plan_contract_version') in {'experiment-plan-v2.0','experiment-plan-v3.0','experiment-plan-v4.0'} else
                min(max_job_seconds(config), int(config.get("timeout_seconds", max_job_seconds(config)))))
     stages = []
     if config.get('cuda_smoke_required'):
@@ -323,7 +323,7 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
                         status = "CANCELLED"
                         break
                     timing_file = job_dir / 'training_timing.json'
-                    if stage == 'pilot' and config.get('training_completion_policy')!='required-training-target-v1' and config.get('training_budget_seconds') and timing_file.is_file() and not timing_file.is_symlink():
+                    if stage == 'pilot' and config.get('training_completion_policy') not in {'required-training-target-v1','elapsed-training-loop-v1'} and config.get('training_budget_seconds') and timing_file.is_file() and not timing_file.is_symlink():
                         timing = read_training_timing(timing_file)
                         if timing.get('protocol')=='prepared-training-step-v1' and timing.get('status')=='TRAINING':
                             phase=timing.get('completed_steps')
@@ -360,7 +360,7 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
                 con.execute('INSERT INTO events(run_id,time,kind,payload_json) VALUES(?,?,?,?)',
                             (run['run_id'], time.time(), 'CUDA_SMOKE_VALIDATION',
                              json.dumps({'status': status, 'seconds': smoke_seconds, 'timeout_seconds': stage_limit})))
-            if status=='COMPLETED' and config.get('plan_contract_version')=='experiment-plan-v3.0':
+            if status=='COMPLETED' and config.get('plan_contract_version') in {'experiment-plan-v3.0','experiment-plan-v4.0'}:
                 # Disposable smoke is measured, charged and never a scientific model.
                 # Admit the entire remaining comparison before its first full target.
                 from orchestrator.campaign_state import CampaignState
@@ -369,7 +369,7 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
                 try:
                     profile=read_training_throughput(job_dir)
                     estimate=training_execution_estimate(store,json.loads(campaign['config_json']),
-                        source_sha256=config['model_sha256'],throughput=profile,critique=True,training_settings=config,
+                        source_sha256=config['model_sha256'],throughput=profile,critique=True,training_settings=config,loop_timed=config.get('training_completion_policy')=='elapsed-training-loop-v1',
                         **remaining_plan_work(store,config))
                     with store.connect() as con:
                         con.execute('INSERT INTO events(run_id,time,kind,payload_json) VALUES(?,?,?,?)',
@@ -400,7 +400,7 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
                     timing=read_training_timing(job_dir/'training_timing.json')
                     if timing.get('protocol')!='prepared-training-step-v1' or timing.get('verified') is not True or timing.get('status')!='COMPLETED':
                         raise ValueError('training-only budget cannot be verified from completed phase audit')
-                    if metrics.get('training/duration_seconds')!=timing['duration_seconds'] or ((timing['duration_seconds']<config['training_budget_seconds'] or timing.get('completion_policy')!='required-training-target-v1' or timing['duration_seconds']-config['training_budget_seconds']>timing.get('last_step_seconds',0)+1e-6) if config.get('training_completion_policy')=='required-training-target-v1' else timing['duration_seconds']>config['training_budget_seconds']):
+                    if metrics.get('training/duration_seconds')!=timing['duration_seconds'] or ((timing['duration_seconds']<config['training_budget_seconds'] or timing.get('completion_policy')!=config.get('training_completion_policy','required-training-target-v1') or timing['duration_seconds']-config['training_budget_seconds']>timing.get('last_iteration_seconds' if config.get('training_completion_policy')=='elapsed-training-loop-v1' else 'last_step_seconds',0)+1e-6) if config.get('training_completion_policy') in {'required-training-target-v1','elapsed-training-loop-v1'} else timing['duration_seconds']>config['training_budget_seconds']):
                         raise ValueError('training-only timing metric or deadline mismatch')
                 if not isinstance(metrics, dict):
                     raise ValueError('measurement metrics must be an object')
@@ -429,7 +429,12 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
             if timing:
                 duration=timing.get('duration_seconds')
                 if duration is not None:
-                    store.set_run_result(run['run_id'], {'training/duration_seconds':duration,'training/timing_verified':float(timing.get('verified',False))}, gpu_seconds=charged, artifact_dir=str(job_dir))
+                    partial={'training/duration_seconds':duration,'training/timing_verified':float(timing.get('verified',False))}
+                    if config.get('training_completion_policy')=='elapsed-training-loop-v1':
+                        partial.update({'training/loop_elapsed_seconds':timing.get('loop_elapsed_seconds',duration),
+                            'training/learning_seconds':timing.get('learning_seconds',0),
+                            'training/loop_overhead_seconds':max(0,duration-timing.get('learning_seconds',0))})
+                    store.set_run_result(run['run_id'], partial, gpu_seconds=charged, artifact_dir=str(job_dir))
             if failed_stage == 'throughput_admission':
                 store.set_run_result(run['run_id'], {'validation/cuda_smoke_passed':1,
                     'validation/cuda_smoke_seconds':smoke_seconds,'validation/throughput_admitted':0},
@@ -446,7 +451,7 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
             elif (job_dir / 'stderr.log').is_file():
                 reason += '\n' + (job_dir / 'stderr.log').read_text(errors='replace')[-8000:]
             if admission_error:reason=admission_error
-            if config.get('plan_contract_version')=='experiment-plan-v3.0' and (job_dir/'training_receipt.json').is_file():
+            if config.get('plan_contract_version') in {'experiment-plan-v3.0','experiment-plan-v4.0'} and (job_dir/'training_receipt.json').is_file():
                 try:
                     certify_completed_learning(store,run,job_dir)
                 except (ValueError,KeyError,TypeError,OSError) as exc:

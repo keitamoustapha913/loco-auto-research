@@ -204,7 +204,7 @@ def run(module_file, manifest_file, config, output):
                 raise ValueError(f'planned candidate must record integer training_audit.{name}')
         if training_audit['seed'] != config['seed'] or training_audit['optimizer_updates'] != len(observed):
             raise ValueError('observed optimizer updates or seed differ from training audit')
-        if config.get('training_completion_policy')=='required-training-target-v1':
+        if config.get('training_completion_policy') in {'required-training-target-v1','elapsed-training-loop-v1'}:
             timing=json.loads((output/'training_timing.json').read_text())
             if timing['completed_steps']!=len(observed) or timing['source_exposures']!=training_audit['source_exposures']:
                 raise ValueError('target optimizer/exposure audit differs from trusted learning steps')
@@ -370,7 +370,7 @@ def run(module_file, manifest_file, config, output):
             raise ValueError('normal assessment changed frozen predictor state')
         diagnostic_module = load_candidate('/diagnostics/model.py') if config.get('diagnostic_provider') else mod
         catalog=diagnostic_measurement_catalog(config.get('diagnostics', []))
-        if config.get('plan_contract_version')=='experiment-plan-v3.0' and config.get('execution_kind')=='train':
+        if config.get('plan_contract_version') in {'experiment-plan-v3.0','experiment-plan-v4.0'} and config.get('execution_kind')=='train':
             receipt={'version':'completed-learning-v1','phase':'diagnostics_ready',
                 'config_sha256':hashlib.sha256(json.dumps(config,sort_keys=True).encode()).hexdigest(),
                 'model_module_sha256':sha256_file(module_file),'good_manifest_sha256':manifest_fingerprint(manifest),
@@ -388,7 +388,7 @@ def run(module_file, manifest_file, config, output):
                     diagnostic_id=request['diagnostic_id'], frozen_normal_threshold=metrics['normal/threshold'],
                     assessment_source_ids=assessment_ids))
             paired=config.get('paired_diagnostic_metrics',{}).get(request['diagnostic_id'],[])
-            if config.get('plan_contract_version')=='experiment-plan-v3.0':
+            if config.get('plan_contract_version') in {'experiment-plan-v3.0','experiment-plan-v4.0'}:
                 validate_diagnostic_output(request,diagnostic,assessment_ids,paired)
             values = diagnostic.get('metrics', {}) if isinstance(diagnostic, dict) else {}
             if not set(request['required_metrics']).issubset(values):raise ValueError('diagnostic omitted required measurements')
@@ -414,11 +414,19 @@ def run(module_file, manifest_file, config, output):
     metrics['training/timing_verified']=float(timing_audit.get('verified', config.get('execution_kind')=='frozen'))
     if timing_audit.get('protocol')=='prepared-training-step-v1':
         metrics['training/phase_steps']=timing_audit['completed_steps']
-        if config.get('training_completion_policy')=='required-training-target-v1':
+        if config.get('training_completion_policy') in {'required-training-target-v1','elapsed-training-loop-v1'}:
             metrics['training/target_seconds']=config['training_budget_seconds']
             metrics['training/target_reached']=float(timing_audit['duration_seconds']>=config['training_budget_seconds'])
             metrics['training/overshoot_seconds']=timing_audit['overshoot_seconds']
+        if config.get('training_completion_policy')=='elapsed-training-loop-v1':
+            metrics['training/loop_elapsed_seconds']=timing_audit['loop_elapsed_seconds']
+            metrics['training/learning_seconds']=timing_audit['learning_seconds']
+            metrics['training/loop_overhead_seconds']=max(0,timing_audit['loop_elapsed_seconds']-timing_audit['learning_seconds'])
+            metrics['training/initialization_seconds']=timing_audit['execution_profile']['initial_preparation_seconds']
+            metrics['training/checkpoint_seconds']=timing_audit['execution_profile']['finalization_seconds']
     checkpoint = output / "checkpoint" / "model.pt"
+    if config.get('plan_contract_version')=='experiment-plan-v4.0' and config.get('execution_kind')=='frozen':
+        metrics.update({'training/loop_elapsed_seconds':0.,'training/learning_seconds':0.,'training/loop_overhead_seconds':0.})
     metrics["inference/checkpoint_mib"] = checkpoint.stat().st_size / 2**20
     try:
         import torch
@@ -438,7 +446,7 @@ def run(module_file, manifest_file, config, output):
     provenance = {"training_input_policy": "train/good only; real development images and masks never mounted",
                   "training_images": len(training_manifest['images']),
                   "training_manifest_fingerprint": manifest_fingerprint(training_manifest),
-                  "training_timing_protocol":timing_audit.get("protocol", "frozen-no-training"), "protocol_version": "2.0", "metric_evaluator_version": EVALUATOR_VERSION,
+                  "training_timing_definition":timing_audit.get("timing_definition","historical-unverified"), "training_timing_protocol":timing_audit.get("protocol", "frozen-no-training"), "protocol_version": "2.0", "metric_evaluator_version": EVALUATOR_VERSION,
                   "evaluation": evaluation, "python_version": sys.version.split()[0],
                   "development_calibration_count": len(calibrate_paths), "normal_assessment_count": len(score_paths),
                   "dependencies_pyproject_sha256": sha256_file(Path(__file__).resolve().parents[1] / "pyproject.toml"),

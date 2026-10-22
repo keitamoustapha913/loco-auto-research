@@ -64,7 +64,7 @@ def live_home():
         used = autonomous['usage']
         elapsed = (autonomous.get('ended_at') or time.time())-autonomous['created_at']
         actual_training = campaign_training_seconds(autonomous,runs)
-        st.caption(f"Campaign: {autonomous['name']} · Research elapsed {format_duration(elapsed)} · Measured training {format_duration(actual_training)}")
+        st.caption(f"Campaign: {autonomous['name']} · Research elapsed {format_duration(elapsed)} · Training-loop elapsed {format_duration(actual_training)}")
         if autonomous.get('current_hypothesis'):
             label = 'Current hypothesis' if autonomous['status'] in {'RUNNING', 'PAUSED', 'STOPPING'} else 'Last hypothesis'
             st.write(f"**{label}:** {autonomous['current_hypothesis'].replace('_', ' ')}")

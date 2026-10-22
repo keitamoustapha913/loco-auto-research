@@ -7,10 +7,11 @@ from orchestrator.mlflow_tracker import enqueue_run_tracking, sync_outbox
 
 def test_mlflow_outbox_sync_with_fake_client(tmp_path, monkeypatch):
     store=StateStore(tmp_path/'ledger.sqlite')
-    rid=store.create_run('h','toy_normal_ae','fixture',config={'size':64})
+    rid=store.create_run('h','toy_normal_ae','fixture',config={'size':64,'training_completion_policy':'elapsed-training-loop-v1'})
     for status in ('IMPLEMENTED','VALIDATED','QUEUED','RUNNING'):
         store.transition(rid,status)
-    store.set_run_result(rid, {'dev_synthetic/pixel_auroc':0.75})
+    store.set_run_result(rid, {'dev_synthetic/pixel_auroc':0.75,'training/loop_elapsed_seconds':900,
+        'training/duration_seconds':900,'training/learning_seconds':600,'training/loop_overhead_seconds':300})
     store.transition(rid,'COMPLETED')
     enqueue_run_tracking(store,rid)
     with store.connect() as con:
@@ -39,6 +40,8 @@ def test_mlflow_outbox_sync_with_fake_client(tmp_path, monkeypatch):
     assert store.get_run(rid)['mlflow_run_id']=='fake-run'
     assert store.pending_tracking()==[]
     assert any(c[0]=='metric' for c in calls)
+    assert any(c[0]=='tag' and c[1][1]=='training.duration_semantics' and 'elapsed_training_loop' in c[1][2] for c in calls)
+    assert {c[1][1] for c in calls if c[0]=='metric'}>={'training/loop_elapsed_seconds','training/learning_seconds','training/loop_overhead_seconds'}
     assert any(c[0]=='tag' and c[1][1]=='research.retention_id' for c in calls)
     assert any(c[0]=='dictionary' and c[1][2]=='retention/model_record.json' for c in calls)
     assert sync_outbox(store)['delivered']==0

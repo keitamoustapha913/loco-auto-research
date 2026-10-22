@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+from dashboard.campaign_timing import training_seconds
 from dashboard.data_access import get_mlflow_url
 from dashboard.presentation import METRICS, classify_run, format_date, format_duration, format_metric, metric_value
 
@@ -19,7 +20,7 @@ def run_details(run: dict, *, compact=False):
         st.error(f"Run failed: {run['error']}")
     columns = st.columns(3)
     columns[0].metric("Status", str(run.get("status") or "Unknown").title())
-    columns[1].metric("GPU time", format_duration(run.get("gpu_seconds")))
+    columns[1].metric("Training-loop duration", format_duration(training_seconds(run)))
     columns[2].metric("Inference latency", format_metric(metric_value(run, "inference/e2e_ms_p95"), "ms"))
     if not compact:
         st.write("**Research hypothesis:**", str(run.get("hypothesis_id") or "—").replace("_", " "))
@@ -38,6 +39,10 @@ def run_details(run: dict, *, compact=False):
                     st.metric(label, format_metric(metric_value(run, key), kind), help=help_text)
         st.caption("Synthetic measurements describe development examples only; no official LOCO score is shown here.")
     with st.expander("Technical provenance"):
+        st.write("Training timing definition:", (run.get("config") or {}).get("training_completion_policy", "historical original definition"))
+        st.write("Original training measurement:", format_duration((run.get("metrics") or {}).get("training/duration_seconds")))
+        st.write("Learning computation (diagnostic):", format_duration((run.get("metrics") or {}).get("training/learning_seconds")))
+        st.write("GPU-slot usage (diagnostic):", format_duration(run.get("gpu_seconds")))
         st.write("Run ID:", run.get("run_id") or "—")
         st.write("Git commit:", run.get("git_sha") or "—")
         st.write("Dataset fingerprint:", run.get("manifest_sha256") or "—")

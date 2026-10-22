@@ -65,7 +65,7 @@ def operation_cancelled(campaigns, campaign_id):
 
 def plan_seconds(plan, config):
     """Conservative admission allowance, not a change to a frozen plan."""
-    if plan.get('schema_version') in {'2.0','3.0'}:return 0  # No independent plan reservation.
+    if plan.get('schema_version') in {'2.0','3.0','4.0'}:return 0  # No independent plan reservation.
     if time_based(config):return plan['resource_budget']['max_wall_seconds']
     jobs = len(plan['arms']) * len(plan['seeds'])
     feedback = config['research'].get('feedback_cpu_timeout_seconds', 600) if plan['evaluation']['real_development_feedback'] else 0
@@ -126,24 +126,27 @@ def remaining_plan_work(store, config):
 
 
 def training_execution_estimate(store, config, *, jobs=1, newly_trained=1, real_feedback=True,
-                                critique=False, source_sha256=None, throughput=None,training_settings=None):
+                                critique=False, source_sha256=None, throughput=None,training_settings=None,loop_timed=False):
     """End-to-end target projection, including cancelled partial-training evidence.
 
     Unknown implementations require measured queued preflight before full training.
     CPU observations never predict CUDA throughput. No extra execution deadline.
     """
     import json
-    evaluation=[];ratios=[];exact=[]
+    evaluation=[];ratios=[];exact=[];loop_extras=[]
     device=config['campaign'].get('gpu_device','cuda')
     with store.connect() as con:
         for row in con.execute("SELECT * FROM runs WHERE category=? ORDER BY created_at DESC LIMIT 100",(config['campaign']['dataset'],)):
             effective=json.loads(row['config_json']);metrics=json.loads(row['metrics_json'])
+            if not loop_timed and effective.get('training_completion_policy')=='elapsed-training-loop-v1':continue
             learning=metrics.get('training/duration_seconds')
             if effective.get('execution_kind')=='frozen' or effective.get('device','cpu')!=device:continue
             if (isinstance(learning,bool) or not isinstance(learning,(float,int)) or not math.isfinite(learning)
                 or learning<1 or not row['finished_at'] or not row['started_at']):continue
             wall=row['finished_at']-row['started_at']
             if wall<learning:continue
+            if loop_timed and effective.get('training_completion_policy')=='elapsed-training-loop-v1':
+                loop_extras.append(max(0,wall-learning))
             value=wall/learning*1.25
             ratios.append(value)
             if source_sha256 and effective.get('model_sha256')==source_sha256:exact.append(value)
@@ -163,14 +166,25 @@ def training_execution_estimate(store, config, *, jobs=1, newly_trained=1, real_
         ratio=1.;basis='unmeasured new source: preliminary learning floor only; queued throughput admission required';observed=False
     else:
         ratio=max([1.]+ratios);basis='preliminary dataset/device historical end-to-end observations, including cancelled runs';observed=bool(ratios)
-    setup=60.;feedback=max([180.]+evaluation) if real_feedback else 0.
+    # v4's target already includes repeated preparation, transfers, synchronization
+    # and integrity. Never multiply it by a historical arithmetic/wall ratio.
+    if loop_timed:
+        ratio=1.;basis='elapsed training-loop target; computation/preparation ratio is diagnostic only'
+    setup=max([60.]+loop_extras) if loop_timed else 60.
+    feedback=max([180.]+evaluation) if real_feedback else 0.
+    overshoot=0.
     if throughput:
         initial=throughput.get('initial_preparation_seconds',0)
         if isinstance(initial,(int,float)) and not isinstance(initial,bool) and math.isfinite(initial):setup=max(setup,initial)
+        extra=throughput.get('non_loop_preflight_seconds',0)
+        if loop_timed and isinstance(extra,(int,float)) and not isinstance(extra,bool) and math.isfinite(extra):setup=max(setup,extra)
+        if loop_timed:
+            step=throughput.get('sampled_max_step_wall_seconds',0)
+            if isinstance(step,(int,float)) and not isinstance(step,bool) and math.isfinite(step):overshoot=max(0,step)
     target=config['limits']['training_minutes_per_experiment']*60
     return {'training_seconds_per_model':target,'execution_to_learning_ratio':ratio,
-            'projected_training_execution_seconds_per_model':target*ratio,
+            'projected_training_execution_seconds_per_model':target*ratio+overshoot,
             'preparation_and_diagnostics_estimate_seconds':setup,'throughput_observed':observed,
             'feedback_estimate_seconds':feedback,'critique_estimate_seconds':90. if critique else 0.,
-            'required_seconds':newly_trained*target*ratio+jobs*(setup+feedback)+(90. if critique else 0.),
+            'required_seconds':newly_trained*(target*ratio+overshoot)+jobs*(setup+feedback)+(90. if critique else 0.),
             'basis':basis+'; scheduling estimates only, original campaign deadline unchanged'}

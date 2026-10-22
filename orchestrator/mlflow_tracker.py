@@ -94,6 +94,8 @@ def _sync_locked(store: StateStore, tracking_uri=None, max_events=100):
             if data.get('git_sha'):
                 client.set_tag(mlflow_run_id, 'git.commit', str(data['git_sha']))
             client.set_tag(mlflow_run_id, 'execution.gpu_seconds_semantics', 'exclusive_gpu_slot_wall_seconds')
+            if data.get('params',{}).get('training_completion_policy')=='elapsed-training-loop-v1':
+                client.set_tag(mlflow_run_id,'training.duration_semantics','elapsed_training_loop; initialization/preflight/saving/evaluation excluded')
             artifact_dir = Path(data.get("artifact_dir") or "/nonexistent").resolve()
             allowed_root = (Path(os.getenv('LOCO_RUNTIME', '.runtime')).resolve() / 'jobs' / run_id).resolve()
             if artifact_dir != allowed_root:

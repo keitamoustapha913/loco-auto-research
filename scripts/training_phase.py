@@ -1,4 +1,4 @@
-"""Explicit training-only boundary; candidate setup/batch I/O/finalization stay outside.
+"""Versioned timing: v4 elapsed loop, historical learning-only contracts unchanged.
 
 A candidate supplies training_steps(config, train_manifest, output_dir), a generator
 which yields TrainingStep descriptors and returns checkpoint metadata. The trusted
@@ -16,6 +16,13 @@ import time
 
 VERSION = 'prepared-training-step-v1'
 TARGET_VERSION = 'required-training-target-v1'
+LOOP_VERSION = 'elapsed-training-loop-v1'
+
+
+@dataclass(frozen=True)
+class TrainingLoopStart:
+    """Explicit boundary after initialization and before the first batch fetch."""
+    objective: object
 
 
 class TrainingTimeUnverifiable(ValueError):
@@ -42,7 +49,7 @@ class TrainingStep:
 
 
 class TrainingClock:
-    def __init__(self, path, budget, synchronize=lambda: None, *, target=False):
+    def __init__(self, path, budget, synchronize=lambda: None, *, target=False, loop=False):
         if budget is not None and (isinstance(budget,bool) or not isinstance(budget,(int,float)) or not math.isfinite(budget) or budget<=0):
             raise ValueError('invalid trusted training-only deadline')
         self.path=Path(path);self.budget=budget;self.synchronize=synchronize;self.target=target
@@ -54,22 +61,33 @@ class TrainingClock:
         self.costs=dict(preparation_seconds=0.,integrity_seconds=0.,validation_seconds=0.,
                         audit_io_seconds=0.,setup_sync_seconds=0.,learning_sync_seconds=0.)
         self.initial_preparation_seconds=0.;self.finalization_seconds=0.
+        self.loop_mode=loop;self.loop_started=None;self.loop_finished=None;self.last_boundary=None
+        self.last_iteration_seconds=0.
         self.publish()
+
+    def duration(self):
+        if not self.loop_mode:return self.elapsed
+        if self.loop_started is None:return 0.
+        return (self.loop_finished if self.loop_finished is not None else time.perf_counter())-self.loop_started
 
     def publish(self):
         started=time.perf_counter()
         data={'protocol':VERSION,'status':self.status,'verified':self.verified,
-              'duration_seconds':self.elapsed,'budget_seconds':self.budget,
-              'completion_policy':TARGET_VERSION if self.target else 'maximum',
+              'duration_seconds':self.duration(),'budget_seconds':self.budget,
+              'learning_seconds':self.elapsed,'loop_elapsed_seconds':self.duration() if self.loop_mode else None,
+              'timing_definition':LOOP_VERSION if self.loop_mode else 'learning-computation',
+              'completion_policy':LOOP_VERSION if self.loop_mode else TARGET_VERSION if self.target else 'maximum',
               'target_seconds':self.budget if self.target else None,
               'source_exposures':self.exposures,'last_step_seconds':self.last_step_seconds,
-              'overshoot_seconds':max(0,self.elapsed-self.budget) if self.target else 0,
+              'overshoot_seconds':max(0,self.duration()-self.budget) if self.target else 0,
+              'last_iteration_seconds':self.last_iteration_seconds,
               'completed_steps':self.steps,'phase_started_monotonic':self.phase_started}
         data['execution_profile']={'version':'training-throughput-v1','costs':dict(self.costs),
             'initial_preparation_seconds':self.initial_preparation_seconds,
             'finalization_seconds':self.finalization_seconds,'observed_wall_seconds':started-self.created,
             'sampled_updates':len(self.samples),'sampled_learning_seconds':sum(s[0] for s in self.samples),
             'sampled_step_wall_seconds':sum(s[1] for s in self.samples),
+            'sampled_max_step_wall_seconds':max((s[1] for s in self.samples),default=0.),
             'semantics':'wall preparation/integrity/I-O excluded; post-learning CUDA sync included in learning; first four updates excluded from steady samples'}
         temporary=self.path.with_suffix('.tmp')
         temporary.write_text(json.dumps(data,allow_nan=False));temporary.replace(self.path)
@@ -123,9 +141,10 @@ def run_training_phases(module, config, manifest, output, *, budget=None, prefli
     from torch.nn.modules.module import register_module_forward_pre_hook
     device=torch.device(config.get('device','cpu'))
     synchronize=(lambda:torch.cuda.synchronize(device)) if device.type=='cuda' else (lambda:None)
-    target=config.get('training_completion_policy')==TARGET_VERSION and preflight_steps is None
+    loop=config.get('training_completion_policy')==LOOP_VERSION
+    target=config.get('training_completion_policy') in {TARGET_VERSION,LOOP_VERSION} and preflight_steps is None
     if target and budget is None:raise TrainingTimeUnverifiable('required training target is missing')
-    clock=TrainingClock(audit,budget,synchronize,target=target)
+    clock=TrainingClock(audit,budget,synchronize,target=target,loop=loop)
     # Guard explicit phase semantics, not self-reported candidate elapsed numbers.
     def io_guard(event,args):
         if clock.active and event in {'open','os.system','subprocess.Popen','os.rename','os.remove','os.mkdir'}:
@@ -138,16 +157,21 @@ def run_training_phases(module, config, manifest, output, *, budget=None, prefli
             raise TrainingTimeUnverifiable('gradient-enabled forward outside trusted training phase')
     original_sleep=time.sleep
     def guarded_sleep(seconds):
-        if target and clock.active:raise TrainingTimeUnverifiable('sleep cannot fill required learning time')
+        if (target and clock.active) or (loop and clock.loop_started is not None and clock.loop_finished is None):
+            raise TrainingTimeUnverifiable('sleep cannot fill required training duration')
         return original_sleep(seconds)
     time.sleep=guarded_sleep
     original_init=torch.nn.Module.__init__
     original_optimizer_init=torch.optim.Optimizer.__init__
     def module_init(model,*args,**kwargs):
         if clock.active:raise TrainingTimeUnverifiable('model initialization inside training step is forbidden')
+        if loop and clock.loop_started is not None and clock.loop_finished is None:
+            raise TrainingTimeUnverifiable('initialize model components before TrainingLoopStart')
         original_init(model,*args,**kwargs)
     def optimizer_init(optimizer,*args,**kwargs):
         if clock.active:raise TrainingTimeUnverifiable('optimizer initialization inside training step is forbidden')
+        if loop and clock.loop_started is not None and clock.loop_finished is None:
+            raise TrainingTimeUnverifiable('initialize optimizers before TrainingLoopStart')
         original_optimizer_init(optimizer,*args,**kwargs)
     optimizer_hook=register_optimizer_step_pre_hook(optimizer_guard)
     forward_hook=register_module_forward_pre_hook(forward_guard)
@@ -176,8 +200,8 @@ def run_training_phases(module, config, manifest, output, *, budget=None, prefli
             iteration_started=time.perf_counter()
             if target and config.get('research_deadline') is not None and time.time()>=config['research_deadline']:
                 raise TrainingBudgetExceeded('overall research deadline reached before training completion')
-            # Generator advance performs initialization, batch preparation, logging
-            # and checkpoint saving with no training timer running.
+            # Learning-computation timer is off here. The v4 loop clock counts
+            # batch work after TrainingLoopStart; initialization/finalization do not.
             section=time.perf_counter()
             expected=[(model,state_fingerprint(model)) for model in tracked]
             clock.costs['integrity_seconds']+=time.perf_counter()-section
@@ -185,24 +209,37 @@ def run_training_phases(module, config, manifest, output, *, budget=None, prefli
             try:step=next(iterator) if progress is None else iterator.send(progress)
             except StopIteration as stopped:
                 clock.finalization_seconds=time.perf_counter()-section
+                if loop:clock.loop_finished=clock.last_boundary
                 section=time.perf_counter()
                 check_unchanged(expected)
                 clock.costs['integrity_seconds']+=time.perf_counter()-section
                 if not clock.steps:raise TrainingTimeUnverifiable('no explicit training steps were executed')
-                if target and clock.elapsed<budget:
-                    raise TrainingTargetIncomplete(f'training ended prematurely: {clock.elapsed:.6f} of required {budget:.6f} actual learning seconds')
+                if target and clock.duration()<budget:
+                    raise TrainingTargetIncomplete(f'training ended prematurely: {clock.duration():.6f} of required {budget:.6f} '+('training-loop elapsed seconds' if loop else 'actual learning seconds'))
                 metadata=stopped.value
                 clock.status='COMPLETED';clock.verified=True;clock.publish()
-                return metadata,clock.elapsed
+                return metadata,clock.duration()
             preparation=time.perf_counter()-section;clock.costs['preparation_seconds']+=preparation
-            if not clock.steps:clock.initial_preparation_seconds=preparation
+            if isinstance(step,TrainingLoopStart):
+                if not loop or clock.loop_started is not None or not isinstance(step.objective,torch.nn.Module):
+                    raise TrainingTimeUnverifiable('invalid or repeated training-loop start boundary')
+                check_unchanged(expected)
+                tracked.append(step.objective)
+                synchronize()  # Drain one-time initialization before starting the loop.
+                clock.initial_preparation_seconds=preparation
+                clock.costs['preparation_seconds']-=preparation
+                clock.loop_started=time.perf_counter();clock.publish()
+                continue
+            if loop and clock.loop_started is None:
+                raise TrainingTimeUnverifiable('elapsed training loop requires TrainingLoopStart(objective) before the first batch')
+            if not clock.steps and not loop:clock.initial_preparation_seconds=preparation
             section=time.perf_counter()
             check_unchanged(expected)
             clock.costs['integrity_seconds']+=time.perf_counter()-section
             section=time.perf_counter()
             if target and config.get('research_deadline') is not None and time.time()>=config['research_deadline']:
                 raise TrainingBudgetExceeded('overall research deadline reached during preparation')
-            if (target and clock.elapsed>=budget) or (preflight_steps is not None and clock.steps>=preflight_steps):
+            if (target and ((clock.loop_finished is not None) if loop else clock.elapsed>=budget)) or (preflight_steps is not None and clock.steps>=preflight_steps):
                 raise TrainingTimeUnverifiable('target reached: generator must finalize and return, not request another update')
             if target and (isinstance(getattr(step,'source_exposures',None),bool) or not isinstance(getattr(step,'source_exposures',None),int) or step.source_exposures<1):
                 raise TrainingTimeUnverifiable('target training must declare positive prepared source_exposures per update')
@@ -243,9 +280,14 @@ def run_training_phases(module, config, manifest, output, *, budget=None, prefli
                 else:
                     closure();step.optimizer.step()
             clock.measure(update);clock.steps+=1
+            boundary=time.perf_counter();clock.last_boundary=boundary
+            clock.last_iteration_seconds=boundary-iteration_started
+            elapsed=boundary-clock.loop_started if loop else clock.elapsed
+            reached=clock.steps>=preflight_steps if preflight_steps is not None else elapsed>=budget if budget is not None else False
+            if loop and reached:clock.loop_finished=boundary
             if target or preflight_steps is not None:
                 clock.exposures+=step.source_exposures or 0
-                progress={'elapsed_seconds':clock.elapsed,'target_seconds':budget,'target_reached':clock.steps>=preflight_steps if preflight_steps is not None else clock.elapsed>=budget,
+                progress={'elapsed_seconds':elapsed,'target_seconds':budget,'target_reached':reached,
                           'optimizer_updates':clock.steps,'source_exposures':clock.exposures}
             clock.publish()
             if clock.steps>4:clock.samples.append((clock.last_step_seconds,time.perf_counter()-iteration_started))

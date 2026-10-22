@@ -28,7 +28,7 @@ def run(module_file, manifest_file, config, output):
     output.mkdir(parents=True, exist_ok=False)
     smoke_config = dict(config, steps=2, epochs=1, batch_size=1, synthetic_evaluation=False,
                         validation_smoke=True, expected_optimizer_updates=2, expected_source_exposures=2)
-    throughput_check=config.get('plan_contract_version')=='experiment-plan-v3.0'
+    throughput_check=config.get('plan_contract_version') in {'experiment-plan-v3.0','experiment-plan-v4.0'}
     training_entries=[e for e in manifest['images'] if e['split']=='train/good' and e['category']==config['category']] if throughput_check else [e for e,_ in selected]
     if throughput_check:
         # A batch-one/two-source fixture cannot certify the pilot's throughput.
@@ -48,7 +48,7 @@ def run(module_file, manifest_file, config, output):
                         if config.get('plan_contract_version')=='experiment-plan-v2.0' else None)
         smoke_config.pop('training_budget_seconds',None)
         run_training_phases(module,smoke_config,smoke_manifest,checkpoint_dir,budget=smoke_budget,
-                            preflight_steps=32 if config.get('plan_contract_version')=='experiment-plan-v3.0' else None)
+                            preflight_steps=32 if config.get('plan_contract_version') in {'experiment-plan-v3.0','experiment-plan-v4.0'} else None)
     else:
         module.train(smoke_config, smoke_manifest, checkpoint_dir)
     training_cuda_bytes = torch.cuda.max_memory_allocated()
@@ -95,7 +95,7 @@ def run(module_file, manifest_file, config, output):
                'device': str(config['device']), 'wall_seconds': time.monotonic()-started,
                'training_peak_cuda_allocated_bytes': training_cuda_bytes,
                'checkpoint_unchanged': True, 'pilot_reuses_smoke_weights': False}
-    if config.get('plan_contract_version')=='experiment-plan-v3.0':
+    if config.get('plan_contract_version') in {'experiment-plan-v3.0','experiment-plan-v4.0'}:
         timing=json.loads((output/'training_timing.json').read_text())
         summary['optimizer_step_request']=32
         summary['training_throughput']=timing['execution_profile']
@@ -103,6 +103,8 @@ def run(module_file, manifest_file, config, output):
         summary['training_throughput']['device']=str(config['device'])
         summary['training_throughput']['batch_size']=config['batch_size']
         summary['training_throughput']['size']=config['size']
+        if config.get('plan_contract_version')=='experiment-plan-v4.0':
+            summary['training_throughput']['non_loop_preflight_seconds']=max(0,summary['wall_seconds']-timing['loop_elapsed_seconds'])
         summary['training_throughput']['measurement_scope']='disposable 32-update pilot-configuration probe; actual fitting split/batch/masks/hash/integrity; not full-run performance proof'
     (output / 'summary.json').write_text(json.dumps(summary, sort_keys=True))
     return summary

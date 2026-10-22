@@ -37,16 +37,15 @@ Bubblewrap risk acceptance remains false unless explicitly authorized by the ope
 - **Research hours** count all elapsed time: agents, implementation, training, CPU
   evaluation, critique, waiting and pauses. Restart/resume does not reset the clock.
   Each independently authorized new campaign receives its own clock.
-- **Training minutes** count only prepared model forward/loss, backward and optimizer
-  updates. Model/optimizer initialization, batch loading/preparation/transfers, checkpoint
-  saving, coding, calibration, evaluation and critique are excluded. CUDA setup work is
-  synchronized before timing; queued learning kernels finish inside the measured phase.
-  For newly generated v3 plans this is a **required target**, not just a ceiling.
-  Every successful new model learns for the full configured duration. Early-ending or
-  unverifiable procedures fail; no sleep, dummy work or automatic model restart fills time.
-  The final synchronized optimizer update finishes before stopping, so measured overshoot
-  is at most that last update. Actual duration, updates, source presentations and overshoot
-  are recorded. Frozen v1/v2 plans keep their original schedules and ceiling semantics.
+- **Training minutes** mean elapsed training-loop time for new v4 plans: 15 minutes
+  is approximately 900 seconds, beginning immediately before the first batch fetch.
+  In-loop loading, augmentation, transfers, forward/loss/backward/optimizer updates,
+  integrity checks, synchronization and bookkeeping all count. One-time model/cache
+  initialization, preflight, final saving and evaluation are excluded from this clock
+  and remain inside the overall campaign deadline. Stop after the first synchronized
+  optimizer update reaching the target. Finite early completion fails; idle/dummy work
+  cannot fill the target. Learning-computation seconds are diagnostic only. Frozen
+  v1/v2/v3 plans retain their original schedules and timing definitions.
 - **Previous best** verifies eligible retained references for the same dataset and
   supplies accumulated evidence. Incompatible evaluation cohorts stay separate.
   Missing eligible references cause a clear error; choose `new` for an independent
@@ -55,7 +54,7 @@ Bubblewrap risk acceptance remains false unless explicitly authorized by the ope
   deleting history or automatically starting from their weights. Past findings remain
   available as scientific evidence.
 
-The existing scheduler serializes jobs. Trusted code enforces the required learning target and
+The existing scheduler serializes jobs. Trusted code enforces the required elapsed-loop target and
 original campaign deadline, estimates time for complete comparisons, normal-only CPU feedback
 and critique, and stops rather than reducing arms, seeds or training settings. Frozen
 scientific plans retain their original schedules and resource ceilings. Incomplete work
@@ -90,12 +89,12 @@ failed/time-limited learning attempts, and synchronized through the existing out
 
 ### Scientific plan timing
 
-New simplified campaigns generate version 3.0 plans with no `resource_budget`,
+New simplified campaigns generate version 4.0 plans with no `resource_budget`,
 `max_job_seconds`, `max_gpu_seconds`, independent plan deadline, or job-count
 allowance. The complete arm × seed matrix determines the jobs. Preparation,
 CUDA smoke validation, diagnostics and frozen real-development evaluation share
 only the campaign's original research deadline; each model's actual training has
-its separate required training-only target. For new v3 runs, disposable validation uses 32 updates with the actual pilot batch, fitting split and resolution, exercises diagnostic contracts and measures throughput; its weights never enter the scientific experiment. Legacy smoke remains two updates.
+its separate required elapsed training-loop target. For new v4 runs, disposable validation uses 32 updates with the actual pilot batch, fitting split and resolution, exercises diagnostic contracts and measures throughput; its weights never enter the scientific experiment. Legacy smoke remains two updates.
 
 Invalid plans return precise recoverable validation errors and use the existing
 ten-failure recovery policy; they do not terminate the campaign as `LIMIT_REACHED`.
@@ -105,11 +104,11 @@ The checked-in v1 schemas remain compatibility definitions for frozen historical
 plans; the controller compiles the new provider/admission schema deterministically.
 Previously frozen plans and their explicit resource restrictions are not rewritten.
 
-New v3 plans declare `confirmation: true` only for confirmation studies. Trusted
+New v4 plans declare `confirmation: true` only for confirmation studies. Trusted
 admission checks the existing promotion policy's seeds, controls and exact real metric
 keys before execution; exploration remains allowed without promotion eligibility.
 
-Before a target run, admission projects its full learning target through observed end-to-end throughput plus setup/diagnostic and feedback costs. Cancelled partial learning is included; CPU rates cannot certify CUDA throughput. New source estimates are preliminary until queued, matching-configuration preflight measures the whole remaining matrix.
+Before a target run, admission allocates the full elapsed-loop target to every newly trained cell, plus setup, checkpoint, diagnostics, feedback and critique estimates. Repeated batch preparation is already inside the loop target and is not multiplied by a historical wall/arithmetic ratio. Matching-configuration preflight informs efficiency and non-loop overhead; CPU rates cannot certify CUDA throughput.
 The complete arm/seed matrix must reasonably fit. These are scheduling estimates,
 not additional time limits; execution still shares the original campaign deadline.
 
@@ -119,20 +118,20 @@ before certifying a failed diagnostic run's checkpoint. A new explicit frozen re
 plan can reuse that exact source/checkpoint/configuration; the original run stays FAILED.
 Missing evidence, altered weights/configuration or incomplete learning prohibit reuse.
 
-### Training-only candidate contract
+### Versioned training-loop candidate contract
 
-Time-based learning requires `training_steps(config, allowed_train_manifest, output_dir)`:
-a generator that yields `scripts.training_phase.TrainingStep` objects. Initialize the
-objective (`torch.nn.Module` returning a scalar differentiable loss) and optimizer before
-yielding, prepare device-resident inputs between yields, and save checkpoint/metadata
-after the final yield. Return checkpoint metadata from the generator. For v3 declare `TRAINING_PROTOCOL = "required-training-target-v1"`. Each yield receives
-trusted progress via generator.send: elapsed_seconds, target_seconds, target_reached,
-optimizer_updates and source_exposures. Declare prepared source_exposures on every
-TrainingStep; continue until target_reached, then finalize and save the actual counters.
-Legacy finite generators are never silently extended. The trusted loop
-runs forward/loss, backward and the optimizer update; it never times generator setup or
-finalization. Closure-based optimizers are supported through explicit `use_closure=True`.
-The existing train/load/predict contract is retained for legacy callers and inference.
+New v4 candidates declare `TRAINING_PROTOCOL = "elapsed-training-loop-v1"` and
+implement the existing `training_steps(config, allowed_train_manifest, output_dir)`
+generator. Initialize model, optimizer and invariant decoded-data cache first. Yield
+`TrainingLoopStart(objective)` before the first batch-fetch iteration. Then yield
+prepared `TrainingStep` objects with positive source_exposures and continue until
+trusted progress.target_reached. Its elapsed_seconds is loop time; optimizer_updates
+and source_exposures are actual counters. Save and return metadata only after the
+last update. A missing explicit boundary or finite early schedule fails closed.
+The trusted loop still executes real forward/loss, backward and optimizer updates;
+CUDA completion is synchronized. Old contracts remain available for frozen plans.
+The existing train/load/predict contract remains available for legacy inference.
+
 
 The worker rejects I/O, model/optimizer creation within the learning step and optimizer
 updates or gradient-enabled training forwards outside it. Inputs must be prepared tensors
@@ -225,7 +224,7 @@ suites with no successful test bodies (all skipped or xfailed) are rejected. CUD
 skip decorators belong on individual GPU tests rather than the entire test class.
 
 For autonomous CUDA pilots, the queued job first launches a disposable CUDA
-train/load/predict check. New v3 throughput preflight requests 32 updates using the actual pilot fitting split, batch size and preprocessing, within the original campaign deadline. Legacy smoke requests two updates on two good images with batch size one and retains its original timeout.
+train/load/predict check. New v4 throughput preflight requests 32 updates using the actual pilot fitting split, batch size and preprocessing, within the original campaign deadline. Legacy smoke requests two updates on two good images with batch size one and retains its original timeout.
 It verifies finite aligned predictions, checkpoint/state integrity and observed
 CUDA allocation/parameter placement. These checks are protocol diagnostics, not
 a proof of arbitrary candidate behavior. Smoke weights are never used for pilot
@@ -486,6 +485,10 @@ include the exact name changes and canonical plan.
 
 Training timing artifacts include bounded steady-update throughput samples and separate preparation, integrity, audit I/O, setup synchronization and post-learning synchronization costs. Preparation remains excluded from the required learning target. The model-state and checkpoint integrity checks remain unchanged.
 
-Candidates can use a bounded, immutable `DecodedTrainingCache` for invariant normal-training pixels only. Never cache stochastic edits, alter RNG/source order, or retain training images/features in inference state. New v3 queued preflight uses the pilot fitting split and batch size; after warmup it projects all remaining arms/seeds with an uncertainty margin before full-duration learning. An unfit comparison stays INCOMPLETE and returns recoverable planning evidence, not LIMIT_REACHED. All stages still share the original research deadline.
+Candidates can use a bounded, immutable `DecodedTrainingCache` for invariant normal-training pixels only. Never cache stochastic edits, alter RNG/source order, or retain training images/features in inference state. New v4 queued preflight uses the pilot fitting split and batch size; after warmup it projects all remaining arms/seeds with an uncertainty margin before full-duration learning. An unfit comparison stays INCOMPLETE and returns recoverable planning evidence, not LIMIT_REACHED. All stages still share the original research deadline.
 
 See [measured throughput audit and CUDA verification limitations](deploy/TRAINING_THROUGHPUT.md).
+
+### Authoritative elapsed-loop timing (v4)
+
+New runs record `training/loop_elapsed_seconds` as the authoritative duration, `training/learning_seconds` and `training/loop_overhead_seconds` as efficiency diagnostics, and `training/initialization_seconds` / `training/checkpoint_seconds` separately. For v4 only, `training/duration_seconds` aliases loop elapsed; historical values are never rewritten. Streamlit displays loop time and overall research time, with diagnostic breakdowns expandable. Historical arithmetic-only records are excluded from loop totals. Six newly trained models require 90 minutes of loop execution plus non-loop costs; admission must fit the full matrix within the remaining campaign deadline. See [the versioned timing contract](deploy/TRAINING_LOOP_TIMING.md).

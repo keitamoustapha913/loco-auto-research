@@ -237,7 +237,7 @@ def test_implementation_does_not_start_if_complete_plan_will_not_fit(tmp_path,mo
 def test_training_display_does_not_depend_on_optional_recent_ui_changes():
     from dashboard.campaign_timing import campaign_training_seconds
     campaign={'id':'selected'}
-    runs=[{'run_id':'a','config':{'campaign_id':'selected'},'metrics':{'training/duration_seconds':12}},
+    runs=[{'run_id':'a','config':{'campaign_id':'selected'},'metrics':{'training/loop_elapsed_seconds':12,'training/learning_seconds':2}},
           {'run_id':'b','config':{'campaign_id':'other'},'metrics':{'training/duration_seconds':99}}]
     assert campaign_training_seconds(campaign,runs)==12
 
@@ -258,14 +258,14 @@ def test_results_page_shows_training_and_research_duration(tmp_path,monkeypatch)
     store=StateStore(tmp_path/'ledger.sqlite');c=CampaignState(store);cid=c.create(simple())
     rid=store.create_run('fixture-hypothesis','fixture-candidate','juice_bottle',config={'campaign_id':cid})
     for status in ['IMPLEMENTED','VALIDATED','QUEUED','RUNNING']:store.transition(rid,status)
-    store.set_run_result(rid,{'training/duration_seconds':12.5},gpu_seconds=99,artifact_dir=tmp_path/'artifact')
+    store.set_run_result(rid,{'training/loop_elapsed_seconds':12.5,'training/duration_seconds':12.5},gpu_seconds=99,artifact_dir=tmp_path/'artifact')
     store.transition(rid,'COMPLETED');c.attach_run(cid,rid)
     monkeypatch.setenv('LOCO_RUNTIME',str(tmp_path));monkeypatch.setenv('LOCO_LEDGER',str(store.path))
     page=Path(__file__).parents[1]/'dashboard/pages/03_Results.py'
     rendered=AppTest.from_file(str(page),default_timeout=10).run()
     assert not rendered.exception
     metrics={item.label:item.value for item in rendered.metric}
-    assert 'Research duration' in metrics and 'Measured training duration' in metrics
+    assert 'Research duration' in metrics and 'Training-loop duration' in metrics
     assert 'GPU-slot time' not in metrics and 'Codex calls' not in metrics
 
 

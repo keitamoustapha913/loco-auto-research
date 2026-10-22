@@ -104,7 +104,7 @@ def test_cuda_synchronization_is_inside_learning_but_setup_drain_is_excluded(tmp
 
 
 def test_v3_provider_schema_and_confirmation_preconditions():
-    p=plan3();schema=constrain_output_schema(json.loads((REPO/'schemas/experiment_plan_agent.schema.json').read_text()))
+    p=plan3();schema=constrain_output_schema(json.loads((REPO/'schemas/experiment_plan_agent.schema.json').read_text()),loop_training=False)
     validate(agent_plan(p),schema);provider_output_schema(schema)
     assert inspect_plan(p)['valid']
     p['training']['steps']=2
@@ -311,7 +311,7 @@ def test_host_certification_cannot_write_through_a_candidate_symlink(registry_la
 def test_generated_instructions_match_new_and_frozen_legacy_contracts():
     from orchestrator.planning_contract import planning_instructions
     new=json.loads(planning_instructions());old=json.loads(planning_instructions(time_only=False))
-    assert new['contract']=='controller-planning-v3' and new['required_positive_training_keys']==['batch_size','size']
+    assert new['contract']=='controller-planning-v4' and new['required_positive_training_keys']==['batch_size','size']
     assert 'No fixed steps' in new['required_training']
     assert 'Preserve the exact authorized legacy training steps' in old['required_training']
 

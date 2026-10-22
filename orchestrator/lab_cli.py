@@ -450,7 +450,8 @@ def research_summary(campaigns, row, process, report=False):
         result['research_seconds_remaining'] = max(0,config['limits']['research_hours']*3600-usage['wall_seconds'])
         result['training_seconds_per_experiment'] = config['limits']['training_minutes_per_experiment']*60
         result['start_from'] = config['campaign']['start_from']
-        result['actual_training_seconds'] = sum(json.loads(r['metrics_json']).get('training/duration_seconds',0) for r in campaigns.runs(row['id']))
+        result['actual_training_seconds'] = sum(json.loads(r['metrics_json']).get('training/loop_elapsed_seconds',0) for r in campaigns.runs(row['id']))
+        result['training_duration_definition']='elapsed-training-loop-v1; historical arithmetic-only records excluded'
         result['technical_accounting'] = {'usage':dict(usage), 'codex_budget':campaigns.call_budget(row['id'])}
         result['usage'] = {k:v for k,v in usage.items() if k not in {'gpu_seconds','codex_calls'}}
     else:
@@ -474,7 +475,8 @@ def research_summary(campaigns, row, process, report=False):
                           for r in campaigns.runs(row['id'])]
         from orchestrator.development_feedback import latest_summary
         for run in result['runs']:
-            run['actual_training_seconds'] = run['development_metrics'].get('training/duration_seconds')
+            run['actual_training_seconds'] = run['development_metrics'].get('training/loop_elapsed_seconds')
+            run['training_timing_definition']='elapsed-training-loop-v1' if run['actual_training_seconds'] is not None else 'historical learning-computation; see original metrics'
             if time_based(config): run['technical_accounting'] = {'gpu_seconds':run.pop('gpu_seconds')}
             run['real_development_feedback'] = latest_summary(campaigns.store, run['run_id'])
         result['events'] = campaigns.events(row['id'], 30)

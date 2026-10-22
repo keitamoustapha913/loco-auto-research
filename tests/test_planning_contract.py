@@ -132,7 +132,7 @@ def test_agent_boundary_uses_generated_schema_and_instructions_without_real_call
     store,_,_,repo,_=lab
     def offline_invoke(role,root,schema,prompt,**kwargs):
         value=json.loads(Path(schema).read_text())
-        assert 'controller-planning-v3' in prompt
+        assert 'controller-planning-v4' in prompt
         plan_schema=value['$defs']['proposal']['properties']['experiment_plan']
         assert 'pattern' not in plan_schema['properties']['training']['items']['properties']['name']
         return {'response':{'offline':True}}

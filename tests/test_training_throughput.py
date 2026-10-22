@@ -146,7 +146,8 @@ def test_impossible_six_cell_plan_is_recoverable_and_queues_nothing(laboratory,m
     assert any('required-duration matrix' in x for x in result['problems'])
 
 
-def test_disposable_throughput_probe_uses_pilot_batch_and_full_training_split(tmp_path,monkeypatch):
+@pytest.mark.parametrize('version',['3.0','4.0'])
+def test_disposable_throughput_probe_uses_pilot_batch_and_full_training_split(tmp_path,monkeypatch,version):
     from scripts import candidate_smoke,training_phase
     from scripts.demo_run import make_fixture
     from benchmark.data_guard import build_manifest
@@ -158,7 +159,7 @@ def test_disposable_throughput_probe_uses_pilot_batch_and_full_training_split(tm
         entries=json.loads(manifest.read_text())['images'];captured.append((config,entries,kwargs))
         output.mkdir();(output/'model.pt').write_bytes(b'dummy')
         (output/'checkpoint_manifest.json').write_text('{}')
-        (output.parent/'training_timing.json').write_text(json.dumps({'execution_profile':profile()}))
+        (output.parent/'training_timing.json').write_text(json.dumps({'execution_profile':profile(),'loop_elapsed_seconds':1.}))
     class Predictor:
         def predict(self,x):
             return {'anomaly_maps':np.zeros((len(x),1,x.shape[-2],x.shape[-1]),np.float32),'image_scores':np.zeros(len(x))}
@@ -169,7 +170,7 @@ def test_disposable_throughput_probe_uses_pilot_batch_and_full_training_split(tm
     monkeypatch.setattr(training_phase,'run_training_phases',learning)
     monkeypatch.setattr(candidate_smoke,'load_candidate',lambda *a:SimpleNamespace(load=lambda *a,**k:Predictor()))
     cfg={'device':'cuda','category':'juice_bottle','size':128,'batch_size':8,'seed':367,
-        'training_budget_seconds':900,'plan_contract_version':'experiment-plan-v3.0'}
+        'training_budget_seconds':900,'plan_contract_version':'experiment-plan-v'+version}
     result=candidate_smoke.run(module,manifest,cfg,tmp_path/'smoke')
     effective,entries,kwargs=captured[0]
     assert len(entries)==4 and all(e['split']=='train/good' for e in entries)

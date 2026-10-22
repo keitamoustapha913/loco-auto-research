@@ -79,6 +79,8 @@ def evidence_classification(plan, rows=None):
             if len({c.get('seed') for c in configs})!=len(plan['seeds']):reasons.append('Recorded independent training seeds do not cover an arm.')
             for c in configs:
                 original=c.get('baseline_effective_configuration',c)
+                if plan.get('schema_version')=='4.0' and original.get('training_completion_policy')!='elapsed-training-loop-v1':
+                    reasons.append('Historical arithmetic-target baseline is not a matched elapsed-loop training control.')
                 if any(k not in original or original[k]!=dict(plan['training'],**arm['training_overrides']).get(k) for k in learning_controls(plan)):
                     reasons.append('Recorded baseline learning configuration does not match controlled training.')
     return {'promotion_eligible':not reasons,'evidence_level':'CONTROLLED' if not reasons else 'EXPLORATORY',
@@ -124,6 +126,11 @@ def inspect_plan(plan, store=None, repo_root=None):
                         issues.append({'code':'UNVERIFIABLE_BASELINE_CONTROL','arm':arm['arm_id'],'baseline_id':bid,'key':key,
                             'expected':expected,'requested':requested,'message':'Cannot assert matching unrecorded or different historical values.'})
     classification=evidence_classification(plan)
+    if plan.get('schema_version')=='4.0' and any(
+        capabilities[bid]['configuration'].get('training_completion_policy')!='elapsed-training-loop-v1'
+        for arm in plan['arms'] for bid in arm['baseline_by_seed'].values() if bid in capabilities):
+        classification.update(promotion_eligible=False,evidence_level='EXPLORATORY')
+        classification['reasons'].append('Frozen historical baseline does not establish matched elapsed-loop training.')
     if issues:
         classification.update(promotion_eligible=False,evidence_level='EXPLORATORY')
         classification['reasons'].append('Semantic admission failed; no execution or promotion permitted.')
@@ -145,11 +152,11 @@ def admit_plan(plan, store, repo_root=None):
 
 def planning_instructions(capabilities=(), *, time_only=True):
     from orchestrator.experiment_plan import RESERVED,REQUIRED_TRAINING_POSITIVE,MATCHED_TRAINING_CONTROLS
-    return json.dumps({'contract':'controller-planning-v3' if time_only else 'controller-planning-v2','controller_owned_fields':sorted(RESERVED),
+    return json.dumps({'contract':'controller-planning-v4' if time_only else 'controller-planning-v2','controller_owned_fields':sorted(RESERVED),
         'controller_owned_prefix':'plan_',
-        'timing':('New plans use schema_version 3.0, no resource_budget or independent job/GPU/plan deadlines. Jobs are exactly arms times seeds. Only the remaining campaign research deadline and required actual learning target apply. Preserve complete comparisons; report INCOMPLETE if interrupted.' if time_only else 'Legacy schema_version 1.0 plans retain their explicitly authorized resource_budget restrictions.'),'required_positive_training_keys':['batch_size','size'] if time_only else list(REQUIRED_TRAINING_POSITIVE),
+        'timing':('New plans use schema_version 4.0, no resource_budget or independent job/GPU/plan deadlines. Jobs are exactly arms times seeds. Only the remaining campaign research deadline and required elapsed training-loop target apply. Preserve complete comparisons; report INCOMPLETE if interrupted.' if time_only else 'Legacy schema_version 1.0 plans retain their explicitly authorized resource_budget restrictions.'),'required_positive_training_keys':['batch_size','size'] if time_only else list(REQUIRED_TRAINING_POSITIVE),
         'required_nonnegative_training_key':None if time_only else 'expected_optimizer_updates',
-        'required_training':('Each new model must learn for the complete operator target. No fixed steps/epochs or expected final update/exposure counts. Declare a scientifically appropriate continuing schedule; progress-aware training_steps receives elapsed_seconds, target_seconds, target_reached, optimizer_updates and source_exposures. Finalize only on target_reached; never restart/reinitialize or pad with sleep/dummy work.' if time_only else 'Preserve the exact authorized legacy training steps, epochs, exposures and original timing restrictions.'),
+        'required_training':('Each new model must run its genuine optimization loop for the complete elapsed operator target. Initialization and final saving are excluded; in-loop batch preparation, transfers, learning, integrity checks and bookkeeping count. Declare TRAINING_PROTOCOL=elapsed-training-loop-v1 and yield TrainingLoopStart(objective) after initialization/cache fill and before the first batch iteration. No fixed steps/epochs or expected final update/exposure counts. Declare a scientifically appropriate continuing schedule; progress-aware training_steps receives elapsed_seconds, target_seconds, target_reached, optimizer_updates and source_exposures. Finalize only on target_reached; never restart/reinitialize or pad with sleep/dummy work.' if time_only else 'Preserve the exact authorized legacy training steps, epochs, exposures and original timing restrictions.'),
         'confirmation':('Set confirmation=true only for a proposed confirmed promotion study. Preregister the exact real endpoint keys: dev_real/logical_au_spro_0_05_compatible, dev_real/logical_pixel_ap_pooled, dev_real/normal_image_fpr, dev_real/inference_e2e_ms_p95, dev_real/parameters, dev_real/peak_cpu_rss_mib, with at least three independent seeds and matched controls. Ordinary exploratory plans may set false.' if time_only else 'Legacy plans retain their original evidence and promotion classification; do not add new fields.'),
         'controlled_variables':'Names of real training keys, not sentences. Values must be declared, equal across arms and recorded in every frozen baseline.',
         'matched_training_controls_for_confirmation':['batch_size','size'] if time_only else list(MATCHED_TRAINING_CONTROLS),
@@ -161,7 +168,7 @@ def planning_instructions(capabilities=(), *, time_only=True):
         'frozen_baselines':list(capabilities)},sort_keys=True)
 
 
-def constrain_output_schema(schema, capabilities=(), *, time_only=True, target_training=True):
+def constrain_output_schema(schema, capabilities=(), *, time_only=True, target_training=True, loop_training=True):
     """Generate wire constraints from the same rules used by admission."""
     result=copy.deepcopy(schema)
     def visit(node):
@@ -171,7 +178,7 @@ def constrain_output_schema(schema, capabilities=(), *, time_only=True, target_t
             props['estimated_gpu_minutes'].pop('maximum',None)
         if {'training','controlled_variables','arms','seeds'}<=props.keys():
             if time_only:
-                props['schema_version'] = {'type':'string','const':'3.0' if target_training else '2.0'}
+                props['schema_version'] = {'type':'string','const':('4.0' if loop_training else '3.0') if target_training else '2.0'}
                 if target_training:
                     props['confirmation']={'type':'boolean'}
                     if 'confirmation' not in node['required']:node['required'].append('confirmation')

@@ -29,7 +29,7 @@ def run_worker_once(store, manifest_path, runtime, personal_mode_authorized=Fals
             if not expected or expected['status'] != 'QUEUED':
                 raise ValueError('expected campaign job is not queued')
             expected_config = json.loads(expected['config_json'])
-            duration = (0 if expected_config.get('plan_contract_version') in {'experiment-plan-v2.0','experiment-plan-v3.0'} else
+            duration = (0 if expected_config.get('plan_contract_version') in {'experiment-plan-v2.0','experiment-plan-v3.0','experiment-plan-v4.0'} else
                         min(max_job_seconds(expected_config), int(expected_config.get('timeout_seconds', max_job_seconds(expected_config)))))
         else:
             duration = max_job_seconds()
@@ -105,11 +105,11 @@ def _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=None,
             context = next((json.loads(e['payload_json']) for e in campaigns.events(campaign_id, 10000)
                             if e['kind']=='STARTING_CONTEXT'), {})
             prompt += '\nOperator starting context (references, never automatic weight reuse): '+json.dumps(context)
-            prompt += (f"\nRequired genuine learning time per new model: {limits['training_minutes_per_experiment']*60:g} seconds. "
+            prompt += (f"\nFor new v4 plans, required elapsed training-loop time per model: {limits['training_minutes_per_experiment']*60:g} seconds. "
                        "Choose a continuing optimization procedure that reaches the complete target; finite schedules must not stop early; "
                        "never pad time with idle or dummy work. Explain the continuing scientific "
-                       "schedule in evaluation_plan. Training time excludes initialization, data preparation, checkpoint saving, validation, smoke checks and scoring. "
-                       "Preparation, initialization, smoke and evaluation use the remaining overall research deadline, never the training-only allowance. "
+                       "schedule in evaluation_plan. Loop time includes batch loading/preparation, augmentation, transfers, learning, integrity checks and bookkeeping. Initialization, preflight, checkpoint saving and evaluation are excluded. Yield TrainingLoopStart(objective) before the first batch fetch. "
+                       "One-time setup, initialization, smoke and evaluation use only the remaining overall research deadline. In-loop preparation counts toward the elapsed loop target. Older frozen plans keep their original timing contracts. "
                        "Preserve all declared arms, seeds and controls; never stretch or truncate a frozen plan.")
         remaining = row['created_at'] + limits['max_wall_hours'] * 3600 - __import__('time').time()
         if time_based(config):
@@ -326,7 +326,7 @@ def add_research_proposals(store, prompt, count=3, campaign=None, personal_mode=
                      'max_wall_seconds':wall, 'max_job_seconds':limits['max_job_seconds']}
         from orchestrator.campaign_config import time_based
         if time_based(json.loads(campaigns.get(cid)['config_json'])):
-            instruction += '\nRemaining overall research seconds: '+str(wall)+'. Use schema_version 3.0 without resource_budget. Job count is the complete arms × seeds matrix.'
+            instruction += '\nRemaining overall research seconds: '+str(wall)+'. Use schema_version 4.0 without resource_budget. Job count is the complete arms × seeds matrix.'
         else:
             instruction += '\nRemaining ceilings for ONE comparison (not spending targets): '+json.dumps(remaining)
     def request(feedback, attempt):
@@ -345,13 +345,13 @@ def add_research_proposals(store, prompt, count=3, campaign=None, personal_mode=
         for proposal in output['proposals']:
             plan = proposal['experiment_plan']
             for reference in plan['baselines']: verify_baseline(store, reference, REPO)
-            if campaign and plan.get('schema_version')=='3.0':
+            if campaign and plan.get('schema_version') in {'3.0','4.0'}:
                 from orchestrator.campaign_config import training_execution_estimate
                 cfg=json.loads(campaigns.get(cid)['config_json'])
                 estimate=training_execution_estimate(store,cfg,jobs=len(plan['arms'])*len(plan['seeds']),
                     newly_trained=sum(a['execution']=='train' for a in plan['arms'])*len(plan['seeds']),
                     real_feedback=plan['evaluation']['real_development_feedback'],critique=True,
-                    source_sha256='not-implemented-yet')
+                    source_sha256='not-implemented-yet',loop_timed=plan.get('schema_version')=='4.0')
                 if estimate['required_seconds']>remaining['max_wall_seconds']:
                     raise ValueError('required-duration matrix cannot fit remaining research time including preparation/evaluation; revise the plan, not the target')
             if campaign and plan.get('resource_budget') and any(plan['resource_budget'][key] > allowance for key,allowance in remaining.items()):
@@ -614,15 +614,15 @@ def queue_candidate(store, hypothesis_id, candidate_id, category, stage, device,
         campaign_row = CampaignState(store).get(campaign_id)
         if not campaign_row: raise ValueError('unknown campaign')
         campaign_config = json.loads(campaign_row['config_json'])
-    if effective_config and effective_config.get('plan_contract_version')=='experiment-plan-v3.0' and not frozen:
+    if effective_config and effective_config.get('plan_contract_version') in {'experiment-plan-v3.0','experiment-plan-v4.0'} and not frozen:
         from orchestrator.campaign_config import training_execution_estimate,remaining_wall
-        estimate=training_execution_estimate(store,campaign_config,source_sha256=sha256(module))
+        estimate=training_execution_estimate(store,campaign_config,source_sha256=sha256(module),loop_timed=effective_config.get('plan_contract_version')=='experiment-plan-v4.0')
         if remaining_wall(campaign_row,__import__('time').time())<estimate['required_seconds']:
             raise ValueError('insufficient research time for required training plus preparation and evaluation')
     if campaign_config and time_based(campaign_config) and not frozen:
         from orchestrator.experiment_runner import require_training_phases
-        require_training_phases(module,target=True) if effective_config and effective_config.get('plan_contract_version')=='experiment-plan-v3.0' else require_training_phases(module)
-    campaign_timed = bool(effective_config and effective_config.get('plan_contract_version') in {'experiment-plan-v2.0','experiment-plan-v3.0'})
+        require_training_phases(module,target=True,loop=effective_config.get('plan_contract_version')=='experiment-plan-v4.0') if effective_config and effective_config.get('plan_contract_version') in {'experiment-plan-v3.0','experiment-plan-v4.0'} else require_training_phases(module)
+    campaign_timed = bool(effective_config and effective_config.get('plan_contract_version') in {'experiment-plan-v2.0','experiment-plan-v3.0','experiment-plan-v4.0'})
     enforce(store, next_gpu_seconds=seconds if device == "cuda" and not campaign_timed else 0, campaign_id=campaign_id)
     timeout = (None if campaign_timed else min(int(seconds),
                campaign_config['limits']['max_job_seconds'] if campaign_config and time_based(campaign_config) else max_job_seconds()))
@@ -656,8 +656,8 @@ def queue_candidate(store, hypothesis_id, candidate_id, category, stage, device,
     if campaign_timed:
         cfg.pop('timeout_seconds',None)
         cfg['research_deadline'] = campaign_row['created_at']+campaign_config['limits']['max_wall_hours']*3600
-        if effective_config.get('plan_contract_version')=='experiment-plan-v3.0' and not frozen:
-            cfg['training_completion_policy']='required-training-target-v1'
+        if effective_config.get('plan_contract_version') in {'experiment-plan-v3.0','experiment-plan-v4.0'} and not frozen:
+            cfg['training_completion_policy']='elapsed-training-loop-v1' if effective_config.get('plan_contract_version')=='experiment-plan-v4.0' else 'required-training-target-v1'
             cfg['diagnostic_preflight_required']=True
     candidate_tree = REPO / "candidates" / "worktrees" / candidate_id
     if frozen:

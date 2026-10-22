@@ -166,7 +166,7 @@ def test_completed_overrun_cannot_claim_compliance_if_alarm_delivery_is_delayed(
     assert clock.elapsed>=.02
 
 
-@pytest.mark.parametrize('target',[False,True])
+@pytest.mark.parametrize('target',[False,True,'loop'])
 def test_phase_contract_through_full_cpu_runner_in_bubblewrap(tmp_path,target):
     import os,shutil,subprocess
     if os.getenv('LOCO_TEST_BWRAP')!='1':pytest.skip('full regression enables explicit Bubblewrap checks')
@@ -244,6 +244,13 @@ print('VERIFIED_PHASE_CPU_FIXTURE')
         script=script.replace("assert result['metrics']['protocol/optimizer_updates']==2","assert result['metrics']['protocol/optimizer_updates']==result['metrics']['training/phase_steps']")
         script=script.replace("assert result['metrics']['protocol/source_exposures']==2","assert result['metrics']['protocol/source_exposures']==result['metrics']['training/phase_steps']")
         script=script.replace("assert 0<result['metrics']['training/duration_seconds']<.1","assert result['metrics']['training/duration_seconds']>=.03\nassert result['metrics']['training/target_reached']==1\nassert Path('/output/run/training_receipt.json').is_file()")
+    if target=='loop':
+        source=module.read_text().replace('from scripts.training_phase import TrainingStep','from scripts.training_phase import TrainingStep, TrainingLoopStart')
+        source=source.replace('    count=0\n    while True:', '    count=0\n    yield TrainingLoopStart(net)\n    while True:')
+        source=source.replace("if config.get('training_completion_policy')=='required-training-target-v1':", "if config.get('training_completion_policy')=='elapsed-training-loop-v1':")
+        module.write_text(source)
+        script=script.replace('experiment-plan-v3.0','experiment-plan-v4.0').replace('required-training-target-v1','elapsed-training-loop-v1')
+        script+="\nassert result['metrics']['training/loop_elapsed_seconds']==result['metrics']['training/duration_seconds']\nassert result['metrics']['training/learning_seconds']<result['metrics']['training/loop_elapsed_seconds']\n"
     process=subprocess.run(command(copy,module,data,output,['-c',script],use_gpu=False),capture_output=True,text=True,timeout=30)
     assert process.returncode==0,process.stdout+process.stderr
     assert 'VERIFIED_PHASE_CPU_FIXTURE' in process.stdout
