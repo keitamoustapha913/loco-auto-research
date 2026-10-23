@@ -542,6 +542,16 @@ def handle_trusted_failure(store,campaigns,campaign_id,runtime,failure):
 
 
 def run_forever(campaign_id: str, runtime: Path, ledger: Path, idle_seconds=2):
+    from orchestrator.storage_cleanup import maybe_cleanup
+    store=StateStore(ledger)
+    maybe_cleanup(runtime,store,force=True,reason='controller startup')
+    try:
+        return _run_forever(campaign_id,runtime,ledger,idle_seconds)
+    finally:
+        maybe_cleanup(runtime,store,force=True,reason='campaign finished')
+
+
+def _run_forever(campaign_id: str, runtime: Path, ledger: Path, idle_seconds=2):
     store = StateStore(ledger)
     campaigns = CampaignState(store)
     row = campaigns.get(campaign_id)
@@ -614,3 +624,6 @@ def run_forever(campaign_id: str, runtime: Path, ledger: Path, idle_seconds=2):
                 campaigns.set_status(campaign_id, 'STOPPED' if state=='STOPPING' else state, reason)
                 return
             time.sleep(idle_seconds)
+        finally:
+            from orchestrator.storage_cleanup import maybe_cleanup
+            maybe_cleanup(runtime,store,force=True,reason='comparison completed or abandoned')

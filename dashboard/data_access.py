@@ -289,6 +289,7 @@ def real_heatmap_sample(summary, index, opacity=.4):
     import numpy as np
     from benchmark.feedback_data import imported_root, schema
     from benchmark.data_guard import sha256_file
+    from benchmark.feedback_artifacts import map_sha256, load_map
     root = imported_root(runtime_root())
     manifest = json.loads((root/'dev-manifest.json').read_text()); schema(manifest)
     if not isinstance(index,int) or not 0 <= index < len(manifest['images']): raise ValueError('invalid sample index')
@@ -305,8 +306,8 @@ def real_heatmap_sample(summary, index, opacity=.4):
         not image_path.resolve().is_relative_to(root.resolve()) or sha256_file(image_path)!=entry['sha256']):
         raise ValueError('unsafe development artifact')
     cases = json.loads((output/'case_scores.json').read_text())
-    if sha256_file(map_path) != cases[index]['map_sha256']: raise ValueError('heatmap hash changed')
-    score = np.load(map_path,allow_pickle=False)
+    if map_sha256(map_path,runtime_root()/'jobs') != cases[index]['map_sha256']: raise ValueError('heatmap hash changed')
+    score = load_map(map_path,runtime_root()/'jobs')
     original = Image.open(image_path).convert('RGB')
     if score.shape != (original.height,original.width) or not np.isfinite(score).all(): raise ValueError('unaligned map')
     scaled = np.clip((score-score.min())/max(float(np.ptp(score)),1e-12),0,1)

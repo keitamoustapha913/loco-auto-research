@@ -691,6 +691,7 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
                          'orchestrator/planning_contract.py','orchestrator/experiment_runner.py','orchestrator/sandbox.py','orchestrator/development_feedback.py',
                          'scripts/run_candidate.py','scripts/training_phase.py','scripts/feedback_infer.py','scripts/candidate_smoke.py',
                          'benchmark/train_adapter.py','benchmark/feedback_metrics.py','benchmark/feedback_data.py',
+                         'benchmark/feedback_artifacts.py','orchestrator/storage_cleanup.py',
                          'schemas/experiment_plan.schema.json','configs/development_feedback.json']
         trusted_files += ['orchestrator/model_registry.py','configs/champion_policy.json',
                           'orchestrator/campaign_config.py','orchestrator/state_store.py','orchestrator/campaign_state.py','orchestrator/budgets.py',
@@ -808,6 +809,8 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
             elif plan['failure_criteria']['on_job_failure'] == 'stop':
                 break
             verify_inputs()
+            from orchestrator.storage_cleanup import maybe_cleanup
+            maybe_cleanup(runtime,store,force=True,reason='experiment finalized')
     except (CampaignHalted, BudgetExceeded) as exc:
         error = str(exc)
         from orchestrator.campaign_config import time_based, remaining_wall

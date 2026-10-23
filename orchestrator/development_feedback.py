@@ -17,6 +17,7 @@ from PIL import Image
 from benchmark.data_guard import sha256_file, load_manifest, manifest_fingerprint
 from benchmark.feedback_data import LABEL, imported_root, verify_import
 from benchmark.feedback_metrics import VERSION, LOCALIZATION_STATUS, detection_metrics
+from benchmark.feedback_artifacts import map_sha256
 from orchestrator.experiment_runner import candidate_file
 from orchestrator.sandbox import command as sandbox_command
 
@@ -95,7 +96,8 @@ def feedback_pipeline_identity():
     """Cost observations are comparable only for the same verified CPU path."""
     return {'version':'isolated-cpu-feedback-v1','cpu_workers':cpu_worker_count(),
             'worker_sha256':sha256_file(REPO/'scripts/feedback_infer.py'),
-            'scorer_sha256':sha256_file(REPO/'benchmark/feedback_metrics.py')}
+            'scorer_sha256':sha256_file(REPO/'benchmark/feedback_metrics.py'),
+            'artifact_reader_sha256':sha256_file(REPO/'benchmark/feedback_artifacts.py')}
 
 
 def run_isolated_cases(items, worker, workers=None):
@@ -113,7 +115,8 @@ def feedback_identity(manifest, run, config, before, size, threshold, workers=No
         'inference_configuration':config.get('inference',{}),'preprocessing_size':size,
         'normal_only_threshold':threshold,'device':'cpu','cpu_workers':cpu_worker_count() if workers is None else workers,'evaluator_version':VERSION,
         'worker_sha256':sha256_file(REPO/'scripts/feedback_infer.py'),
-        'scorer_sha256':sha256_file(REPO/'benchmark/feedback_metrics.py')}
+        'scorer_sha256':sha256_file(REPO/'benchmark/feedback_metrics.py'),
+        'artifact_reader_sha256':sha256_file(REPO/'benchmark/feedback_artifacts.py')}
     return hashlib.sha256(json.dumps(identity,sort_keys=True,allow_nan=False).encode()).hexdigest()
 
 
@@ -141,7 +144,7 @@ def verify_feedback_cache(summary, key, job_root):
     map_root = feedback_map_root(summary, job_root)
     for row in rows:
         path=map_root/f"case_{row['case_index']:04d}"/'map.npy'
-        if path.is_symlink() or not path.resolve().is_relative_to(map_root.resolve()) or sha256_file(path)!=row['map_sha256']:
+        if path.is_symlink() or not path.resolve().is_relative_to(map_root.resolve()) or map_sha256(path,job_root)!=row['map_sha256']:
             raise ValueError('feedback cache heatmap integrity mismatch')
     return root
 

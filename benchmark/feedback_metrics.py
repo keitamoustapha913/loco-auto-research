@@ -73,6 +73,9 @@ def localization_metrics(manifest, data_root, output, check=lambda: None):
     from pathlib import Path
     from PIL import Image
     from sklearn.metrics import average_precision_score
+    from benchmark.feedback_artifacts import load_map
+    output = Path(output).resolve()
+    artifact_root = next((p for p in output.parents if p.name == 'jobs'), output)
     lookup = {d['pixel_value']: d for d in json.loads((Path(data_root)/'juice_bottle/defects_config.json').read_text())}
     metrics = {}
     for kind in ('logical', 'structural'):
@@ -80,7 +83,7 @@ def localization_metrics(manifest, data_root, output, check=lambda: None):
         for index, entry in enumerate(manifest['images']):
             check()
             if entry['category'] not in ('good', kind+'_anomalies'): continue
-            scores = np.load(Path(output)/f'case_{index:04d}'/'map.npy', allow_pickle=False)
+            scores = load_map(Path(output)/f'case_{index:04d}'/'map.npy', artifact_root)
             if scores.shape != (entry['height'],entry['width']) or not np.isfinite(scores).all():
                 raise ValueError('unaligned/nonfinite full-resolution map')
             union = np.zeros(scores.shape, dtype=bool)

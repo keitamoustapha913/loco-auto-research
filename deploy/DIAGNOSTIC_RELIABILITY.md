@@ -2,6 +2,10 @@
 
 Maintenance following campaign `ca4f9dbf-7a61-4883-9bd5-9ef2c0fd0721`.
 
+This is the original investigation snapshot. Subsequent authorized reclamation
+and ongoing housekeeping are documented in [STORAGE_CLEANUP.md](STORAGE_CLEANUP.md);
+the initial cleanup's before/after inventory is retained in the runtime audit.
+
 ## Disk rejection
 
 The previous guard sums logical file sizes across the **entire runtime**, not

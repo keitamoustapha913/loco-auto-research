@@ -26,7 +26,7 @@ class DiskBudgetExceeded(BudgetExceeded):
             'Free filesystem space does not override the runtime quota.')
 
 
-def enforce_disk(runtime=None, *, required_bytes=0):
+def enforce_disk(runtime=None, *, required_bytes=0, cleanup=True):
     """Existing logical-byte quota, including historical evidence, with context.
 
     required_bytes is a lower bound from concrete pending copies, not an agent
@@ -52,6 +52,10 @@ def enforce_disk(runtime=None, *, required_bytes=0):
                   limit_bytes=limit, filesystem_free_bytes=free,
                   policy='LOCO_DISK_BUDGET_GIB' if 'LOCO_DISK_BUDGET_GIB' in os.environ else 'default 100 GiB runtime quota')
     if size + required_bytes > limit or required_bytes > free:
+        if cleanup:
+            from orchestrator.storage_cleanup import maybe_cleanup
+            maybe_cleanup(root, force=True, reason='storage admission pressure')
+            return enforce_disk(root, required_bytes=required_bytes, cleanup=False)
         detail['reason'] = 'runtime logical-byte quota' if size + required_bytes > limit else 'insufficient filesystem free space'
         raise DiskBudgetExceeded(detail)
     return detail

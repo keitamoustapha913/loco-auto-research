@@ -348,6 +348,11 @@ def test_real_preview_ground_truth_is_verified_display_only(tmp_path,monkeypatch
     (reused/'case_scores.json').write_bytes((output/'case_scores.json').read_bytes())
     view=real_heatmap_sample({'run_id':'reused','evaluation_id':'eval','prediction_artifact_dir':str(output)},1)
     assert view['original'].size==view['heatmap'].size==(800,1600)
+    import gzip
+    Path(str(path)+'.gz').write_bytes(gzip.compress(path.read_bytes()))
+    path.unlink()
+    packed_view=real_heatmap_sample({'run_id':'fixture','evaluation_id':'eval'},1)
+    assert np.array_equal(np.asarray(packed_view['heatmap']),np.asarray(sample['heatmap']))
     target=fd.imported_root(tmp_path)/manifest['images'][1]['masks'][0]['path']
     target.unlink();target.symlink_to(incoming/'dev-manifest.json')
     with pytest.raises(ValueError,match='ground truth'): real_heatmap_sample({'run_id':'fixture','evaluation_id':'eval'},1)

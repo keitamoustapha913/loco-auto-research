@@ -26,6 +26,8 @@ def main():
     while not stopping:
         try:
             result = sync_outbox(store)
+            from orchestrator.storage_cleanup import maybe_cleanup
+            maybe_cleanup(store.path.parent.parent, store, reason='tracking idle housekeeping')
             if result['delivered'] or result['failed']:
                 logger.info(json.dumps({'event': 'tracking_sync', **result, 'time': time.time()}))
         except Exception as exc:
