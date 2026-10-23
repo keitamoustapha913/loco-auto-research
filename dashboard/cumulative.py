@@ -12,9 +12,16 @@ def progress_card(summary):
         return
     st.subheader('Best retained development models')
     for group in summary['cohorts']:
-        model=group['champion'];metrics=model['metrics'];state=group['state']
-        confirmed=state['confirmation']=='REPEATED_SEED_SUPPORTED'
-        st.write(f"**{model['candidate_id']}** · " + ('Repeated-seed development support' if confirmed else 'Exploratory incumbent — superiority unconfirmed'))
+        research=group.get('research_incumbent')
+        model=research or group['champion'];metrics=model['metrics'];state=group['state']
+        selection=group.get('research_state') or {}
+        confirmed=state['confirmation']=='REPEATED_SEED_SUPPORTED' and model['run_id']==group['champion']['run_id']
+        st.write(f"**{model['candidate_id']}** · " + ('Repeated-seed development support' if confirmed else 'Active exploratory research incumbent — superiority unconfirmed'))
+        if selection:
+            score=selection['selection']['score']
+            st.metric('Research selection score · 80% localization',f'{score:.4f}',help='60% logical sPRO, 20% pixel AP, 10% normal false-positive performance, 10% efficiency. Fixed normalization; comparable cohorts only.')
+            delta=selection.get('localization_delta',{})
+            st.caption(f"Change from previous research reference: AU-sPRO {delta.get(SPRO,0):+.4f} · pixel AP {delta.get(AP,0):+.4f}")
         a,b,c=st.columns(3)
         a.metric('Retained logical AU-sPRO@5%',f'{metrics[SPRO]:.4f}',help='Compatible development scorer; original-code equivalence unverified.')
         b.metric('Retained logical pixel AP',f'{metrics[AP]:.4f}')
@@ -23,8 +30,14 @@ def progress_card(summary):
                    f"{len(group['pareto_retention_ids'])} Pareto alternatives · "
                    + ('Confirmed relative development gain; no final-holdout claim.' if confirmed else 'No confirmed champion improvement in this cohort.'))
         if confirmed:st.caption(state.get('comparison_scope','Paired development comparison'))
-        localization_chart(summary.get('localization_history',{}).get(group['cohort_id'],[]),key='localization-history:'+group['cohort_id'])
+        with st.expander('Selection details and scientific confirmation'):
+            if selection:
+                st.write(selection['selection'])
+                st.write(selection['deployment_readiness'])
+            st.caption('Scientific registry reference: '+group['champion']['candidate_id']+' · '+state['confirmation'])
+            localization_chart(summary.get('localization_history',{}).get(group['cohort_id'],[]),key='localization-history:'+group['cohort_id'])
     st.caption(f"{summary['complete_comparisons']} complete controlled comparisons · "
+               f"{summary.get('complete_exploratory_comparisons',0)} complete exploratory · "
                f"{summary['incomplete_comparisons']} incomplete · "
                f"{summary['attempts_since_verified_improvement']} attempts since last confirmed improvement")
 

@@ -492,3 +492,59 @@ See [measured throughput audit and CUDA verification limitations](deploy/TRAININ
 ### Authoritative elapsed-loop timing (v4)
 
 New runs record `training/loop_elapsed_seconds` as the authoritative duration, `training/learning_seconds` and `training/loop_overhead_seconds` as efficiency diagnostics, and `training/initialization_seconds` / `training/checkpoint_seconds` separately. For v4 only, `training/duration_seconds` aliases loop elapsed; historical values are never rewritten. Streamlit displays loop time and overall research time, with diagnostic breakdowns expandable. Historical arithmetic-only records are excluded from loop totals. Six newly trained models require 90 minutes of loop execution plus non-loop costs; admission must fit the full matrix within the remaining campaign deadline. See [the versioned timing contract](deploy/TRAINING_LOOP_TIMING.md).
+
+### Active research incumbent versus confirmed champion
+
+Research selection uses `localization-first-research-v1`, independently of the
+existing scientific confirmation policy. Within an identical evaluation cohort:
+
+- 60% logical compatible AU-sPRO@5%, already in `[0,1]`.
+- 20% logical pooled pixel AP, already in `[0,1]`.
+- 10% `1 - normal image FPR` (recorded false positives / normal count).
+- 10% efficiency: the mean of `20/(20+p95_ms)`,
+  `1,000,000/(1,000,000+parameters)`, and `512/(512+peak_process_RAM_MiB)`.
+
+These fixed normalization anchors are scoring definitions, not resource limits or
+additional operator settings. Ties retain the earliest model, then use its stable
+retention identifier. Scores never normalize against the current candidate pool.
+Only valid evaluated, provenance-verified frozen checkpoints are eligible. A normal
+FPR above 10% contributes a penalty; it does not veto exploratory selection.
+Deployment assessment remains visible and separate. Repeated-seed confirmation
+retains its existing controls and cannot be obtained from a record score alone.
+The scientific champion registry and prior checkpoints are never overwritten by
+an exploratory selection. `start_from: previous_best` supplies the active research
+reference and accumulated evidence, without implicitly reusing its weights.
+
+### Frozen development evaluation throughput
+
+CPU evaluation schedules up to four independent one-image Bubblewrap workers,
+subject to CPU and available-RAM checks. Each still loads a frozen checkpoint in a
+fresh process, receives no masks or peer images, has no network, and passes state
+and checkpoint integrity checks. No persistent candidate worker or cross-image
+adaptation is introduced. A failed case cancels peer work. The original campaign
+deadline remains authoritative.
+
+Canonical JSON state hashing avoids repeatedly walking large training-audit records
+in Python; tensors and uninspectable state retain strict checks. Numerical scoring,
+annotation regions, saturation rules and the scorer version are unchanged. The
+worker records import, loading, hashing, decoding, prediction and restoration costs;
+the parent records inference/scoring stage costs. CPU concurrency is explicitly
+part of the latency measurement protocol and comparison cohort; concurrent latency
+must not silently replace historical serial measurements.
+
+Cached results require exact source/checkpoint/configuration/threshold/dataset,
+trusted implementation and measurement identities, plus verified case/metric/map
+hashes. Frozen readout runs may copy verified predictions into their own artifact
+directory without training or re-inference. Changed inputs invalidate the cache.
+CPU results are never labeled CUDA results. GPU evaluation benchmarks/parity require
+separate authorization; this change does not enable GPU evaluation automatically.
+
+CPU verification on the retained seed-461 checkpoint reproduced all 165 saved
+full-resolution maps and image scores bit-for-bit and all scientific metrics
+exactly. Total evaluation fell from 1,462.9 s to 197.1 s (7.42×). This is CPU-only
+technical evidence, not new training or scientific improvement. Admission uses
+matching current-pipeline observations with a 25% uncertainty margin instead of
+permanently retaining the obsolete serial-evaluation cost. Six 900-second loops
+currently estimate about 122 minutes including evaluation/setup/critique, before
+research and implementation; an estimate is not a guarantee or a new deadline.
+Full CPU/GPU parity and CUDA speed remain unverified and require bounded authorization.

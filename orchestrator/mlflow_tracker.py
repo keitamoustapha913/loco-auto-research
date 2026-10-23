@@ -149,6 +149,13 @@ def _sync_locked(store: StateStore, tracking_uri=None, max_events=100):
                 client.set_tag(mlflow_run_id,'research.comparison_cohort',model['cohort_id'])
                 client.set_tag(mlflow_run_id,'research.retained_checkpoint_sha256',model['reference']['checkpoint_sha256'])
                 client.set_tag(mlflow_run_id,'research.promotion_policy_sha256',model['policy_sha256'])
+                from orchestrator.model_registry import research_score, research_states
+                selection=research_score(model)
+                active=research_states(store).get(model['cohort_id'],{}).get('retention_id')==model['retention_id']
+                client.set_tag(mlflow_run_id,'research.active_research_incumbent',str(active).lower())
+                client.set_tag(mlflow_run_id,'research.selection_policy',selection['policy']['version'])
+                client.set_tag(mlflow_run_id,'research.selection_score',str(selection['score']))
+                client.set_tag(mlflow_run_id,'research.localization_weight','0.8')
                 if hasattr(client,'log_dict'):
                     client.log_dict(mlflow_run_id,model,'retention/model_record.json')
             if artifact_dir.is_dir():

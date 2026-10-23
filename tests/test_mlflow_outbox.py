@@ -17,6 +17,9 @@ def test_mlflow_outbox_sync_with_fake_client(tmp_path, monkeypatch):
     with store.connect() as con:
         con.execute("INSERT INTO events(run_id,time,kind,payload_json) VALUES(?,0,'MODEL_RETAINED',?)",
             (rid,json.dumps({'retention_id':'fixture-retained','cohort_id':'fixture-cohort',
+                'metrics':{'dev_real/logical_au_spro_0_05_compatible':.8,'dev_real/logical_pixel_ap_pooled':.7,
+                    'dev_real/normal_image_fpr':.2,'dev_real/inference_e2e_ms_p95':10,
+                    'dev_real/parameters':100,'dev_real/peak_cpu_rss_mib':50},
                 'reference':{'checkpoint_sha256':'fixture-checkpoint'},'policy_sha256':'fixture-policy'})))
     calls=[]
     class Client:
@@ -43,6 +46,8 @@ def test_mlflow_outbox_sync_with_fake_client(tmp_path, monkeypatch):
     assert any(c[0]=='tag' and c[1][1]=='training.duration_semantics' and 'elapsed_training_loop' in c[1][2] for c in calls)
     assert {c[1][1] for c in calls if c[0]=='metric'}>={'training/loop_elapsed_seconds','training/learning_seconds','training/loop_overhead_seconds'}
     assert any(c[0]=='tag' and c[1][1]=='research.retention_id' for c in calls)
+    assert any(c[0]=='tag' and c[1][1]=='research.localization_weight' and c[1][2]=='0.8' for c in calls)
+    assert any(c[0]=='tag' and c[1][1]=='research.active_research_incumbent' and c[1][2]=='false' for c in calls)
     assert any(c[0]=='dictionary' and c[1][2]=='retention/model_record.json' for c in calls)
     assert sync_outbox(store)['delivered']==0
     assert sum(c[0]=='create' for c in calls)==1

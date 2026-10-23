@@ -243,11 +243,12 @@ def initialize(store, repo_root=REPO):
             if con.execute('SELECT 1 FROM settings WHERE name=?',(PREFIX+cid,)).fetchone(): continue
             event(con,'CHAMPION_INITIALIZED',dict(state,cohort_id=cid,reason='best admissible historical localization; superiority unconfirmed'),best['run_id'])
             con.execute('INSERT INTO settings(name,value) VALUES(?,?)',(PREFIX+cid,json.dumps(state,sort_keys=True)))
-    return {'retained':len(models),'excluded':excluded,'cohorts':len(states(store))}
+    research = refresh_research_incumbents(store)
+    return {'retained':len(models),'excluded':excluded,'cohorts':len(states(store)), 'research_selection':research}
 
 
 def plan_context(store):
-    return {'policy':policy(),'policy_sha256':canonical(policy()),'champions':states(store)}
+    return {'policy':policy(),'policy_sha256':canonical(policy()),'champions':states(store), 'research_incumbents':research_states(store), 'research_policy':RESEARCH_POLICY}
 
 
 def seed_interval(values, rules):
@@ -300,8 +301,13 @@ def consider_comparison(store, campaigns, campaign_id, plan, result, repo_root=R
             cohort_ids={m['cohort_id'] for pair in pairs for m in pair}
             if len(cohort_ids)!=1:reason.append('incompatible evaluation cohorts')
             else:
-                cid=next(iter(cohort_ids));head=states(store).get(cid)
-                pinned=context.get('champions',{}).get(cid)
+                cid=next(iter(cohort_ids));scientific_head=states(store).get(cid)
+                if scientific_head != context.get('champions',{}).get(cid):
+                    reason.append('scientific incumbent changed or was not pinned before execution')
+                # A fixed research baseline remains valid even if exploratory
+                # ranking advances while this comparison is being measured.
+                head=context.get('research_incumbents',{}).get(cid) or scientific_head
+                pinned=context.get('research_incumbents',{}).get(cid) or context.get('champions',{}).get(cid)
                 if not head or head!=pinned:reason.append('incumbent changed or was not pinned before execution')
                 else:
                     incumbent=models[head['retention_id']]
@@ -352,7 +358,7 @@ def consider_comparison(store, campaigns, campaign_id, plan, result, repo_root=R
                   'cohort_id':cid,'status':'RETAIN_CHAMPION' if reason else 'PROMOTED',
                   'reasons':sorted(set(reason)) or ['paired repeated-seed localization benefit under frozen policy'],
                   'intervals':intervals,'policy_sha256':canonical(rules),
-                  'previous':head,'challenger':chosen['retention_id'] if chosen else None,
+                  'previous':states(store).get(cid) if cid else head,'research_baseline':head,'challenger':chosen['retention_id'] if chosen else None,
                   'comparison_scope':'challenger seeds versus fixed incumbent checkpoint' if fixed_incumbent else 'paired method training seeds',
                   'confirmation_run_ids':[a['run_id'] for a,b in pairs if a and b]}
         if chosen:verify_archive(chosen)
@@ -364,11 +370,11 @@ def consider_comparison(store, campaigns, campaign_id, plan, result, repo_root=R
             if existing:
                 decisions.append(existing);continue
             current=con.execute('SELECT value FROM settings WHERE name=?',(PREFIX+cid,)).fetchone() if cid else None
-            if not reason and (not current or json.loads(current[0])!=head):
+            if not reason and (not current or json.loads(current[0])!=scientific_head):
                 decision['status']='RETAIN_CHAMPION';decision['reasons']=['concurrent incumbent change; new comparison required']
             if decision['status']=='PROMOTED':
                 state={'retention_id':chosen['retention_id'],'confirmation':'REPEATED_SEED_SUPPORTED',
-                       'revision':head['revision']+1,'policy_sha256':canonical(rules),'last_improvement_event':key,
+                       'revision':scientific_head['revision']+1,'policy_sha256':canonical(rules),'last_improvement_event':key,
                        'confirmation_run_ids':decision['confirmation_run_ids'],'intervals':intervals}
                 state['comparison_scope']=decision['comparison_scope']
                 con.execute('UPDATE settings SET value=? WHERE name=?',(json.dumps(state,sort_keys=True),PREFIX+cid))
@@ -421,7 +427,7 @@ def rollback(store, cohort_id, reason):
 
 def progress(store):
     """Cheap read-only aggregate; integrity is rechecked on promotion and rollback."""
-    models=retained(store);heads=states(store);comparisons={}
+    models=retained(store);heads=states(store);research_heads=research_states(store);comparisons={}
     with store.connect() as con:
         if con.execute("SELECT 1 FROM sqlite_master WHERE name='campaign_events'").fetchone():
             for r in con.execute("SELECT campaign_id,payload_json FROM campaign_events WHERE kind='EXPERIMENT_PLAN_RESULT' ORDER BY id"):
@@ -433,10 +439,14 @@ def progress(store):
         usage=dict(con.execute('SELECT COALESCE(SUM(gpu_seconds),0) AS gpu_seconds,COUNT(*) AS attempts FROM runs').fetchone())
     decisions=[r['payload'] for r in records(store,'CHAMPION_DECISION')]
     cohorts=[]
-    for cid,head in heads.items():
+    for cid in sorted(set(heads) | set(research_heads)):
+        head=heads.get(cid) or {'retention_id':research_heads[cid]['retention_id'],
+                              'confirmation':'NO_CONFIRMED_CHAMPION'}
         group=[m for m in models.values() if m['cohort_id']==cid]
         cohorts.append({'cohort_id':cid,'state':head,'champion':models[head['retention_id']],
             'pareto_retention_ids':frontier(group),'models':group,
+            'research_incumbent':models[research_heads[cid]['retention_id']] if cid in research_heads else None,
+            'research_state':research_heads.get(cid),
             'best_observed_spro':max(m['metrics'][SPRO] for m in group),
             'best_observed_pixel_ap':max(m['metrics'][AP] for m in group),
             'best_supported_spro':models[head['retention_id']]['metrics'][SPRO] if head['confirmation']=='REPEATED_SEED_SUPPORTED' else None,
@@ -450,6 +460,7 @@ def progress(store):
         research_gpu=con.execute('SELECT COALESCE(SUM(gpu_seconds),0) FROM runs WHERE '+scientific_filter).fetchone()[0]
         research_calls=con.execute("SELECT COUNT(*) FROM events WHERE kind='CODEX_CALL' AND json_extract(payload_json,'$.campaign_id') IS NOT NULL").fetchone()[0]
     return {'cohorts':cohorts,'decisions':decisions,'complete_comparisons':sum(r['status']=='COMPLETE_CONTROLLED' for r in comparisons.values()),
+            'complete_exploratory_comparisons':sum(r['status']=='COMPLETE_EXPLORATORY' for r in comparisons.values()),
             'incomplete_comparisons':sum(r['status']=='INCOMPLETE' for r in comparisons.values()),
             'attempts_since_verified_improvement':since,'last_verified_improvement_at':last,
             'global_gpu_seconds':usage['gpu_seconds'],'global_codex_calls':store.codex_call_count(),
@@ -542,3 +553,108 @@ def status_summary(store):
         group['best_supported_pixel_ap']=model['metrics'][AP] if confirmed else None
     summary['decisions']=summary['decisions'][-10:]
     return summary
+
+# Research selection is separate from confirmed-scientific promotion.
+RESEARCH_PREFIX = 'research_incumbent:'
+RESEARCH_POLICY = {
+    'version': 'localization-first-research-v1',
+    'weights': {'logical_spro': .60, 'logical_pixel_ap': .20, 'normal_performance': .10, 'efficiency': .10},
+    'efficiency_anchors': {'latency_ms': 20., 'parameters': 1000000., 'process_ram_mib': 512.},
+}
+
+
+def research_score(model):
+    """Fixed, population-independent [0,1] normalization within exact cohorts.
+
+    Efficiency averages a/(a+x) for CPU p95 latency, parameter count and peak
+    process RAM. No cohort min/max or best-seed confirmation is inferred.
+    """
+    m = model['metrics']; anchors = RESEARCH_POLICY['efficiency_anchors']
+    keys = (SPRO, AP, FPR, LATENCY, PARAMETERS, MEMORY)
+    if any(isinstance(m.get(k), bool) or not isinstance(m.get(k), (int, float)) or
+           not math.isfinite(m[k]) for k in keys):
+        raise ValueError('research ranking requires finite measured endpoints')
+    if any(not 0 <= m[k] <= 1 for k in (SPRO, AP, FPR)) or any(m[k] < 0 for k in (LATENCY, PARAMETERS, MEMORY)):
+        raise ValueError('research ranking endpoints outside valid range')
+    components = {'logical_spro': m[SPRO], 'logical_pixel_ap': m[AP], 'normal_performance': 1-m[FPR],
+                  'efficiency': sum(a/(a+m[k]) for a,k in ((anchors['latency_ms'],LATENCY),
+                      (anchors['parameters'],PARAMETERS),(anchors['process_ram_mib'],MEMORY)))/3}
+    weighted = {k: RESEARCH_POLICY['weights'][k]*v for k,v in components.items()}
+    return {'policy': RESEARCH_POLICY, 'components': components, 'weighted': weighted,
+            'score': sum(weighted.values()), 'localization_weight': .8}
+
+
+def research_states(store):
+    with store.connect() as con:
+        return {r['name'][len(RESEARCH_PREFIX):]: json.loads(r['value']) for r in con.execute(
+            'SELECT name,value FROM settings WHERE name LIKE ?', (RESEARCH_PREFIX+'%',))}
+
+
+def refresh_research_incumbents(store):
+    """Re-rank verified archives, append decisions; never rewrite scientific heads.
+
+    Immutable archives and authoritative historical runs are verified again, even
+    for previously ranked models. Corrupt/missing evidence is explicitly excluded.
+    """
+    models = retained(store); groups = {}; excluded = []
+    for model in models.values():
+        try:
+            category = retained_category(store, model)
+            row = store.get_run(model['run_id'])
+            if row['status'] not in {'COMPLETED','REVIEWED','PROMOTED','REJECTED'}:
+                raise ValueError('model run is not successfully trained and evaluated')
+            evaluation = json.loads((Path(model['archive'])/'evaluation.json').read_text())
+            if (evaluation.get('checkpoint_unchanged') is not True or
+                evaluation.get('status') != 'COMPLETE_COMPATIBLE_DEVELOPMENT' or
+                evaluation['metrics'] != model['metrics']):
+                raise ValueError('retained evaluation evidence differs from ranking measurements')
+            cfg = json.loads(row['config_json']); measured = json.loads(row['metrics_json'])
+            if cfg.get('training_completion_policy') in {'required-training-target-v1','elapsed-training-loop-v1'}:
+                if measured.get('training/timing_verified') != 1 or measured.get('training/target_reached') != 1:
+                    raise ValueError('new model lacks verified completed training target')
+            score = research_score(model)
+            groups.setdefault(model['cohort_id'], []).append((model, score, category))
+        except (ValueError, KeyError, OSError) as exc:
+            excluded.append({'retention_id':model['retention_id'], 'run_id':model['run_id'], 'reason':str(exc)})
+    for cid, previous in research_states(store).items():
+        if cid not in groups and previous['retention_id'] in models:
+            with store.connect() as con:
+                event(con,'RESEARCH_INCUMBENT_UNAVAILABLE',{'cohort_id':cid,'previous':previous,
+                      'reason':'no eligible intact archive remains; historical evidence preserved'})
+                con.execute('DELETE FROM settings WHERE name=?',(RESEARCH_PREFIX+cid,))
+    for cid, group in groups.items():
+        ordered = sorted(group, key=lambda x:(-x[1]['score'], x[0]['created_at'], x[0]['retention_id']))
+        best, score, category = ordered[0]
+        with store.connect() as con:
+            con.execute('BEGIN IMMEDIATE')
+            prior = con.execute('SELECT value FROM settings WHERE name=?',(RESEARCH_PREFIX+cid,)).fetchone()
+            previous = json.loads(prior[0]) if prior else None
+            # Another writer may have retained/selected a new model after this
+            # scan's snapshot. Do not replace it using an older candidate pool.
+            if previous and previous['retention_id'] not in models:
+                continue
+            scientific = con.execute('SELECT value FROM settings WHERE name=?',(PREFIX+cid,)).fetchone()
+            scientific_state=json.loads(scientific[0]) if scientific else {}
+            confirmation=('REPEATED_SEED_SUPPORTED' if scientific_state.get('retention_id')==best['retention_id'] and
+                          scientific_state.get('confirmation')=='REPEATED_SEED_SUPPORTED' else 'EXPLORATORY_RESEARCH_INCUMBENT')
+            if previous and previous['retention_id']==best['retention_id'] and previous['selection']==score and previous['confirmation']==confirmation:
+                continue
+            old = models.get(previous['retention_id']) if previous else None
+            # Historical scientific incumbent is the initial comparison reference.
+            if old is None:
+                if scientific: old = models.get(json.loads(scientific[0])['retention_id'])
+            state = {'retention_id':best['retention_id'], 'category':category,
+                     'confirmation':confirmation, 'selection':score,
+                     'revision':1 if previous is None else previous['revision']+1,
+                     'previous_retention_id':old['retention_id'] if old else None,
+                     'localization_delta':{k:best['metrics'][k]-old['metrics'][k] for k in (SPRO,AP)} if old else {},
+                     'deployment_readiness':{'status':'NOT_DEPLOYMENT_CERTIFIED',
+                         'meets_existing_fpr_and_size_targets':admissible(best,policy()),
+                         'normal_fpr':best['metrics'][FPR], 'scientific_confirmation':'not established by ranking'}}
+            con.execute('INSERT OR REPLACE INTO settings(name,value) VALUES(?,?)',
+                        (RESEARCH_PREFIX+cid,json.dumps(state,sort_keys=True)))
+            event(con,'RESEARCH_INCUMBENT_SELECTED',dict(state,cohort_id=cid),best['run_id'])
+        from orchestrator.mlflow_tracker import enqueue_run_tracking
+        for rid in {best['run_id']} | ({old['run_id']} if old else set()):
+            enqueue_run_tracking(store,rid,event_key_suffix=f'research-incumbent:{cid}:{state["revision"]}')
+    return {'states':research_states(store), 'excluded':excluded}

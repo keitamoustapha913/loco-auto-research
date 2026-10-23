@@ -312,9 +312,10 @@ def research_evidence(store, repo_root=REPO, requested=()):
     summaries.update({r['run_id']:json.loads(r['payload_json']) for r in records if r['run_id'] in summaries})
     def quality(row):
         return (summaries[row['run_id']] or {}).get('metrics', {}).get('dev_real/logical_au_spro_0_05_compatible', -1)
-    from orchestrator.model_registry import states, retained, frontier
+    from orchestrator.model_registry import states, research_states, retained, frontier
     retained_models=retained(store)
     persistent_ids=[retained_models[s['retention_id']]['run_id'] for s in states(store).values()]
+    persistent_ids += [retained_models[s['retention_id']]['run_id'] for s in research_states(store).values()]
     for cid in {m['cohort_id'] for m in retained_models.values()}:
         group=[m for m in retained_models.values() if m['cohort_id']==cid]
         persistent_ids += [retained_models[rid]['run_id'] for rid in frontier(group)]

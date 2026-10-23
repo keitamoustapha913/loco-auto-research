@@ -79,11 +79,11 @@ def starting_context(store, config, strict=False):
     result = {'start_from': mode, 'dataset': config['campaign']['dataset'], 'models': [],
               'weight_reuse': 'Only an explicit validated scientific plan may request weight reuse.'}
     if mode == 'previous_best':
-        from orchestrator.model_registry import states, retained, verify_archive, admissible, policy, retained_category
+        from orchestrator.model_registry import states, retained, verify_archive, admissible, policy, retained_category, research_states
         models = retained(store)
-        for cohort, state in states(store).items():
+        for cohort, state in (research_states(store) or states(store)).items():
             model = models[state['retention_id']]
-            if retained_category(store,model) != result['dataset'] or not admissible(model, policy()): continue
+            if retained_category(store,model) != result['dataset']: continue
             verify_archive(model)
             result['models'].append({'cohort_id': cohort, 'confirmation': state['confirmation'],
                 'run_id': model['run_id'], 'candidate_id': model['candidate_id'],
@@ -133,7 +133,9 @@ def training_execution_estimate(store, config, *, jobs=1, newly_trained=1, real_
     CPU observations never predict CUDA throughput. No extra execution deadline.
     """
     import json
-    evaluation=[];ratios=[];exact=[];loop_extras=[]
+    evaluation=[];current_evaluation=[];ratios=[];exact=[];loop_extras=[]
+    from orchestrator.development_feedback import feedback_pipeline_identity
+    pipeline=feedback_pipeline_identity()
     device=config['campaign'].get('gpu_device','cuda')
     with store.connect() as con:
         for row in con.execute("SELECT * FROM runs WHERE category=? ORDER BY created_at DESC LIMIT 100",(config['campaign']['dataset'],)):
@@ -151,8 +153,16 @@ def training_execution_estimate(store, config, *, jobs=1, newly_trained=1, real_
             ratios.append(value)
             if source_sha256 and effective.get('model_sha256')==source_sha256:exact.append(value)
         for row in con.execute("SELECT payload_json FROM events WHERE kind='REAL_DEVELOPMENT_FEEDBACK' ORDER BY id DESC LIMIT 30"):
-            value=json.loads(row[0]).get('metrics',{}).get('dev_real/evaluation_wall_seconds')
-            if isinstance(value,(int,float)) and not isinstance(value,bool) and math.isfinite(value) and value>=0:evaluation.append(value)
+            payload=json.loads(row[0]);value=payload.get('metrics',{}).get('dev_real/evaluation_wall_seconds')
+            if isinstance(value,(int,float)) and not isinstance(value,bool) and math.isfinite(value) and value>=0:
+                evaluation.append(value)
+                if payload.get('execution_profile',{}).get('pipeline_identity')==pipeline:
+                    current_evaluation.append(value)
+        for row in con.execute("SELECT payload_json FROM events WHERE kind='FEEDBACK_EXECUTION_PROFILE' ORDER BY id DESC LIMIT 30"):
+            payload=json.loads(row[0]);value=payload.get('evaluation_wall_seconds')
+            if (payload.get('pipeline_identity')==pipeline and payload.get('category')==config['campaign']['dataset'] and
+                isinstance(value,(int,float)) and not isinstance(value,bool) and math.isfinite(value) and value>0):
+                current_evaluation.append(value)
     if throughput is not None:
         if throughput.get('source_sha256')!=source_sha256 or throughput.get('device')!=device:
             raise ValueError('throughput source/device differs from effective candidate')
@@ -171,7 +181,10 @@ def training_execution_estimate(store, config, *, jobs=1, newly_trained=1, real_
     if loop_timed:
         ratio=1.;basis='elapsed training-loop target; computation/preparation ratio is diagnostic only'
     setup=max([60.]+loop_extras) if loop_timed else 60.
-    feedback=max([180.]+evaluation) if real_feedback else 0.
+    # Do not permanently charge the obsolete serial/hash-heavy implementation
+    # after a verified replacement has measured end-to-end costs. Margin is an
+    # admission estimate, never a new execution timeout or training-time change.
+    feedback=max([180.]+[v*1.25 for v in current_evaluation]) if real_feedback and current_evaluation else max([180.]+evaluation) if real_feedback else 0.
     overshoot=0.
     if throughput:
         initial=throughput.get('initial_preparation_seconds',0)
@@ -186,5 +199,6 @@ def training_execution_estimate(store, config, *, jobs=1, newly_trained=1, real_
             'projected_training_execution_seconds_per_model':target*ratio+overshoot,
             'preparation_and_diagnostics_estimate_seconds':setup,'throughput_observed':observed,
             'feedback_estimate_seconds':feedback,'critique_estimate_seconds':90. if critique else 0.,
+            'feedback_estimate_basis':'matched current CPU pipeline plus 25% uncertainty' if current_evaluation else 'conservative historical/default estimate',
             'required_seconds':newly_trained*(target*ratio+overshoot)+jobs*(setup+feedback)+(90. if critique else 0.),
             'basis':basis+'; scheduling estimates only, original campaign deadline unchanged'}

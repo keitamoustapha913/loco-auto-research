@@ -70,11 +70,12 @@ def _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=None,
         evidence, files = research_evidence(store, repo_root, requested)
         files['cumulative/evidence.json']=path
         prompt += ('\nPersistent whole-history scientific memory is at /workspace/evidence/cumulative/evidence.json. '
-                   'Logical AU-sPRO@5% and pixel AP have priority over detection scores. Preserve the incumbent; '
-                   'only deterministic promotion rules can replace it. Review unfinished comparisons, failures, '
+                   'Active research selection weights logical AU-sPRO 60%, pixel AP 20%, normal performance 10%, efficiency 10%. '
+                   'Use the active research incumbent as the primary reference; weight reuse requires an explicit plan. '
+                   'Confirmed scientific champions are separate and require controlled verification. Review unfinished comparisons, failures, '
                    'prior ablations and confirmation needs before choosing research. You choose methods freely. '
                    'An exploratory record score is not a confirmed improvement. Current retained heads: '+
-                   json.dumps([{k:c[k] for k in ('cohort_id','state','champion')} for c in memory['cohorts']]))
+                   json.dumps([{k:c.get(k) for k in ('cohort_id','research_state','research_incumbent','state','champion')} for c in memory['cohorts']]))
         kwargs['reference_files']=files
         if role=='researcher':
             from orchestrator.planning_contract import baseline_capability

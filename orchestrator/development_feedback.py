@@ -8,6 +8,10 @@ import signal
 import sys
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import shutil
+import threading
 import numpy as np
 from PIL import Image
 from benchmark.data_guard import sha256_file, load_manifest, manifest_fingerprint
@@ -74,6 +78,81 @@ def run_bounded(command, log_path, seconds, cancel=None):
             raise RuntimeError(f'evaluation stage failed with exit {process.returncode}; inspect {log_path.name}')
 
 
+
+def cpu_worker_count():
+    """Internal bounded concurrency; each worker still sees exactly one image.
+
+    Reserve 2 GiB for trusted scoring/controller and allow 2 GiB per fresh worker.
+    This is scheduling, not a substitute for OS memory isolation.
+    """
+    import psutil
+    cpus = len(os.sched_getaffinity(0)) if hasattr(os,'sched_getaffinity') else os.cpu_count() or 1
+    memory = max(1, int((psutil.virtual_memory().available-2*2**30)//(2*2**30)))
+    return max(1, min(4, cpus//2, memory))
+
+
+def feedback_pipeline_identity():
+    """Cost observations are comparable only for the same verified CPU path."""
+    return {'version':'isolated-cpu-feedback-v1','cpu_workers':cpu_worker_count(),
+            'worker_sha256':sha256_file(REPO/'scripts/feedback_infer.py'),
+            'scorer_sha256':sha256_file(REPO/'benchmark/feedback_metrics.py')}
+
+
+def run_isolated_cases(items, worker, workers=None):
+    """Bound scheduling only; worker owns per-image sandbox and cancellation."""
+    with ThreadPoolExecutor(max_workers=cpu_worker_count() if workers is None else workers) as pool:
+        return list(pool.map(worker, items))
+
+
+def feedback_identity(manifest, run, config, before, size, threshold, workers=None):
+    # Numerical evaluator version is unchanged. Implementation hashes invalidate
+    # cache after any trusted inference/scoring change. No final-holdout identity.
+    identity = {'version':'frozen-feedback-cache-v1','manifest':manifest,
+        'checkpoint_sha256':before['checkpoint'],'checkpoint_manifest_sha256':before['metadata'],
+        'source_sha256':before['source'],'training_manifest_sha256':run['manifest_sha256'],
+        'inference_configuration':config.get('inference',{}),'preprocessing_size':size,
+        'normal_only_threshold':threshold,'device':'cpu','cpu_workers':cpu_worker_count() if workers is None else workers,'evaluator_version':VERSION,
+        'worker_sha256':sha256_file(REPO/'scripts/feedback_infer.py'),
+        'scorer_sha256':sha256_file(REPO/'benchmark/feedback_metrics.py')}
+    return hashlib.sha256(json.dumps(identity,sort_keys=True,allow_nan=False).encode()).hexdigest()
+
+
+def verify_feedback_cache(summary, key, job_root):
+    """Require exact immutable identities and safe, content-verified predictions."""
+    if summary.get('cache_identity') != key or summary.get('checkpoint_unchanged') is not True:
+        raise ValueError('feedback cache identity mismatch')
+    root = Path(summary['artifact_dir'])
+    if root.is_symlink() or not root.resolve().is_relative_to(Path(job_root).resolve()):
+        raise ValueError('feedback cache escapes jobs')
+    for name, digest in summary['cache_artifact_hashes'].items():
+        path=root/name
+        if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()) or sha256_file(path)!=digest:
+            raise ValueError('feedback cache artifact integrity mismatch')
+    rows=json.loads((root/'case_scores.json').read_text())
+    if len(rows)!=summary['counts']['images']:raise ValueError('cached feedback coverage mismatch')
+    for row in rows:
+        path=root/f"case_{row['case_index']:04d}"/'map.npy'
+        if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()) or sha256_file(path)!=row['map_sha256']:
+            raise ValueError('feedback cache heatmap integrity mismatch')
+    return root
+
+def reuse_feedback_artifacts(summary, cache_key, job_root, output, config, run, eval_id):
+    """Copy only verified frozen predictions; never call candidate/training code."""
+    origin=verify_feedback_cache(summary,cache_key,job_root)
+    # Candidate outputs must not introduce links into the trusted copy.
+    if any(p.is_symlink() or not (p.is_file() or p.is_dir()) for p in origin.rglob('*')):raise ValueError('unsafe linked feedback artifact')
+    shutil.copytree(origin,output)
+    summary=dict(summary,evaluation_id=eval_id,artifact_dir=str(output),reused_from_evaluation_id=summary['evaluation_id'])
+    for key in ('plan_id','plan_sha256','plan_arm','seed','plan_pair_seed','inference_configuration','trusted_source_sha256'):
+        summary.pop(key,None)
+    if config.get('plan_sha256'):
+        summary.update({key:config[key] for key in ('plan_id','plan_sha256','plan_arm','seed','trusted_source_sha256')})
+        summary.update(plan_pair_seed=config.get('plan_pair_seed',config['seed']),inference_configuration=config.get('inference',{}))
+    summary['metrics']=dict(summary['metrics'],**{'dev_real/training_gpu_slot_seconds':run['gpu_seconds']})
+    (output/'summary.json').write_text(json.dumps(summary,sort_keys=True,indent=2))
+    return summary
+
+
 def evaluate_run(runtime,store,run_id,*,timeout=600,cancel=None,personal_mode_authorized=False,deadline=None):
     if not personal_mode_authorized:
         raise PermissionError('bounded evaluation requires explicit personal Bubblewrap authorization')
@@ -129,54 +208,90 @@ def _evaluate(runtime,store,run_id,timeout,cancel):
     threshold=json.loads(run['metrics_json']).get('normal/threshold')
     if threshold is None: raise ValueError('separate normal-only calibrated threshold is required')
     before={str(p):sha256_file(p) for p in (module,checkpoint,checkpoint_meta,job/'run_manifest.json')}
+    def check_frozen_inputs():
+        if any(sha256_file(Path(path))!=value for path,value in before.items()):
+            raise ValueError('immutable candidate/checkpoint/provenance changed')
     import hashlib
-    eval_id=hashlib.sha256((run_id+manifest['split_id']+before[str(checkpoint)]+VERSION).encode()).hexdigest()[:24]
+    workers=cpu_worker_count()
+    cache_key=feedback_identity(manifest,run,config,{'source':before[str(module)],'checkpoint':before[str(checkpoint)],'metadata':before[str(checkpoint_meta)]},provenance['size'],threshold,workers=workers)
+    eval_id=hashlib.sha256((run_id+cache_key).encode()).hexdigest()[:24]
     old=latest_summary(store,run_id)
-    if old and old['evaluation_id']==eval_id: return old
+    if old and old['evaluation_id']==eval_id:
+        verify_feedback_cache(old,cache_key,runtime/'jobs')
+        check_frozen_inputs()
+        return old
     output=job/'feedback'/eval_id
     if output.is_symlink() or output.parent.is_symlink():
         raise ValueError('feedback output must not use symlinks')
     if output.exists():
         # A process crash cannot silently repeat a possibly costly inference stage.
         if (output/'summary.json').is_file():
-            summary=json.loads((output/'summary.json').read_text()); record_summary(store,run_id,summary); return summary
+            summary=json.loads((output/'summary.json').read_text())
+            verify_feedback_cache(summary,cache_key,runtime/'jobs')
+            check_frozen_inputs()
+            record_summary(store,run_id,summary); return summary
         raise RuntimeError(f'interrupted feedback attempt retained at {output}; explicit operator review required')
+    # Reuse exact, integrity-verified frozen readouts across runs. Copy artifacts
+    # into the new run's own directory; no shared candidate-writable output.
+    with store.connect() as con:
+        cached=con.execute("SELECT payload_json FROM events WHERE kind='REAL_DEVELOPMENT_FEEDBACK' AND json_extract(payload_json,'$.cache_identity')=? ORDER BY id DESC LIMIT 1",(cache_key,)).fetchone()
+    if cached:
+        summary=reuse_feedback_artifacts(json.loads(cached[0]),cache_key,runtime/'jobs',output,config,run,eval_id)
+        check_frozen_inputs()
+        record_summary(store,run_id,summary)
+        return summary
     output.mkdir(parents=True)
     empty=output/'empty_data'; empty.mkdir()
     rows=[]
+    aborted=threading.Event()
     try:
-        for index,entry in enumerate(manifest['images']):
+        def infer_case_inner(pair):
+            if aborted.is_set():raise RuntimeError('peer feedback worker failed')
+            index,entry=pair
             if cancel and cancel(): raise RuntimeError('feedback cancelled by campaign stop')
             remaining=timeout-(time.monotonic()-started)
             if remaining<=0: raise TimeoutError('bounded CPU feedback wall limit reached')
             folder=output/f'case_{index:04d}'; folder.mkdir()
+            case_started=time.monotonic()
             command=sandbox_command(REPO,module,empty,folder,
                 ['-m','scripts.feedback_infer','--size',str(provenance['size']),
                  '--inference-config-json',json.dumps(config.get('inference', {}))],use_gpu=False,
                 input_files={'model.pt':checkpoint,'checkpoint_manifest.json':checkpoint_meta,
                              'image.png':data_root/entry['path']}, pinned_source=bool(config.get('frozen_baseline')))
-            run_bounded(command, folder/'worker.log', remaining if timed else min(30,remaining), cancel)
+            run_bounded(command, folder/'worker.log', remaining if timed else min(30,remaining), lambda:aborted.is_set() or bool(cancel and cancel()))
+            worker_seconds=time.monotonic()-case_started
             validate_worker_outputs(folder, entry['width'], entry['height'])
             result=json.loads((folder/'inference.json').read_text())
             heatmap=np.load(folder/'map.npy',allow_pickle=False)
             if heatmap.shape!=(entry['height'],entry['width']) or not np.isfinite(heatmap).all():
                 raise ValueError('invalid original-resolution heatmap')
-            rows.append(dict(result,category=entry['category'],source_sha256=entry['sha256'],
-                             mask_count=len(entry['masks']),case_index=index,map_sha256=sha256_file(folder/'map.npy')))
+            row=dict(result,category=entry['category'],source_sha256=entry['sha256'],
+                     mask_count=len(entry['masks']),case_index=index,map_sha256=sha256_file(folder/'map.npy'))
             if index in (0,47,118):
                 lo,hi=float(heatmap.min()),float(heatmap.max())
                 scaled=np.clip((heatmap-lo)/max(hi-lo,1e-12),0,1)
                 rgb=np.stack([scaled*255,scaled*60,(1-scaled)*100],axis=-1).astype(np.uint8)
                 Image.fromarray(rgb).save(output/f'heatmap_{index}.png')
-        if any(sha256_file(Path(path))!=value for path,value in before.items()):
-            raise ValueError('immutable candidate/checkpoint/provenance changed')
+            row['worker_wall_seconds']=worker_seconds
+            return row
+        def infer_case(pair):
+            try:return infer_case_inner(pair)
+            except BaseException:
+                aborted.set()
+                raise
+        inference_started=time.monotonic()
+        rows=run_isolated_cases(enumerate(manifest['images']),infer_case,workers=workers)
+        inference_wall=time.monotonic()-inference_started
+        check_frozen_inputs()
         def check():
             if time.monotonic()-started >= timeout: raise TimeoutError('evaluation wall limit reached')
             if cancel and cancel(): raise RuntimeError('feedback cancelled')
         metrics=detection_metrics(rows,threshold)
+        scoring_started=time.monotonic()
         run_bounded([sys.executable,'-m','benchmark.feedback_metrics','--data-root',str(data_root),
                      '--maps',str(output),'--result',str(output/'localization.json')],
                     output/'scorer.log',timeout-(time.monotonic()-started),cancel)
+        scoring_wall=time.monotonic()-scoring_started
         metrics.update(json.loads((output/'localization.json').read_text()))
         parameters={r['parameters'] for r in rows}
         if len(parameters)!=1: raise ValueError('model capacity changed between images')
@@ -196,8 +311,13 @@ def _evaluate(runtime,store,run_id,timeout,cancel):
                  'threshold_source':'originating run normal-only validation calibration; maximum model-space map score',
                  'learning_policy':'335 train/good only; no development anomaly fitting, normalization or calibration',
                  'inference_isolation':'one opaque image per fresh no-network CPU Bubblewrap process; no masks, no peer images; shared host UID residual risk',
+                 'cache_identity':cache_key, 'execution_profile':{'version':'feedback-timing-v1','cpu_workers':workers,
+                    'pipeline_identity':dict(feedback_pipeline_identity(),cpu_workers=workers),
+                    'inference_stage_wall_seconds':inference_wall,'trusted_scoring_wall_seconds':scoring_wall,
+                    'sum_isolated_worker_wall_seconds':sum(r['worker_wall_seconds'] for r in rows),
+                    'sum_prediction_e2e_seconds':sum(r['e2e_ms'] for r in rows)/1000},
                  'checkpoint_unchanged':True,'metrics':metrics,'counts':manifest['summary'],
-                 'inference_device':'cpu','measurement_protocol':rows[0]['measurement_protocol'],
+                 'inference_device':'cpu','measurement_protocol':rows[0]['measurement_protocol']+f'; CPU concurrency={workers}; latency measured under concurrent load',
                  'cuda_inference_memory_status':'unavailable: CPU inference; no CUDA measurement',
                  'localization_status':LOCALIZATION_STATUS,'localization_blocker':'Official download still HTTP 404; compatible scorer uses published definition, not verified original-code equivalence.',
                  'artifact_dir':str(output),'status':'COMPLETE_COMPATIBLE_DEVELOPMENT'}
@@ -208,6 +328,7 @@ def _evaluate(runtime,store,run_id,timeout,cancel):
                            inference_configuration=config.get('inference', {}),
                            trusted_source_sha256=config['trusted_source_sha256'])
         (output/'case_scores.json').write_text(json.dumps(rows,sort_keys=True,indent=2))
+        summary['cache_artifact_hashes']={name:sha256_file(output/name) for name in ('case_scores.json','localization.json')}
         (output/'summary.json').write_text(json.dumps(summary,sort_keys=True,indent=2))
         record_summary(store,run_id,summary)
         return summary
