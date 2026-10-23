@@ -117,6 +117,14 @@ def feedback_identity(manifest, run, config, before, size, threshold, workers=No
     return hashlib.sha256(json.dumps(identity,sort_keys=True,allow_nan=False).encode()).hexdigest()
 
 
+def feedback_map_root(summary, job_root):
+    """Resolve a trusted map reference, never a filesystem link or peer mount."""
+    root = Path(summary.get('prediction_artifact_dir', summary['artifact_dir']))
+    if root.is_symlink() or not root.resolve(strict=True).is_relative_to(Path(job_root).resolve(strict=True)):
+        raise ValueError('feedback prediction reference escapes jobs')
+    return root
+
+
 def verify_feedback_cache(summary, key, job_root):
     """Require exact immutable identities and safe, content-verified predictions."""
     if summary.get('cache_identity') != key or summary.get('checkpoint_unchanged') is not True:
@@ -130,26 +138,50 @@ def verify_feedback_cache(summary, key, job_root):
             raise ValueError('feedback cache artifact integrity mismatch')
     rows=json.loads((root/'case_scores.json').read_text())
     if len(rows)!=summary['counts']['images']:raise ValueError('cached feedback coverage mismatch')
+    map_root = feedback_map_root(summary, job_root)
     for row in rows:
-        path=root/f"case_{row['case_index']:04d}"/'map.npy'
-        if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()) or sha256_file(path)!=row['map_sha256']:
+        path=map_root/f"case_{row['case_index']:04d}"/'map.npy'
+        if path.is_symlink() or not path.resolve().is_relative_to(map_root.resolve()) or sha256_file(path)!=row['map_sha256']:
             raise ValueError('feedback cache heatmap integrity mismatch')
     return root
 
 def reuse_feedback_artifacts(summary, cache_key, job_root, output, config, run, eval_id):
-    """Copy only verified frozen predictions; never call candidate/training code."""
+    """Reference verified maps; copy small per-run metadata, never model code.
+
+    No hardlinks/symlinks: a later write to this run cannot mutate the original
+    predictions. Every reuse rehashes the referenced maps. References are only
+    consumed by trusted scoring/viewing; they are never mounted into candidates.
+    """
     origin=verify_feedback_cache(summary,cache_key,job_root)
     # Candidate outputs must not introduce links into the trusted copy.
     if any(p.is_symlink() or not (p.is_file() or p.is_dir()) for p in origin.rglob('*')):raise ValueError('unsafe linked feedback artifact')
-    shutil.copytree(origin,output)
-    summary=dict(summary,evaluation_id=eval_id,artifact_dir=str(output),reused_from_evaluation_id=summary['evaluation_id'])
+    map_root = feedback_map_root(summary, job_root)
+    output = Path(output)
+    if output.exists() or output.is_symlink() or output.parent.is_symlink() or not output.resolve().is_relative_to(Path(job_root).resolve()):
+        raise ValueError('unsafe or existing feedback reuse destination')
+    summary=dict(summary,evaluation_id=eval_id,artifact_dir=str(output),
+                 prediction_artifact_dir=str(map_root),reused_from_evaluation_id=summary['evaluation_id'])
     for key in ('plan_id','plan_sha256','plan_arm','seed','plan_pair_seed','inference_configuration','trusted_source_sha256'):
         summary.pop(key,None)
     if config.get('plan_sha256'):
         summary.update({key:config[key] for key in ('plan_id','plan_sha256','plan_arm','seed','trusted_source_sha256')})
         summary.update(plan_pair_seed=config.get('plan_pair_seed',config['seed']),inference_configuration=config.get('inference',{}))
     summary['metrics']=dict(summary['metrics'],**{'dev_real/training_gpu_slot_seconds':run['gpu_seconds']})
-    (output/'summary.json').write_text(json.dumps(summary,sort_keys=True,indent=2))
+    serialized = json.dumps(summary,sort_keys=True,indent=2)
+    names = [name for name in ('case_scores.json','localization.json','heatmap_0.png','heatmap_47.png','heatmap_118.png')
+             if (origin/name).is_file()]
+    from orchestrator.budgets import enforce_disk
+    enforce_disk(Path(job_root).parent, required_bytes=len(serialized.encode())+sum((origin/name).stat().st_size for name in names))
+    # Publish atomically; cleanup only the new temporary directory on failure.
+    # Previously published results, origins and interrupted attempts are intact.
+    import tempfile
+    output.parent.mkdir(parents=True,exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='.feedback-reuse-',dir=output.parent) as folder:
+        staging = Path(folder)/'result';staging.mkdir()
+        for name in names:
+            shutil.copyfile(origin/name,staging/name)
+        (staging/'summary.json').write_text(serialized)
+        staging.rename(output)
     return summary
 
 
@@ -231,8 +263,8 @@ def _evaluate(runtime,store,run_id,timeout,cancel):
             check_frozen_inputs()
             record_summary(store,run_id,summary); return summary
         raise RuntimeError(f'interrupted feedback attempt retained at {output}; explicit operator review required')
-    # Reuse exact, integrity-verified frozen readouts across runs. Copy artifacts
-    # into the new run's own directory; no shared candidate-writable output.
+    # Reuse exact readouts without duplicating full-resolution prediction arrays.
+    # Per-run metadata stays local; trusted consumers verify referenced maps.
     with store.connect() as con:
         cached=con.execute("SELECT payload_json FROM events WHERE kind='REAL_DEVELOPMENT_FEEDBACK' AND json_extract(payload_json,'$.cache_identity')=? ORDER BY id DESC LIMIT 1",(cache_key,)).fetchone()
     if cached:

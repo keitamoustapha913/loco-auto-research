@@ -203,6 +203,38 @@ def test_frozen_arm_uses_exact_same_seed_checkpoint_and_committed_source(laborat
         with pytest.raises(ValueError,match='changed'):verify_baseline(store,bad,repo)
 
 
+@pytest.mark.parametrize('exhausted',[False,True])
+def test_three_arm_frozen_matrix_disk_preflight_precedes_dispatch(laboratory,monkeypatch,exhausted):
+    from orchestrator.budgets import enforce_disk
+    store,c,cid,runtime,repo,calls,_=laboratory
+    original=experiment_plan(seeds=(3,),arms=('control',))
+    original['arms'][0]['inference']={}
+    execute_plan(store,c,cid,runtime,original)
+    origin=c.runs(cid)[0]
+    reference,_,_=baseline_reference(store,origin['run_id'],repo)
+    checkpoint=Path(origin['artifact_dir'])/'checkpoint'
+    before={p.name:p.read_bytes() for p in checkpoint.iterdir()}
+    plan=experiment_plan(seeds=(3,),arms=('control','intervention','reference'))
+    plan.update(plan_id='frozen_storage_preflight',kind='exploratory',baselines=[reference])
+    for arm in plan['arms']:
+        arm.update(execution='frozen',baseline_by_seed={'3':reference['baseline_id']},inference={})
+    calls.clear()
+    if exhausted:
+        size=enforce_disk(runtime)['observed_bytes']
+        copies=3*sum(p.stat().st_size for p in checkpoint.iterdir())
+        monkeypatch.setenv('LOCO_DISK_BUDGET_GIB',str((size+copies-1)/2**30))
+    result=execute_plan(store,c,cid,runtime,plan)
+    if exhausted:
+        assert result['status']=='INCOMPLETE' and result['recorded_jobs']==0 and not calls
+        assert any('required_additional_bytes=' in problem for problem in result['problems'])
+        assert not any(json.loads(e['payload_json']).get('role')=='implementer' for e in c.events(cid,100))
+    else:
+        assert result['status']=='COMPLETE_EXPLORATORY' and len(calls)==3,result['problems']
+        assert all(cfg['execution_kind']=='frozen' for cfg in calls)
+        assert all(row['optimizer_updates']==0 for row in result['cells'])
+    assert {p.name:p.read_bytes() for p in checkpoint.iterdir()}==before
+
+
 def test_history_exposes_committed_code_and_aggregate_evidence_only(laboratory):
     store,c,cid,runtime,repo,_,_=laboratory;p=experiment_plan();execute_plan(store,c,cid,runtime,p)
     context,files=research_evidence(store,repo,requested=[c.runs(cid)[0]['run_id']])

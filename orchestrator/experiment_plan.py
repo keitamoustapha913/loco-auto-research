@@ -645,6 +645,20 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
         if not time_based(cfg):raise CandidateValidationError('campaign-timed plans require the two-time campaign configuration')
     error = ''
     try:
+        # Admit the complete pending frozen matrix before dispatching its first
+        # cell. Exact checkpoint-copy bytes are a lower bound; never invent a
+        # reservation from agent prose or treat filesystem free space as quota.
+        from orchestrator.budgets import enforce_disk
+        required_bytes = 0
+        for arm, seed in cells(plan):
+            if arm['execution'] != 'frozen' or store.get_run(cell_run_id(campaign_id, plan, arm['arm_id'], seed)):
+                continue
+            if not arm['source_arm_id']:
+                reference = next(b for b in plan['baselines'] if b['baseline_id'] == arm['baseline_by_seed'][str(seed)])
+                _, origin = verify_baseline(store, reference, controller.REPO)
+                required_bytes += sum((Path(origin['artifact_dir'])/'checkpoint'/name).stat().st_size
+                                      for name in ('model.pt','checkpoint_manifest.json'))
+        enforce_disk(runtime, required_bytes=required_bytes)
         if plan['evaluation']['real_development_feedback'] and not cfg['research'].get('real_development_feedback'):
             raise PermissionError('plan requested real feedback outside campaign authorization')
         usage = campaigns.usage(campaign_id)

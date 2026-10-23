@@ -342,6 +342,12 @@ def test_real_preview_ground_truth_is_verified_display_only(tmp_path,monkeypatch
     assert sample['mask_count']==2
     assert sample['original'].size==sample['heatmap'].size==sample['ground_truth'].size==(800,1600)
     assert np.asarray(sample['ground_truth']).min()==255
+    # Exact readout reuse stores per-run metadata and references verified maps.
+    # The original-resolution viewer must resolve that reference without links.
+    reused=tmp_path/'jobs/reused/feedback/eval';reused.mkdir(parents=True)
+    (reused/'case_scores.json').write_bytes((output/'case_scores.json').read_bytes())
+    view=real_heatmap_sample({'run_id':'reused','evaluation_id':'eval','prediction_artifact_dir':str(output)},1)
+    assert view['original'].size==view['heatmap'].size==(800,1600)
     target=fd.imported_root(tmp_path)/manifest['images'][1]['masks'][0]['path']
     target.unlink();target.symlink_to(incoming/'dev-manifest.json')
     with pytest.raises(ValueError,match='ground truth'): real_heatmap_sample({'run_id':'fixture','evaluation_id':'eval'},1)

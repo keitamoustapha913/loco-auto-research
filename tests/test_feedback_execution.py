@@ -81,7 +81,7 @@ def test_fast_state_hash_preserves_metadata_and_tensor_mutation_detection():
     with pytest.raises(ValueError,match='uninspectable'):state_digest(predictor)
 
 
-def test_frozen_readout_reuse_copies_verified_maps_without_model_execution(tmp_path,monkeypatch):
+def test_frozen_readout_reuse_references_verified_maps_without_model_execution(tmp_path,monkeypatch):
     from orchestrator import development_feedback as feedback
     root,s=cached(tmp_path)
     s.update(evaluation_id='first',metrics={'dev_real/logical_image_auroc':.75},plan_id='old',seed=7)
@@ -91,9 +91,47 @@ def test_frozen_readout_reuse_copies_verified_maps_without_model_execution(tmp_p
     assert result['metrics']['dev_real/logical_image_auroc']==.75
     assert result['reused_from_evaluation_id']=='first' and result['evaluation_id']=='second'
     assert 'plan_id' not in result and 'seed' not in result
-    assert (target/'case_0000/map.npy').read_bytes()==(root/'case_0000/map.npy').read_bytes()
+    assert not (target/'case_0000').exists()
+    assert feedback.feedback_map_root(result,tmp_path/'jobs') == root
+    assert (target/'case_scores.json').read_bytes()==(root/'case_scores.json').read_bytes()
     assert s['metrics']=={'dev_real/logical_image_auroc':.75}
     feedback.verify_feedback_cache(result,'exact',tmp_path/'jobs')
+
+
+def test_reuse_fits_budget_without_duplicate_arrays_and_remains_integrity_checked(tmp_path,monkeypatch):
+    from orchestrator import development_feedback as feedback
+    from orchestrator.budgets import enforce_disk,DiskBudgetExceeded
+    root,s=cached(tmp_path)
+    np.save(root/'case_0000/map.npy',np.zeros((512,512),np.float32))
+    (root/'case_scores.json').write_text(json.dumps([{'case_index':0,'map_sha256':sha256_file(root/'case_0000/map.npy')}]))
+    s['cache_artifact_hashes']['case_scores.json']=sha256_file(root/'case_scores.json')
+    s.update(evaluation_id='original',metrics={})
+    monkeypatch.setenv('LOCO_DISK_BUDGET_GIB',str(1.5*2**20/2**30))
+    # Previous copytree strategy exceeds this quota even though no new inference
+    # is required. Referencing the exact checked arrays stays within it.
+    with pytest.raises(DiskBudgetExceeded):enforce_disk(tmp_path,required_bytes=(root/'case_0000/map.npy').stat().st_size)
+    first=feedback.reuse_feedback_artifacts(s,'exact',tmp_path/'jobs',tmp_path/'jobs/new/feedback/first',{}, {'gpu_seconds':0},'first')
+    second=feedback.reuse_feedback_artifacts(first,'exact',tmp_path/'jobs',tmp_path/'jobs/newer/feedback/second',{}, {'gpu_seconds':0},'second')
+    assert feedback.feedback_map_root(second,tmp_path/'jobs')==root
+    assert len(list(tmp_path.rglob('map.npy')))==1
+    enforce_disk(tmp_path)
+    feedback.verify_feedback_cache(second,'exact',tmp_path/'jobs')
+    np.save(root/'case_0000/map.npy',np.ones((512,512),np.float32))
+    with pytest.raises(ValueError,match='heatmap'):feedback.verify_feedback_cache(second,'exact',tmp_path/'jobs')
+
+
+def test_reuse_cleanup_preserves_origin_and_rejects_unsafe_reference(tmp_path,monkeypatch):
+    from orchestrator import development_feedback as feedback
+    root,s=cached(tmp_path);s.update(evaluation_id='first',metrics={})
+    before=(root/'case_0000/map.npy').read_bytes()
+    target=tmp_path/'jobs/new/feedback/eval'
+    def fail(*args):raise OSError('fixture disk write failure')
+    monkeypatch.setattr(feedback.shutil,'copyfile',fail)
+    with pytest.raises(OSError,match='fixture disk'):feedback.reuse_feedback_artifacts(s,'exact',tmp_path/'jobs',target,{}, {'gpu_seconds':0},'second')
+    assert not target.exists() and not list(target.parent.glob('.feedback-reuse-*'))
+    assert (root/'case_0000/map.npy').read_bytes()==before
+    outside=tmp_path/'outside';outside.mkdir()
+    with pytest.raises(ValueError,match='escapes jobs'):feedback.verify_feedback_cache(dict(s,prediction_artifact_dir=str(outside)),'exact',tmp_path/'jobs')
 
 
 def test_managed_evaluation_cache_and_cross_run_readout_are_idempotent(tmp_path,monkeypatch,lab):

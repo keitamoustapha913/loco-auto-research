@@ -295,9 +295,13 @@ def real_heatmap_sample(summary, index, opacity=.4):
     entry = manifest['images'][index]
     image_path = root/entry['path']
     output = runtime_root()/'jobs'/summary['run_id']/'feedback'/summary['evaluation_id']
-    map_path = output/f'case_{index:04d}'/'map.npy'
+    from orchestrator.development_feedback import feedback_map_root
+    # Legacy summaries use local maps. New exact readout reuse keeps the maps
+    # under their verified original job, without copying or linking them.
+    map_output = feedback_map_root(dict(summary, artifact_dir=str(output)), runtime_root()/'jobs')
+    map_path = map_output/f'case_{index:04d}'/'map.npy'
     if (not output.resolve().is_relative_to(runtime_root()/'jobs') or map_path.is_symlink() or
-        not map_path.resolve().is_relative_to(output.resolve()) or
+        not map_path.resolve().is_relative_to(map_output.resolve()) or
         not image_path.resolve().is_relative_to(root.resolve()) or sha256_file(image_path)!=entry['sha256']):
         raise ValueError('unsafe development artifact')
     cases = json.loads((output/'case_scores.json').read_text())

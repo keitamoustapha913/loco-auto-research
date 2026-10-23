@@ -16,7 +16,7 @@ _IMPORT_SECONDS = time.perf_counter()-_IMPORT_STARTED
 
 def state_digest(predictor):
     """Include wrapper tensors (e.g. fixed normalization), modules and arrays."""
-    digest = hashlib.sha256(); seen = set()
+    digest = hashlib.sha256(); seen = {}
     def visit(value):
         # Large JSON checkpoint audits (indexed training streams) are predictor
         # state too. Hash all their contents using the C JSON encoder rather
@@ -31,10 +31,17 @@ def state_digest(predictor):
                 digest.update(b'json:');digest.update(encoded.encode());return
         if id(value) in seen:
             return
-        seen.add(id(value))
+        # Retain temporary state_dict/tensor wrappers for this traversal. An ID
+        # alone can be recycled after a wrapper is freed, hiding later state.
+        seen[id(value)] = value
         if isinstance(value, torch.nn.Module):
-            for key, tensor in sorted(value.state_dict().items()):
-                digest.update(key.encode()); visit(tensor)
+            visit(value.state_dict())  # parameters, persistent buffers, extra state
+            for name, module in value.named_modules():
+                digest.update(name.encode())
+                # state_dict intentionally omits non-persistent buffers and mode
+                # flags. Both can change predictions during frozen inference.
+                visit(module._buffers)
+                visit({key:part for key,part in vars(module).items() if not key.startswith('_')})
         elif isinstance(value, torch.Tensor):
             tensor = value.detach().cpu().contiguous()
             digest.update(str((tensor.dtype,tuple(tensor.shape))).encode())
@@ -54,6 +61,22 @@ def state_digest(predictor):
             raise ValueError(f'uninspectable inference state: {type(value).__name__}')
     visit(predictor)
     return digest.hexdigest()
+
+
+def verify_state_integrity():
+    """Cheap CPU preflight of the trusted hasher, before candidate execution."""
+    net = torch.nn.BatchNorm2d(2).eval()
+    net.register_buffer('probe_offset', torch.zeros(2), persistent=False)
+    original = state_digest(net)
+    with torch.inference_mode():
+        net(torch.ones(1, 2, 2, 2))
+    if state_digest(net) != original:
+        raise RuntimeError('trusted integrity preflight rejected unchanged frozen inference')
+    for buffer in (net.running_mean, net.running_var, net.num_batches_tracked, net.probe_offset):
+        before = state_digest(net)
+        buffer.add_(1)
+        if state_digest(net) == before:
+            raise RuntimeError('trusted integrity preflight failed to detect a registered buffer mutation')
 
 
 def modules_of(predictor):

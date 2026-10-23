@@ -616,6 +616,8 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
         'before training. Return exactly required_metrics as finite scalars; per_image must contain one source_id '
         'and nested numeric metrics per assessment image, including all paired metrics. Test representative '
         '18-calibration/36-assessment inputs at the declared size, strict threshold boundaries and state immutability. '
+        'For state fingerprints reuse scripts.feedback_infer.state_digest rather than a partial parameters-only digest. '
+        'CPU tests must detect intentional BatchNorm running-buffer mutations and accept unchanged eval-mode inference. '
         'Implementation response must echo the exact assigned candidate_id and explicit contract booleans; false '
         'training/load/predict attestations are correct ONLY for an all-frozen diagnostic provider.')
     import subprocess

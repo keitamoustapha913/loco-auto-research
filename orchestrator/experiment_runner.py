@@ -110,6 +110,8 @@ def probe_candidate_interface(repo_root, module_file, good_root, runtime, candid
         raise PermissionError('candidate probe output escapes runtime')
     required = ('diagnose',) if diagnostic_only else ('train','load')
     script = f"""import importlib.util, traceback, json, sys
+from scripts.feedback_infer import verify_state_integrity
+verify_state_integrity()
 try:
     s=importlib.util.spec_from_file_location('candidate','/candidate/model.py')
     m=importlib.util.module_from_spec(s); s.loader.exec_module(m)
