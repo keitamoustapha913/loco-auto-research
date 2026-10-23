@@ -37,3 +37,20 @@ normal-only representation diagnostics when declared; preserve complete source,
 checkpoint and measurement provenance. Do not silently change a frozen plan or
 rerun training for a frozen readout. Never execute real-development fitting or
 agent-side checkpoint analysis; use the guarded interfaces and trusted summaries.
+
+## Frozen-only diagnostic providers and early checks
+For an all-frozen plan implement diagnose plus mandatory passing CPU tests only.
+Do not fabricate train/load/predict/training_steps for a provider: exact frozen
+models are loaded separately. Echo the assigned candidate_id, with false
+train_contract/load_contract/predict_contract attestations when these are absent.
+New training arms still require every training and inference contract.
+
+Use diagnostic_config.calibration_good_images and calibration_source_ids separately
+from assessment_good_images/assessment_source_ids. frozen_normal_threshold is
+already normal-only calibrated. No recalibration on assessment data, weight/state
+changes or anomaly access. Declare minimum input counts, test the actual declared
+image size, 18/36 disjoint representative inputs where applicable, strict > threshold
+boundaries, exact scalar metric names and nested per_image numeric metrics/source_id.
+The same contract is used in disposable smoke and production. No whole-suite skips.
+New v4 training uses TrainingLoopStart before first batch preparation and the entire
+elapsed loop target; initialization/saving are excluded, not batch preparation.

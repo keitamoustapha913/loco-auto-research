@@ -10,6 +10,9 @@ import json
 from pathlib import Path
 
 
+MATCHED_SAMPLING_CONTROLS = ('sampling_protocol', 'sampling_seed')
+
+
 class PlanningValidationError(ValueError):
     def __init__(self, issues):
         self.issues=issues
@@ -50,9 +53,13 @@ def baseline_capability(store, reference, repo_root):
     provenance_path=Path(row['artifact_dir'])/('host_verified_training.json' if row.get('status') in {'FAILED','OOM'} else 'run_manifest.json')
     provenance=json.loads(provenance_path.read_text())
     audit=provenance.get('training_audit',{})
-    replication=all(k in configuration for k in REQUIRED_TRAINING_POSITIVE+('expected_optimizer_updates',)) and all(k in audit for k in ('seed','optimizer_updates','source_exposures'))
+    explicit_schedule=all(k in configuration for k in REQUIRED_TRAINING_POSITIVE+('expected_optimizer_updates',))
+    timed_schedule=(configuration.get('training_completion_policy')=='elapsed-training-loop-v1' and
+                    all(k in configuration for k in ('batch_size','size','training_budget_seconds')))
+    replication=(explicit_schedule or timed_schedule) and all(k in audit for k in ('seed','optimizer_updates','source_exposures'))
     return {'reference':reference,'configuration':configuration,'recorded_inference':configuration.get('inference',{}),
-            'named_inference_config_parameter':named,'requires_exact_inference':True,
+            'named_inference_config_parameter':named,'requires_exact_inference':True,'frozen_training_overrides':{},
+            'required_image_size':configuration.get('size'),'actual_training_seed':configuration.get('seed'),
             'replication_audit_evidence_available':replication,
             'replication_note':'Exact source/configuration may be proposed for additional seeds; implementation validation still applies.' if replication else 'Missing explicit training settings/audit; do not invent defaults or claim matched seed replication.'}
 
@@ -72,6 +79,8 @@ def evidence_classification(plan, rows=None):
     requested={r['key'] for r in plan['required_measurements'] if r['source']=='real'}
     if not {SPRO,AP,FPR,LATENCY,PARAMETERS,MEMORY}<=requested:reasons.append('Required real-localization and deployment endpoints are not preregistered.')
     if not plan['completion_criteria']:reasons.append('Predeclared acceptance/completion criteria are missing.')
+    if plan.get('schema_version')=='4.0':
+        reasons.extend(comparison_controls(plan)['confounds'])
     if rows is not None:
         for arm in plan['arms']:
             selected=[r for r in rows if json.loads(r['config_json']).get('plan_sha256')==digest(plan) and json.loads(r['config_json']).get('plan_arm')==arm['arm_id']]
@@ -86,6 +95,48 @@ def evidence_classification(plan, rows=None):
     return {'promotion_eligible':not reasons,'evidence_level':'CONTROLLED' if not reasons else 'EXPLORATORY',
             'reasons':list(dict.fromkeys(reasons)),
             'message':'Eligibility ceiling only; complete measured evidence, independent checkpoints, integrity and policy still required.'}
+
+
+def comparison_controls(plan, rows=()):
+    """Report confounds separately from matrix completeness or score ranking.
+
+    Matching a pair label does not change a checkpoint's authentic training seed.
+    Actual sample/mask streams are unknown unless measured; equal wall time is
+    explicitly not equal exposure. This never rewrites a submitted plan.
+    """
+    from orchestrator.experiment_plan import training_seed, training_settings, digest
+    confounds=[];counts=[]
+    arms=plan['arms']
+    if len(arms)<2:confounds.append('No comparison arm.')
+    for seed in plan['seeds']:
+        actual=[training_seed(a,seed) for a in arms]
+        if len(set(actual))>1:confounds.append(f'Pair {seed} has unmatched actual training seeds {actual}.')
+    settings=[training_settings(plan,a) for a in arms]
+    all_keys=set().union(*(set(c) for c in settings))
+    declared=set(plan['controlled_variables'])
+    unrecorded=sorted(k for k in all_keys if all(k in c and c[k]==settings[0].get(k) for c in settings) and k not in declared)
+    if unrecorded:confounds.append('Equal settings not declared controlled: '+', '.join(unrecorded))
+    if any(a.get('fixed_checkpoint_seed') is not None for a in arms):
+        confounds.append('A single frozen training seed is not a repeated matched-method baseline.')
+    for row in rows:
+        cfg=json.loads(row['config_json'])
+        if cfg.get('plan_sha256')!=digest(plan):continue
+        metrics=json.loads(row['metrics_json'])
+        counts.append({'arm':cfg.get('plan_arm'),'seed':cfg.get('seed'),
+            'optimizer_updates':metrics.get('protocol/optimizer_updates'),
+            'source_exposures':metrics.get('protocol/source_exposures')})
+    # A sampling protocol and seed are executable candidate settings, not prose.
+    stream_declared=set(MATCHED_SAMPLING_CONTROLS)<=declared
+    if not stream_declared:confounds.append('Sampling protocol/independent sampling seed are not declared matched controls.')
+    return {'intended_differences':{a['arm_id']:a['difference'] for a in arms},
+        'changed_training_settings':sorted(k for k in all_keys if any(c.get(k)!=settings[0].get(k) for c in settings[1:])),
+        'actual_seeds_by_arm':{a['arm_id']:[training_seed(a,s) for s in plan['seeds']] for a in arms},
+        'confounds':list(dict.fromkeys(confounds)), 'observed_training_counts':counts,
+        'sampling_stream_status':'DECLARED_NOT_INDEPENDENTLY_VERIFIED' if stream_declared else 'UNVERIFIED',
+        'causal_claim_eligible':plan['kind']=='controlled_comparison' and not confounds,
+        'reproducibility_status':'UNCONFIRMED',
+        'interpretation':'Equal elapsed training time does not imply equal updates/exposures or identical sampled prefixes. '
+                         'Source-bootstrap uncertainty is conditional on checkpoints, not training-seed uncertainty.'}
 
 
 def inspect_plan(plan, store=None, repo_root=None):
@@ -141,7 +192,7 @@ def inspect_plan(plan, store=None, repo_root=None):
                     for old,new in zip(original_measurements,plan['required_measurements']) if old!=new]
     return {'valid':not issues,'errors':issues,'notices':notices,'scientific_eligibility':classification,
             'baseline_capabilities':capabilities,'diagnostic_name_normalizations':normalizations,
-            'canonical_plan':plan if not issues else None}
+            'canonical_plan':plan if not issues else None,'comparison_controls':comparison_controls(plan)}
 
 
 def admit_plan(plan, store, repo_root=None):
@@ -159,9 +210,10 @@ def planning_instructions(capabilities=(), *, time_only=True):
         'required_training':('Each new model must run its genuine optimization loop for the complete elapsed operator target. Initialization and final saving are excluded; in-loop batch preparation, transfers, learning, integrity checks and bookkeeping count. Declare TRAINING_PROTOCOL=elapsed-training-loop-v1 and yield TrainingLoopStart(objective) after initialization/cache fill and before the first batch iteration. No fixed steps/epochs or expected final update/exposure counts. Declare a scientifically appropriate continuing schedule; progress-aware training_steps receives elapsed_seconds, target_seconds, target_reached, optimizer_updates and source_exposures. Finalize only on target_reached; never restart/reinitialize or pad with sleep/dummy work.' if time_only else 'Preserve the exact authorized legacy training steps, epochs, exposures and original timing restrictions.'),
         'confirmation':('Set confirmation=true only for a proposed confirmed promotion study. Preregister the exact real endpoint keys: dev_real/logical_au_spro_0_05_compatible, dev_real/logical_pixel_ap_pooled, dev_real/normal_image_fpr, dev_real/inference_e2e_ms_p95, dev_real/parameters, dev_real/peak_cpu_rss_mib, with at least three independent seeds and matched controls. Ordinary exploratory plans may set false.' if time_only else 'Legacy plans retain their original evidence and promotion classification; do not add new fields.'),
         'controlled_variables':'Names of real training keys, not sentences. Values must be declared, equal across arms and recorded in every frozen baseline.',
-        'matched_training_controls_for_confirmation':['batch_size','size'] if time_only else list(MATCHED_TRAINING_CONTROLS),
+        'matched_training_controls_for_confirmation':['batch_size','size',*MATCHED_SAMPLING_CONTROLS] if time_only else list(MATCHED_TRAINING_CONTROLS),
         'diagnostic_measurements':'diagnostics[].required_metrics is authoritative. For source=diagnostic use diagnostic_id/metric; diagnostic/diagnostic_id/metric is a storage alias accepted only for the same declared metric. Never duplicate requests via aliases or invent metric names. Paired metric names must be declared.',
         'frozen_inference':'Copy recorded_inference exactly; {} encodes [] in wire settings. Never invent loader options.',
+        'normal_diagnostic_inputs':'diagnose receives separate calibration_good_images, calibration_source_ids and assessment_source_ids from validation/good, plus frozen_normal_threshold. Declare min_calibration_images/min_assessment_images in config; no assessment calibration, real anomalies or masks.',
         'fixed_checkpoint':'Declare the actual fixed seed; pairing indices are not independent baseline training. Such comparisons are exploratory and cannot confirm a champion.',
         'evidence_level':'Agent kind is intent only. Trusted admission/completion derives eligibility; text cannot authorize promotion.',
         'scientific_changes':'Invalid scientific settings must be revised by the agent, never automatically stripped, defaulted or reinterpreted.',

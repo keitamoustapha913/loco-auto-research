@@ -574,13 +574,14 @@ def comparison_result(plan, runs, feedback=None):
                 intervals.append(dict(interval,comparison_id=comparison['comparison_id'],training_seed=seed))
             except (KeyError,ValueError,TypeError,OSError) as exc:
                 problems.append(f"paired comparison {comparison['comparison_id']} seed {seed}: {exc}")
-    from orchestrator.planning_contract import evidence_classification
+    from orchestrator.planning_contract import evidence_classification, comparison_controls
+    controls=comparison_controls(plan,runs)
     eligibility=evidence_classification(plan, runs)
     if problems:
         eligibility.update(promotion_eligible=False,evidence_level='INCOMPLETE')
         eligibility['reasons'].append('Requested execution or measured evidence is incomplete.')
     fixed=any(a.get('fixed_checkpoint_seed') is not None for a in plan['arms'])
-    return {'scientific_eligibility':eligibility, 'plan_id': plan['plan_id'], 'hypothesis_id': plan['hypothesis_id'],
+    return {'comparison_controls':controls,'scientific_eligibility':eligibility, 'plan_id': plan['plan_id'], 'hypothesis_id': plan['hypothesis_id'],
             'plan_sha256': digest(plan), 'version': contract_version(plan), 'kind': plan['kind'],
             'status': 'INCOMPLETE' if problems else ('COMPLETE_CONTROLLED' if plan['kind'] == 'controlled_comparison' and not fixed else 'COMPLETE_EXPLORATORY'),
             'expected_jobs': len(expected), 'recorded_jobs': len(found), 'problems': problems,
@@ -831,7 +832,8 @@ def review_plan(store, campaigns, campaign_id, plan, result):
             raise ValueError('critic comparison identity/status contradicts measured completion')
         if ((result['status']=='INCOMPLETE' and (review['hypothesis_outcome']=='supported' or review['recommended_next_action']=='promote_for_review')) or
             (review['causal_claim'] and (result['status']!='COMPLETE_CONTROLLED' or not plan['paired_comparisons'] or
-                any(a.get('fixed_checkpoint_seed') is not None for a in plan['arms'])))):
+                any(a.get('fixed_checkpoint_seed') is not None for a in plan['arms']) or
+                (plan.get('schema_version')=='4.0' and not result.get('comparison_controls',{}).get('causal_claim_eligible',False))))):
             raise ValueError('critic attempted a scientific claim unsupported by completed controlled work')
         return review
     _, review, _ = controller._with_agent_correction(store, (campaigns,campaign_id), 'critic', request, check)

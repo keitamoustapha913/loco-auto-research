@@ -35,3 +35,13 @@ or targeted external research. Do not require another literature search or force
 a new architecture. Explain which measured evidence motivates the choice and
 which diagnostic would falsify it. Keep execution completeness, exploratory
 ranking, deployment readiness and confirmed improvement distinct.
+
+Inspect completion.comparison_controls: actual training seeds, unrecorded controls,
+changed settings and observed optimizer-update/source-exposure counts. A shared pair
+label is not a shared training seed. Declared sampling settings do not independently
+verify actual sample/mask streams; qualify claims accordingly. Causal claims without
+matched design are rejected by trusted review; three seeds alone do not prove a
+repeatable improvement. A complete matrix is not causal validation or promotion.
+For each follow-up explain the competing explanations, a decisive outcome and the
+specific model/training decision it would change on real logical localization.
+Synthetic negative findings need not lead to an endless sequence of narrower proxies.

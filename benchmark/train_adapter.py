@@ -70,6 +70,39 @@ class DecodedTrainingCache:
         return frozen
 
 
+def validate_diagnostic_resources(diagnostics, calibration_count, assessment_count):
+    """Deterministic resource admission; no fallback to assessment calibration."""
+    diagnostic_measurement_catalog(diagnostics)
+    for declaration in diagnostics:
+        config = declaration['config']
+        for key, available in (('min_calibration_images', calibration_count),
+                               ('min_assessment_images', assessment_count)):
+            requested = config.get(key, 0)
+            if isinstance(requested, bool) or not isinstance(requested, int) or requested < 0:
+                raise CandidateContractError(f"{declaration['diagnostic_id']}: {key} must be a nonnegative integer")
+            if requested > available:
+                raise CandidateContractError(f"{declaration['diagnostic_id']}: {key} requests {requested}, "
+                    f"only {available} authorized disjoint validation/good images available; revise diagnostic, never reuse assessment for calibration")
+
+
+def diagnostic_inputs(declaration, calibration, normal, calibration_ids, assessment_ids, threshold, *, smoke=False):
+    """Same normal-only input contract for disposable preflight and production."""
+    calibration, normal = np.asarray(calibration), np.asarray(normal)
+    if (calibration.ndim != 4 or normal.ndim != 4 or calibration.shape[1:] != normal.shape[1:]
+        or normal.shape[1] != 3 or not np.isfinite(calibration).all() or not np.isfinite(normal).all()):
+        raise CandidateContractError('diagnostic needs finite aligned RGB calibration/assessment batches')
+    if (len(calibration_ids) != len(calibration) or len(assessment_ids) != len(normal)
+        or len(set(calibration_ids)) != len(calibration_ids) or len(set(assessment_ids)) != len(assessment_ids)
+        or set(calibration_ids) & set(assessment_ids)):
+        raise CandidateContractError('calibration/assessment source identities must be distinct and disjoint')
+    validate_diagnostic_resources([declaration], len(calibration), len(normal))
+    if not np.isfinite(threshold):raise CandidateContractError('frozen normal threshold must be finite')
+    return dict(declaration['config'], diagnostic_id=declaration['diagnostic_id'],
+        calibration_good_images=calibration.copy(), calibration_source_ids=list(calibration_ids),
+        assessment_source_ids=list(assessment_ids), frozen_normal_threshold=float(threshold),
+        validation_smoke=smoke)
+
+
 def validate_diagnostic_output(declaration, result, source_ids, paired_metrics=()):
     """One payload contract for cheap preflight, production and paired analysis."""
     import math
@@ -107,7 +140,7 @@ def load_predictor(module, checkpoint, device, inference_config=None):
     return module.load(checkpoint, device=device)
 
 
-def load_candidate(module_file: str | Path):
+def load_candidate(module_file: str | Path, *, diagnostic_only=False):
     """Load candidate only from trusted, isolated subprocesses, NEVER the controller."""
     module_file = Path(module_file).resolve(strict=True)
     spec = importlib.util.spec_from_file_location("loco_candidate", module_file)
@@ -115,8 +148,8 @@ def load_candidate(module_file: str | Path):
         raise CandidateContractError("cannot load candidate")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    if not all(callable(getattr(module, name, None)) for name in ("train", "load")):
-        raise CandidateContractError("candidate must implement train and load")
+    if not all(callable(getattr(module, name, None)) for name in (("diagnose",) if diagnostic_only else ("train", "load"))):
+        raise CandidateContractError("diagnostic provider must implement diagnose" if diagnostic_only else "candidate must implement train and load")
     return module
 
 

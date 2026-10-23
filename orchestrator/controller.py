@@ -86,7 +86,7 @@ def _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=None,
             # Full evidence is mounted read-only. Repeating every configuration,
             # critique and feedback block here needlessly exhausts agent context.
             index=[{**{k:item[k] for k in ('run_id','hypothesis_id','candidate_id','status','git_sha')},
-                    'failure':item['error'][:500],
+                    'failure':item['error'][-4000:],
                     'comparison_status':item['comparison'].get('status'),
                     'evidence_file':f"/workspace/evidence/{item['run_id']}/evidence.json"}
                    for item in evidence]
@@ -318,6 +318,16 @@ def add_research_proposals(store, prompt, count=3, campaign=None, personal_mode=
                         'requires the Literature Scout, return that precise question in literature_request and proposals=[]. '
                         'The trusted controller routes the question within the same budgets. Do not fabricate plans or '
                         'citations to request research. After supplied Scout findings, finish a complete proposal batch. ')
+    instruction += (' For every proposal use research_question for the falsifiable question, references for exact motivating run/plan evidence, '
+        'claim and controlled_change for competing explanations, expected_observation for support AND rejection outcomes, '
+        'evaluation_plan for the actionable connection to real logical localization and complete-matrix feasibility, '
+        'priority_rationale for expected information gain per research time. A synthetic mechanism test must explain '
+        'which different next action follows from each result; another narrower proxy is not automatically useful. '
+        'Inspect failed/inconclusive studies and explicitly explain how a follow-up resolves rather than repeats them. '
+        'To isolate a training intervention, train baseline and challenger with identical paired seeds and declared '
+        'sampling_protocol/sampling_seed controls independent of model-initialization RNG; match optimizer, preprocessing '
+        'and architecture except the stated intervention. Equal elapsed training time does not match exposure/update counts; '
+        'record and interpret both. Unmatched frozen models are descriptive, not causal method comparisons. ')
     instruction += (' Every proposal requires experiment_plan matching the controller-generated structured-output schema (the on-disk v1 schema is retained only for legacy compatibility). '
                     'Declare every arm, seed, complete training settings, size, batch_size, a continuing target-aware schedule, '
                     'prediction settings, required '
@@ -331,6 +341,12 @@ def add_research_proposals(store, prompt, count=3, campaign=None, personal_mode=
                     'and followup_of="" only for new mechanisms. ')
     if campaign:
         campaigns, cid = campaign
+        recent_comparisons=[]
+        for event in campaigns.events(cid,10000):
+            if event['kind']=='EXPERIMENT_PLAN_RESULT':
+                result=json.loads(event['payload_json']).get('result',{})
+                recent_comparisons.append({k:result.get(k) for k in ('hypothesis_id','status','problems','paired_image_intervals','comparison_controls')})
+        instruction += '\nRecent completed/incomplete investigations; justify the next decision against their evidence: '+json.dumps(recent_comparisons[-8:])
         limits = json.loads(campaigns.get(cid)['config_json'])['limits']
         usage = campaigns.usage(cid)
         wall = max(0, limits['max_wall_hours']*3600-usage['wall_seconds'])
@@ -483,6 +499,20 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
         if not tree.is_relative_to((REPO / 'candidates' / 'worktrees').resolve()):
             raise PermissionError('repair workspace escapes assigned candidates')
     allowed_file = tree / "candidates" / hypothesis_id / "model.py"
+    diagnostic_only = bool(proposal.get('experiment_plan')) and all(a['execution']=='frozen' for a in proposal['experiment_plan']['arms'])
+    if validation_runtime is not None and proposal.get('experiment_plan'):
+        manifest_path=Path(validation_runtime)/'good_manifest.json'
+        if manifest_path.is_file():
+            from benchmark.data_guard import load_manifest
+            from benchmark.train_adapter import validate_diagnostic_resources
+            manifest,_=load_manifest(manifest_path)
+            categories={e['category'] for e in manifest['images']}
+            category=json.loads(campaign[0].get(campaign[1])['config_json'])['campaign']['dataset'] if campaign else (next(iter(categories)) if len(categories)==1 else None)
+            if category is None:raise ValueError('diagnostic resource preflight requires an explicit campaign dataset for a multi-category manifest')
+            n=sum(e['split']=='validation/good' and e['category']==category for e in manifest['images'])
+            cut=max(1,n//3)
+            validate_diagnostic_resources(proposal['experiment_plan']['diagnostics'],cut if n>=2 else 0,n-cut if n>=2 else 0)
+
     schema = REPO / "schemas" / "implementation.schema.json"
     instruction = (
         f"Implement the exact declared scientific experiment for hypothesis {hypothesis_id} "
@@ -511,7 +541,7 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
          "Do not claim GPU execution if no CUDA tensors are used. " if require_torch_cuda else "") +
         f"Proposal: {json.dumps(proposal, sort_keys=True)}"
     )
-    if campaign:
+    if campaign and not diagnostic_only:
         from orchestrator.campaign_config import time_based
         if time_based(json.loads(campaign[0].get(campaign[1])['config_json'])):
             instruction += ('\nTime-budgeted learning requires training_steps(config, allowed_train_manifest, output_dir), '
@@ -519,7 +549,7 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
                 'optimizer=initialized Optimizer, args=tuple of prepared device tensors). Initialize models and optimizers, '
                 'prepare batches/transfers, log progress and save checkpoint metadata BETWEEN yields, never inside forward. '
                 'Return checkpoint metadata from the generator. The trusted loop executes forward/loss, backward and optimizer '
-                'updates and measures only those phases. Explicit use_closure=True supports closure-based optimizers. '
+                'updates. For v4 emit TrainingLoopStart before the FIRST batch; the entire elapsed loop including preparation is authoritative. Explicit use_closure=True supports closure-based optimizers. '
                 'Read scripts/training_phase.py. Preserve train/load/predict for legacy callers. No learning outside yielded steps; '
                 'the trusted driver rejects unmeasured parameter changes. Missing/unsupported boundaries are UNVERIFIABLE, '
                 'never a reason to time the whole train function or alter a frozen scientific plan.')
@@ -538,6 +568,24 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
             'assessment inputs and permitted derived synthetic data, never real-development images/masks. '
             'Persist per-image diagnostic evidence where meaningful in the returned JSON. A missing arm, seed, '
             'control or endpoint means INCOMPLETE; do not substitute a historical recipe from its name.')
+    if diagnostic_only:
+        instruction = (f"Implement ONLY the declared diagnostic provider for {hypothesis_id} in candidates/{hypothesis_id}/model.py "
+            "and mandatory CPU test_model.py in your assigned worktree. Frozen sources, checkpoints and inference "
+            "remain exact: do not implement train, load, predict or training_steps merely for interface compliance. "
+            "Return the assigned candidate_id and train_contract=false, load_contract=false, predict_contract=false; "
+            "these attestations describe this diagnostic provider, not the pinned model. "
+            "Implement diagnose(predictor, assessment_good_images, diagnostic_config). "
+            "Tests must execute on CPU, not be entirely skipped. No unapproved dependencies or external weights. "
+            f"Exact proposal: {json.dumps(proposal,sort_keys=True)}")
+    instruction += ('\nDiagnostic input contract: calibration_good_images is a separate authorized validation/good RGB float32 batch; '
+        'calibration_source_ids and assessment_source_ids are disjoint SHA256 identities. frozen_normal_threshold is '
+        'already fixed by normal-only calibration. Never recalibrate on assessment inputs or change predictor state. '
+        'Declare min_calibration_images/min_assessment_images in each diagnostic config; unavailable resources reject '
+        'before training. Return exactly required_metrics as finite scalars; per_image must contain one source_id '
+        'and nested numeric metrics per assessment image, including all paired metrics. Test representative '
+        '18-calibration/36-assessment inputs at the declared size, strict threshold boundaries and state immutability. '
+        'Implementation response must echo the exact assigned candidate_id and explicit contract booleans; false '
+        'training/load/predict attestations are correct ONLY for an all-frozen diagnostic provider.')
     import subprocess
     from orchestrator.experiment_runner import verify_candidate_source
     def request(feedback, attempt):
@@ -561,12 +609,18 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
         if response["response"].get("new_dependencies") or response['response'].get('external_weights'):
             raise PermissionError("Agent requested dependencies or external weights; provenance and operator approval required")
         _validate_candidate_files(tree, hypothesis_id)
-        if response['response'].get('candidate_id') != hypothesis_id or not all(
-                response['response'].get(k) is True for k in ('train_contract', 'load_contract', 'predict_contract')):
-            raise ValueError('implementer did not attest the assigned candidate contract')
+        required = () if diagnostic_only else ('train_contract', 'load_contract', 'predict_contract')
+        missing = [key for key in required if response['response'].get(key) is not True]
+        if response['response'].get('candidate_id') != hypothesis_id or missing:
+            raise ValueError(f"implementation attestation: expected candidate_id={hypothesis_id!r}, "
+                f"received {response['response'].get('candidate_id')!r}; required true fields missing: {missing}; "
+                f"execution={'frozen diagnostic only' if diagnostic_only else 'new training'}")
         if not allowed_file.is_file():
             raise ValueError('implementation missing model.py')
-        verify_candidate_source(allowed_file)
+        if diagnostic_only:
+            verify_candidate_source(allowed_file, diagnostic_only=True)
+        else:
+            verify_candidate_source(allowed_file)
         if proposal.get('experiment_plan'):
             import ast
             functions = {n.name:n for n in ast.parse(allowed_file.read_text()).body if isinstance(n,ast.FunctionDef)}
@@ -576,11 +630,12 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
             if any(a['execution']=='train' and a['inference'] for a in plan['arms']):
                 if 'inference_config' not in {a.arg for a in functions['load'].args.args}:
                     raise ValueError('planned inference intervention requires explicit load inference_config argument')
-        if campaign:
+        if campaign and not diagnostic_only:
             from orchestrator.campaign_config import time_based
             if time_based(json.loads(campaign[0].get(campaign[1])['config_json'])):
                 from orchestrator.experiment_runner import require_training_phases
-                require_training_phases(allowed_file)
+                version=proposal.get('experiment_plan',{}).get('schema_version')
+                require_training_phases(allowed_file,target=version in {'3.0','4.0'},loop=version=='4.0')
         if validation_runtime is not None:
             from orchestrator.experiment_runner import probe_candidate_interface, run_candidate_unit_tests
             good_root = Path(os.environ['LOCO_GOOD_ROOT'])
@@ -589,7 +644,9 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
                 from orchestrator.campaign_config import operation_seconds,operation_cancelled
                 timing={'timeout':operation_seconds(campaign[0].get(campaign[1]),30),
                         'cancel':lambda:operation_cancelled(campaign[0],campaign[1])}
-            probe_candidate_interface(REPO, allowed_file, good_root, validation_runtime, hypothesis_id,**timing)
+            probe_options=dict(timing)
+            if diagnostic_only:probe_options['diagnostic_only']=True
+            probe_candidate_interface(REPO,allowed_file,good_root,validation_runtime,hypothesis_id,**probe_options)
             if timing:timing['timeout']=operation_seconds(campaign[0].get(campaign[1]),30)
             cpu_result = run_candidate_unit_tests(REPO, allowed_file, good_root, validation_runtime, hypothesis_id,**timing)
             if campaign:
@@ -635,6 +692,12 @@ def queue_candidate(store, hypothesis_id, candidate_id, category, stage, device,
     manifest, paths = load_manifest(manifest_path)
     if not any(item["category"] == category for item in manifest["images"]):
         raise ValueError("category absent from authorized good-only manifest")
+    if effective_config:
+        from benchmark.train_adapter import validate_diagnostic_resources
+        validation_count=sum(e['split']=='validation/good' and e['category']==category for e in manifest['images'])
+        cut=max(1,validation_count//3)
+        validate_diagnostic_resources(effective_config.get('diagnostics',[]),cut if validation_count>=2 else 0,
+                                      validation_count-cut if validation_count>=2 else 0)
     from orchestrator.campaign_config import time_based
     campaign_config = None
     if campaign_id:

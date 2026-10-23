@@ -11,7 +11,7 @@ import time
 import numpy as np
 from PIL import Image
 from benchmark.data_guard import load_manifest, manifest_fingerprint
-from benchmark.train_adapter import load_candidate, load_predictor, validate_prediction, diagnostic_measurement_catalog, validate_diagnostic_output
+from benchmark.train_adapter import load_candidate, load_predictor, validate_prediction, diagnostic_measurement_catalog, validate_diagnostic_output, diagnostic_inputs, validate_diagnostic_resources
 from benchmark.validation import evaluate_dev_v2
 from benchmark.metrics_v2 import EVALUATOR_VERSION, pixel_ap_report, pixel_auroc
 from benchmark.inference_benchmark import benchmark_predict
@@ -170,6 +170,10 @@ def run(module_file, manifest_file, config, output):
         paths = validate_manifest(manifest)
     size = int(config.get("size", 64))
     device = config.get("device", "cpu")
+    # Check declared resources before any training or candidate import.
+    validation_paths = [p for p, e in zip(paths, manifest['images']) if e['split'] == 'validation/good']
+    early_calibration, early_assessment = split_validation_paths(validation_paths)
+    validate_diagnostic_resources(config.get('diagnostics', []), len(early_calibration), len(early_assessment))
     mod = load_candidate(module_file)
     # Candidate learning receives only train/good; validation is used later by the runner.
     training_manifest = dict(manifest, images=[e for e in manifest['images'] if e['split'] == 'train/good'])
@@ -368,7 +372,7 @@ def run(module_file, manifest_file, config, output):
         frozen_state = state_digest(predictor)
         if frozen_state != initial_frozen_state:
             raise ValueError('normal assessment changed frozen predictor state')
-        diagnostic_module = load_candidate('/diagnostics/model.py') if config.get('diagnostic_provider') else mod
+        diagnostic_module = load_candidate('/diagnostics/model.py', diagnostic_only=True) if config.get('diagnostic_provider') else mod
         catalog=diagnostic_measurement_catalog(config.get('diagnostics', []))
         if config.get('plan_contract_version') in {'experiment-plan-v3.0','experiment-plan-v4.0'} and config.get('execution_kind')=='train':
             receipt={'version':'completed-learning-v1','phase':'diagnostics_ready',
@@ -379,14 +383,14 @@ def run(module_file, manifest_file, config, output):
                 'training_audit':training_audit,'training_timing':timing_audit,
                 'normal_threshold':metrics['normal/threshold']}
             (output/'training_receipt.json').write_text(json.dumps(receipt,sort_keys=True))
+        assessment_ids = [sha256_file(path) for path in score_paths]
+        calibration_ids = [sha256_file(path) for path in calibrate_paths]
         for request in config.get('diagnostics', []):
             if not callable(getattr(diagnostic_module, 'diagnose', None)):
                 raise ValueError(f"missing diagnose hook for {request['diagnostic_id']}")
-            assessment_ids = [sha256_file(path) for path in score_paths]
             with torch.inference_mode():
-                diagnostic = diagnostic_module.diagnose(predictor, normal.copy(), dict(request['config'],
-                    diagnostic_id=request['diagnostic_id'], frozen_normal_threshold=metrics['normal/threshold'],
-                    assessment_source_ids=assessment_ids))
+                diagnostic = diagnostic_module.diagnose(predictor, normal.copy(), diagnostic_inputs(request, calibration, normal, calibration_ids,
+                    assessment_ids, metrics['normal/threshold']))
             paired=config.get('paired_diagnostic_metrics',{}).get(request['diagnostic_id'],[])
             if config.get('plan_contract_version') in {'experiment-plan-v3.0','experiment-plan-v4.0'}:
                 validate_diagnostic_output(request,diagnostic,assessment_ids,paired)

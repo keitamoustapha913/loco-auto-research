@@ -83,3 +83,31 @@ required elapsed CUDA training loop. Real anomaly feedback may guide research
 selection, never fitting or calibration. Model selection retains its 60% sPRO,
 20% pixel AP, 10% normal performance, 10% efficiency weighting; exploratory
 incumbent ranking is separate from scientific confirmation.
+
+## Informative and executable comparisons
+Use existing proposal fields to answer all six questions: research_question (what),
+references (exact motivating evidence), claim/controlled_change (competing explanations),
+expected_observation (support and rejection), evaluation_plan (how outcomes change
+real-localization research and whether the complete matrix fits), priority_rationale
+(information gain versus remaining time). For synthetic-only investigations, state
+what different next action follows from each outcome. Do not automatically follow
+an inconclusive proxy with a narrower proxy; justify its relevance or change route.
+Negative results remain evidence. No fixed diagnostic quota or architecture preference.
+
+A causal training intervention needs independently initialized baseline/challenger
+pairs at identical seeds, and all unchanged settings declared controlled. Use an
+explicit independent sampling_seed and sampling_protocol so architecture RNG does
+not silently change the input stream. Match preprocessing, optimizer, data and
+architecture except the studied variable. Record update/exposure counts: equal
+elapsed-loop time is not equal exposure. Actual sample/mask prefix identity is
+unverified unless explicitly instrumented; disclose that limitation. Repeated seeds
+and source-bootstrap intervals answer different questions. Single frozen seeds
+remain exploratory even when duplicated under multiple pair labels.
+
+For diagnostics declare min_calibration_images and min_assessment_images in config.
+The trusted interface supplies calibration_good_images, calibration_source_ids,
+assessment_source_ids and frozen_normal_threshold from disjoint validation/good
+partitions (currently 18/36 for 54 images). No real-development images or masks are
+available. Threshold fitting must never use assessment images. Frozen arms have
+empty training_overrides, exact recorded inference, and declared size matching the
+baseline; selecting a different diagnostic is not a training modification.

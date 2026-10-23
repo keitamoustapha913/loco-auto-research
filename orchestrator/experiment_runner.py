@@ -38,7 +38,7 @@ def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def verify_candidate_source(path):
+def verify_candidate_source(path, *, diagnostic_only=False):
     """Non-executing protocol preflight; OS sandbox remains the security boundary."""
     if Path(path).stat().st_size > 1_000_000:
         raise ValueError('candidate source exceeds 1 MB review limit')
@@ -47,10 +47,13 @@ def verify_candidate_source(path):
     functions = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
     methods = {n.name for cls in tree.body if isinstance(cls, ast.ClassDef)
                for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    if not {'train', 'load'}.issubset(functions) or 'predict' not in methods | functions:
+    if diagnostic_only:
+        if 'diagnose' not in functions:raise ValueError('frozen diagnostic provider requires diagnose; training interface is not required')
+    elif not {'train', 'load'}.issubset(functions) or 'predict' not in methods | functions:
         raise ValueError('candidate source lacks train/load/predict contract')
     if any(token in source.lower() for token in ('official_test', 'loco-sealed', 'ground_truth')):
         raise ValueError('candidate source references protected evaluation data')
+    if diagnostic_only:return {'source_sha256': sha256(path), 'protocol_symbols': sorted(functions | methods)}
     train_node = next(n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == 'train')
     positional = [n.arg for n in train_node.args.posonlyargs + train_node.args.args]
     if len(positional) < 3 or positional[0] != 'config' or 'manifest' not in positional[1] or not any(t in positional[2] for t in ('output', 'checkpoint')):
@@ -93,7 +96,7 @@ def require_training_phases(path, target=False, loop=False):
         raise ValueError('candidate must explicitly implement '+('elapsed-training-loop-v1 with TrainingLoopStart' if loop else 'progress-aware required-training-target-v1')+'; frozen schedules cannot be silently changed')
 
 
-def probe_candidate_interface(repo_root, module_file, good_root, runtime, candidate_id, timeout=20, cancel=None):
+def probe_candidate_interface(repo_root, module_file, good_root, runtime, candidate_id, timeout=20, cancel=None, *, diagnostic_only=False):
     """Import untrusted code only inside the no-network CPU sandbox before GPU queueing."""
     from orchestrator.sandbox import command as sandbox_command
     safe_candidate_id(candidate_id)
@@ -103,11 +106,11 @@ def probe_candidate_interface(repo_root, module_file, good_root, runtime, candid
     probe_dir.mkdir(parents=True, exist_ok=True)
     if probe_dir.is_symlink() or not probe_dir.resolve(strict=True).is_relative_to(probe_root):
         raise PermissionError('candidate probe output escapes runtime')
+    required = ('diagnose',) if diagnostic_only else ('train','load')
     script = ("import importlib.util; "
               "s=importlib.util.spec_from_file_location('candidate','/candidate/model.py'); "
               "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
-              "assert callable(getattr(m,'train',None)); "
-              "assert callable(getattr(m,'load',None)); "
+              f"assert all(callable(getattr(m,n,None)) for n in {required!r}); "
               "print('interface import OK')")
     cmd = sandbox_command(repo_root, module_file, good_root, probe_dir, ['-c', script], use_gpu=False)
     try:
@@ -117,8 +120,10 @@ def probe_candidate_interface(repo_root, module_file, good_root, runtime, candid
             cmd,cwd=repo_root,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},capture_output=True,text=True,timeout=timeout,check=False)
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError('candidate CPU interface probe timed out') from exc
+    (probe_dir/'interface_stdout.log').write_text(result.stdout)
+    (probe_dir/'interface_stderr.log').write_text(result.stderr)
     if result.returncode or 'interface import OK' not in result.stdout:
-        raise ValueError(f'candidate CPU interface probe failed: {result.stderr[-500:]}')
+        raise ValueError(f'candidate CPU interface probe failed: {(result.stdout + result.stderr)[-12000:]}')
     return True
 
 
@@ -160,6 +165,8 @@ sys.exit(code)
             cmd,cwd=repo_root,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},capture_output=True,text=True,timeout=timeout,check=False)
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError('candidate CPU unit tests timed out') from exc
+    (probe_dir/'tests_stdout.log').write_text(result.stdout)
+    (probe_dir/'tests_stderr.log').write_text(result.stderr)
     if result.returncode:
         raise ValueError(f'candidate CPU unit tests failed: {(result.stdout + result.stderr)[-8000:]}')
     return {'tests': 'passed', 'output': result.stdout[-300:]}

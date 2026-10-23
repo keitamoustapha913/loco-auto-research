@@ -128,7 +128,7 @@ def test_shared_diagnostic_can_assess_unchanged_baseline_source(tmp_path,monkeyp
     baseline=load_candidate(source);provider=SimpleNamespace(diagnose=baseline.diagnose)
     del baseline.diagnose
     baseline.train=lambda *a:pytest.fail('frozen baseline was trained')
-    monkeypatch.setattr('scripts.run_candidate.load_candidate',lambda p:provider if str(p)=='/diagnostics/model.py' else baseline)
+    monkeypatch.setattr('scripts.run_candidate.load_candidate',lambda p, **kwargs:provider if str(p)=='/diagnostics/model.py' else baseline)
     output=tmp_path/'frozen';shutil.copytree(tmp_path/'trained/checkpoint',output/'checkpoint')
     config.update(execution_kind='frozen',diagnostic_provider={'candidate_id':'fixture','source_sha256':'a'*64})
     result=run(source,manifest,config,output)
