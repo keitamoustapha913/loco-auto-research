@@ -11,7 +11,7 @@ import tempfile
 import uuid
 import signal
 import time
-from jsonschema import validate, Draft202012Validator, SchemaError
+from jsonschema import validate, Draft202012Validator, SchemaError, ValidationError
 
 class AgentFailure(RuntimeError):
     pass
@@ -153,6 +153,16 @@ def invoke(role: str, repo_root: Path, schema_path: Path, prompt: str, timeout=1
     role_text = (root / "agents" / f"{role}.md").read_text()
     charter = (root / "RESEARCH_CHARTER.md").read_text()
     task = f"{role_text}\n\nHUMAN RESEARCH CHARTER:\n{charter}\n\nTASK:\n{prompt}"
+    if role=='implementer' and personal_mode:
+        task += (f"\nEXECUTION INTERFACE: cwd=/workspace; writable candidate directory=/workspace/candidates/{cwd.name}. "
+            "Use the Codex file-editing/shell tools provided in this sandbox to read /workspace/AGENTS.md, "
+            "/workspace/RESEARCH_CHARTER.md, /workspace/research_program.md and the mounted evidence. "
+            f"Create /workspace/candidates/{cwd.name}/model.py and test_model.py before returning. "
+            "No separate trusted-runner command tool exists in the agent session: host validation runs after your response. "
+            "The assigned edits and CPU/static inspection are authorized within these mounts. GPU execution and "
+            "candidate evaluation remain controller-owned; no installs, credentials, sudo, network fetching or "
+            "protected-file modifications are authorized. implemented_files must identify the actual files; "
+            "a blocked/no-work response is not success.")
     schema = json.loads(Path(schema_path).read_text())
     with tempfile.TemporaryDirectory(prefix="codex-response-") as temp:
         response_file = Path(temp) / "response.json"
@@ -199,7 +209,7 @@ def invoke(role: str, repo_root: Path, schema_path: Path, prompt: str, timeout=1
         try:
             output = json.loads(response_file.read_text())
             validate(instance=output, schema=schema)
-        except Exception as exc:
+        except (json.JSONDecodeError,ValidationError) as exc:
             raise InvalidAgentOutput(f"Codex produced invalid schema-constrained JSON: {exc}\n"
                                      f"Rejected response: {response_file.read_text()[-8000:]}") from exc
     return {"response": output, "prompt_sha256": hashlib.sha256(task.encode()).hexdigest(), "schema_sha256": hashlib.sha256(Path(schema_path).read_bytes()).hexdigest()}

@@ -16,6 +16,7 @@ import uuid
 from pathlib import Path
 
 from jsonschema import validate
+from orchestrator.controller_errors import CandidateValidationError
 
 REPO = Path(__file__).resolve().parents[1]
 VERSION = 'experiment-plan-v1.0'
@@ -46,17 +47,17 @@ def canonicalize_diagnostic_measurements(plan):
             # Existing explicit ledger references are valid only when declared.
             canonical=canonical_diagnostic_measurement(catalog,key)
             storage=catalog[canonical]
-            if storage!=key:raise ValueError('ambiguous run diagnostic storage alias: '+key)
+            if storage!=key:raise CandidateValidationError('ambiguous run diagnostic storage alias: '+key)
         else:
             if source!='run' and key.startswith(DIAGNOSTIC_PREFIX):
-                raise ValueError('diagnostic storage key conflicts with measurement source: '+source)
+                raise CandidateValidationError('diagnostic storage key conflicts with measurement source: '+source)
             storage=key
         identity=('real' if source=='real' else 'run',storage)
-        if identity in seen:raise ValueError('duplicate/conflicting measurement after diagnostic canonicalization: '+storage)
+        if identity in seen:raise CandidateValidationError('duplicate/conflicting measurement after diagnostic canonicalization: '+storage)
         seen.add(identity)
     for comparison in plan['paired_comparisons']:
         canonical=f"{comparison['diagnostic_id']}/{comparison['metric']}"
-        if canonical not in catalog:raise ValueError('paired comparison requests an undeclared diagnostic metric: '+canonical)
+        if canonical not in catalog:raise CandidateValidationError('paired comparison requests an undeclared diagnostic metric: '+canonical)
     return plan
 
 
@@ -69,11 +70,12 @@ def decode_agent_plan(plan):
     plan = copy.deepcopy(plan)
     def settings(value):
         if isinstance(value,dict): return value
-        if not isinstance(value,list): raise ValueError('settings must be JSON dictionaries or key/value_json arrays')
+        if not isinstance(value,list): raise CandidateValidationError('settings must be JSON dictionaries or key/value_json arrays')
         result = {}
         for pair in value:
-            if pair['name'] in result: raise ValueError('duplicate scientific setting')
-            result[pair['name']] = json.loads(pair['value_json'])
+            if pair['name'] in result: raise CandidateValidationError('duplicate scientific setting')
+            try:result[pair['name']] = json.loads(pair['value_json'])
+            except (json.JSONDecodeError,TypeError) as exc:raise CandidateValidationError('invalid generated value_json: '+str(exc)) from exc
         return result
     plan['training'] = settings(plan['training'])
     for arm in plan['arms']:
@@ -82,7 +84,7 @@ def decode_agent_plan(plan):
         if isinstance(arm['baseline_by_seed'],list):
             values = arm['baseline_by_seed']
             arm['baseline_by_seed'] = {str(b['seed']):b['baseline_id'] for b in values}
-            if len(arm['baseline_by_seed'])!=len(values):raise ValueError('duplicate frozen baseline seed')
+            if len(arm['baseline_by_seed'])!=len(values):raise CandidateValidationError('duplicate frozen baseline seed')
     for diagnostic in plan['diagnostics']: diagnostic['config'] = settings(diagnostic['config'])
     return canonicalize_diagnostic_measurements(plan)
 
@@ -125,86 +127,87 @@ def contract_version(plan):
 
 def validate_plan(plan, hypothesis_id=None):
     validate(plan, plan_schema(plan))
-    digest(plan)  # Reject NaN/infinity even inside extensible settings.
+    try:digest(plan)  # Reject NaN/infinity inside generated settings.
+    except ValueError as exc:raise CandidateValidationError(str(exc)) from exc
     plan=canonicalize_diagnostic_measurements(plan)
     from orchestrator.planning_contract import local_issues, PlanningValidationError
     issues=local_issues(plan)
     if issues:raise PlanningValidationError(issues)
     if hypothesis_id is not None and plan['hypothesis_id'] != hypothesis_id:
-        raise ValueError('plan hypothesis identity differs from its proposal')
+        raise CandidateValidationError('plan hypothesis identity differs from its proposal')
     ids = [a['arm_id'] for a in plan['arms']]
     if len(set(ids)) != len(ids):
-        raise ValueError('duplicate experiment arm')
+        raise CandidateValidationError('duplicate experiment arm')
     if plan['baseline_arm_id'] not in ids:
-        raise ValueError('comparison needs an explicit existing baseline arm identity')
+        raise CandidateValidationError('comparison needs an explicit existing baseline arm identity')
     if plan['kind'] == 'controlled_comparison' and len(ids) < 2:
-        raise ValueError('controlled comparison needs at least two arms')
+        raise CandidateValidationError('controlled comparison needs at least two arms')
     if plan['kind'] == 'controlled_comparison' and not plan['controlled_variables']:
-        raise ValueError('controlled comparison must declare controlled variables')
+        raise CandidateValidationError('controlled comparison must declare controlled variables')
     if not campaign_timed(plan) and len(plan['arms']) * len(plan['seeds']) > plan['resource_budget']['max_jobs']:
-        raise ValueError('arm/seed matrix exceeds plan job allowance')
+        raise CandidateValidationError('arm/seed matrix exceeds plan job allowance')
     baselines = {b['baseline_id']: b for b in plan['baselines']}
     if len(baselines) != len(plan['baselines']):
-        raise ValueError('duplicate frozen baseline identity')
+        raise CandidateValidationError('duplicate frozen baseline identity')
     seen = set()
     controlled = {}
     for arm in plan['arms']:
         settings = training_settings(plan, arm)
         if set(settings) & RESERVED or any(k.startswith('plan_') for k in settings):
-            raise ValueError('training settings cannot override controller or security fields')
+            raise CandidateValidationError('training settings cannot override controller or security fields')
         if arm['execution'] == 'train':
-            if arm.get('fixed_checkpoint_seed') is not None:raise ValueError('training arm cannot pretend to be a fixed checkpoint')
+            if arm.get('fixed_checkpoint_seed') is not None:raise CandidateValidationError('training arm cannot pretend to be a fixed checkpoint')
             if arm['source_arm_id'] or arm['baseline_by_seed']:
-                raise ValueError('training arm cannot silently load a baseline')
+                raise CandidateValidationError('training arm cannot silently load a baseline')
             if plan.get('schema_version') in {'3.0','4.0'} and set(settings)&{'steps','epochs','expected_optimizer_updates','expected_source_exposures'}:
-                raise ValueError('required-duration training cannot declare a fixed stopping schedule; declare phase/initial-block settings and use trusted progress')
+                raise CandidateValidationError('required-duration training cannot declare a fixed stopping schedule; declare phase/initial-block settings and use trusted progress')
             for name in (('batch_size','size') if plan.get('schema_version') in {'3.0','4.0'} else REQUIRED_TRAINING_POSITIVE):
                 if isinstance(settings.get(name), bool) or not isinstance(settings.get(name), int) or settings[name] < 1:
-                    raise ValueError(f'explicit positive training {name} required')
+                    raise CandidateValidationError(f'explicit positive training {name} required')
             updates = settings.get('expected_optimizer_updates',0)
             if isinstance(updates,bool) or not isinstance(updates,int) or updates < 0:
-                raise ValueError('explicit nonnegative expected_optimizer_updates required')
+                raise CandidateValidationError('explicit nonnegative expected_optimizer_updates required')
             for key in plan['controlled_variables']:
                 if key not in settings:
-                    raise ValueError(f'controlled variable {key} is missing')
+                    raise CandidateValidationError(f'controlled variable {key} is missing')
                 if key in controlled and controlled[key] != settings[key]:
-                    raise ValueError(f'controlled variable {key} differs between arms')
+                    raise CandidateValidationError(f'controlled variable {key} differs between arms')
                 controlled[key] = settings[key]
         else:
             if arm.get('fixed_checkpoint_seed') is not None and not arm['baseline_by_seed']:
-                raise ValueError('fixed incumbent requires exact historical baseline references')
+                raise CandidateValidationError('fixed incumbent requires exact historical baseline references')
             if arm['training_overrides']:
-                raise ValueError('frozen arm cannot change training settings')
+                raise CandidateValidationError('frozen arm cannot change training settings')
             if bool(arm['source_arm_id']) == bool(arm['baseline_by_seed']):
-                raise ValueError('frozen arm needs exactly one exact source')
+                raise CandidateValidationError('frozen arm needs exactly one exact source')
             if arm['source_arm_id'] and arm['source_arm_id'] not in seen:
-                raise ValueError('frozen source arm must precede its dependent arm')
+                raise CandidateValidationError('frozen source arm must precede its dependent arm')
             if arm['baseline_by_seed']:
                 if set(arm['baseline_by_seed']) != {str(s) for s in plan['seeds']}:
-                    raise ValueError('each requested seed needs its own pinned baseline')
+                    raise CandidateValidationError('each requested seed needs its own pinned baseline')
                 for seed, bid in arm['baseline_by_seed'].items():
                     if bid not in baselines or baselines[bid]['seed'] != training_seed(arm,int(seed)):
-                        raise ValueError('frozen baseline seed mismatch')
+                        raise CandidateValidationError('frozen baseline seed mismatch')
         seen.add(arm['arm_id'])
     diagnostic_ids = [d['diagnostic_id'] for d in plan['diagnostics']]
     if len(diagnostic_ids) != len(set(diagnostic_ids)):
-        raise ValueError('duplicate diagnostic identity')
+        raise CandidateValidationError('duplicate diagnostic identity')
     comparisons = plan['paired_comparisons']
     if len({c['comparison_id'] for c in comparisons}) != len(comparisons):
-        raise ValueError('duplicate paired comparison identity')
+        raise CandidateValidationError('duplicate paired comparison identity')
     for comparison in comparisons:
         if (comparison['left_arm'] not in ids or comparison['right_arm'] not in ids or
             comparison['left_arm'] == comparison['right_arm'] or comparison['diagnostic_id'] not in diagnostic_ids):
-            raise ValueError('paired comparison references an absent arm or diagnostic')
+            raise CandidateValidationError('paired comparison references an absent arm or diagnostic')
     for measurement in plan['required_measurements']:
         if measurement['source'] == 'real' and not plan['evaluation']['real_development_feedback']:
-            raise ValueError('required real measurement has evaluation disabled')
+            raise CandidateValidationError('required real measurement has evaluation disabled')
         if measurement['source'] == 'run' and measurement['key'].startswith('dev_synthetic/') and not plan['evaluation']['synthetic_diagnostics']:
-            raise ValueError('required synthetic measurement has evaluation disabled')
+            raise CandidateValidationError('required synthetic measurement has evaluation disabled')
         if measurement['source'] == 'diagnostic':
             parts = measurement['key'].split('/', 1)
             if len(parts) != 2 or parts[0] not in diagnostic_ids:
-                raise ValueError('required diagnostic has no executable declaration')
+                raise CandidateValidationError('required diagnostic has no executable declaration')
     return plan
 
 
@@ -639,7 +642,7 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
     limits = cfg['limits']; budget = plan.get('resource_budget')
     if campaign_timed(plan):
         from orchestrator.campaign_config import time_based
-        if not time_based(cfg):raise ValueError('campaign-timed plans require the two-time campaign configuration')
+        if not time_based(cfg):raise CandidateValidationError('campaign-timed plans require the two-time campaign configuration')
     error = ''
     try:
         if plan['evaluation']['real_development_feedback'] and not cfg['research'].get('real_development_feedback'):
@@ -651,7 +654,7 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
             budget['max_job_seconds'] > limits['max_job_seconds'] or
             budget['max_gpu_seconds'] > limits['max_gpu_hours']*3600 or
             budget['max_wall_seconds'] > limits['max_wall_hours']*3600):
-            raise ValueError('scientific plan exceeds authorized campaign ceilings; no defaults substituted')
+            raise CandidateValidationError('scientific plan exceeds authorized campaign ceilings; no defaults substituted')
         from orchestrator.campaign_config import time_based, plan_seconds, operation_cancelled
         if time_based(cfg) and plan_seconds(plan,cfg) > limits['max_wall_hours']*3600-usage['wall_seconds']:
             raise BudgetExceeded('complete frozen comparison plus evaluation and critique cannot fit remaining research duration')
@@ -663,7 +666,7 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
                 source_sha256=sha256(candidate_file(controller.REPO,plan['hypothesis_id'])) if any(a['execution']=='train' for a in plan['arms']) else None,loop_timed=plan.get('schema_version')=='4.0')
             campaigns.event(campaign_id,'TRAINING_TARGET_ADMISSION',plan_id=plan['plan_id'],estimate=estimate)
             if remaining_wall(campaigns.get(campaign_id),time.time())<estimate['required_seconds']:
-                raise ValueError('insufficient research time for complete required-duration matrix, preparation, evaluation and critique; revise plan, never shorten training')
+                raise CandidateValidationError('insufficient research time for complete required-duration matrix, preparation, evaluation and critique; revise plan, never shorten training')
         train_arms = [a for a in plan['arms'] if a['execution'] == 'train']
         module = candidate_file(controller.REPO, plan['hypothesis_id']) if train_arms or plan['diagnostics'] else None
         if train_arms and time_based(cfg):
@@ -750,10 +753,10 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
                     _, origin = verify_baseline(store, reference, controller.REPO)
                 origin_cfg = json.loads(origin['config_json'])
                 if origin_cfg.get('seed') != effective['seed']:
-                    raise ValueError('frozen checkpoint does not belong to requested seed')
+                    raise CandidateValidationError('frozen checkpoint does not belong to requested seed')
                 for key in set(plan['controlled_variables']) | {'size'}:
                     if origin_cfg.get(key) != effective.get(key):
-                        raise ValueError(f'frozen baseline does not match controlled setting {key}')
+                        raise CandidateValidationError(f'frozen baseline does not match controlled setting {key}')
                 effective.update(frozen_baseline=reference, baseline_effective_configuration=origin_cfg,
                                  model_sha256=reference['source_sha256'])
                 if plan['diagnostics']:
@@ -799,9 +802,15 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
     except PermissionError as exc:
         record_result(store, campaigns, campaign_id, plan, campaigns.runs(campaign_id), runtime, str(exc))
         raise
-    except Exception as exc:
-        # Preserve completed cells and exact failure; never call an incomplete plan valid.
+    except (CandidateValidationError,TimeoutError) as exc:
         error = f'{type(exc).__name__}: {exc}'
+    except Exception as exc:
+        # An internal execution defect is not an unsuccessful research method.
+        from orchestrator.controller_errors import trusted_failure,record_trusted_failure
+        failure=trusted_failure(exc,'plan.execution',fatal=True)
+        record_trusted_failure(store,(campaigns,campaign_id),failure,hypothesis_id=plan['hypothesis_id'])
+        record_result(store,campaigns,campaign_id,plan,campaigns.runs(campaign_id),runtime,failure.detail['error'])
+        raise failure from exc
     active = campaigns.get(campaign_id)['active_run_id']
     if active and (store.get_run(active) or {}).get('status') not in {'RUNNING','QUEUED'}:
         campaigns.update(campaign_id,active_run_id='')
@@ -829,12 +838,12 @@ def review_plan(store, campaigns, campaign_id, plan, result):
     def check(response):
         review = response['response']
         if review['plan_id'] != plan['plan_id'] or review['comparison_status'] != result['status']:
-            raise ValueError('critic comparison identity/status contradicts measured completion')
+            raise controller.CandidateValidationError('critic comparison identity/status contradicts measured completion')
         if ((result['status']=='INCOMPLETE' and (review['hypothesis_outcome']=='supported' or review['recommended_next_action']=='promote_for_review')) or
             (review['causal_claim'] and (result['status']!='COMPLETE_CONTROLLED' or not plan['paired_comparisons'] or
                 any(a.get('fixed_checkpoint_seed') is not None for a in plan['arms']) or
                 (plan.get('schema_version')=='4.0' and not result.get('comparison_controls',{}).get('causal_claim_eligible',False))))):
-            raise ValueError('critic attempted a scientific claim unsupported by completed controlled work')
+            raise controller.CandidateValidationError('critic attempted a scientific claim unsupported by completed controlled work')
         return review
     _, review, _ = controller._with_agent_correction(store, (campaigns,campaign_id), 'critic', request, check)
     for row in rows:

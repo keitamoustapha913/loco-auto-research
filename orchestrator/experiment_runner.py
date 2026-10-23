@@ -11,6 +11,7 @@ import sys
 import time
 from orchestrator.budgets import max_job_seconds
 from orchestrator.state_store import StateStore
+from orchestrator.controller_errors import CandidateValidationError
 from orchestrator.mlflow_tracker import enqueue_run_tracking
 
 
@@ -41,23 +42,24 @@ def sha256(path):
 def verify_candidate_source(path, *, diagnostic_only=False):
     """Non-executing protocol preflight; OS sandbox remains the security boundary."""
     if Path(path).stat().st_size > 1_000_000:
-        raise ValueError('candidate source exceeds 1 MB review limit')
+        raise CandidateValidationError('candidate source exceeds 1 MB review limit')
     source = Path(path).read_text()
-    tree = ast.parse(source, filename=str(path))
+    try:tree = ast.parse(source, filename=str(path))
+    except SyntaxError as exc:raise CandidateValidationError('candidate source syntax: '+str(exc)) from exc
     functions = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
     methods = {n.name for cls in tree.body if isinstance(cls, ast.ClassDef)
                for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
     if diagnostic_only:
-        if 'diagnose' not in functions:raise ValueError('frozen diagnostic provider requires diagnose; training interface is not required')
+        if 'diagnose' not in functions:raise CandidateValidationError('frozen diagnostic provider requires diagnose; training interface is not required')
     elif not {'train', 'load'}.issubset(functions) or 'predict' not in methods | functions:
-        raise ValueError('candidate source lacks train/load/predict contract')
+        raise CandidateValidationError('candidate source lacks train/load/predict contract')
     if any(token in source.lower() for token in ('official_test', 'loco-sealed', 'ground_truth')):
-        raise ValueError('candidate source references protected evaluation data')
+        raise CandidateValidationError('candidate source references protected evaluation data')
     if diagnostic_only:return {'source_sha256': sha256(path), 'protocol_symbols': sorted(functions | methods)}
     train_node = next(n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == 'train')
     positional = [n.arg for n in train_node.args.posonlyargs + train_node.args.args]
     if len(positional) < 3 or positional[0] != 'config' or 'manifest' not in positional[1] or not any(t in positional[2] for t in ('output', 'checkpoint')):
-        raise ValueError('candidate train signature must be train(config, allowed_manifest, output_dir)')
+        raise CandidateValidationError('candidate train signature must be train(config, allowed_manifest, output_dir)')
     return {'source_sha256': sha256(path), 'protocol_symbols': sorted(functions | methods)}
 
 
@@ -91,9 +93,9 @@ def require_training_phases(path, target=False, loop=False):
     import ast
     tree=ast.parse(Path(path).read_text())
     if not any(isinstance(node,ast.FunctionDef) and node.name=='training_steps' for node in tree.body):
-        raise ValueError('training-only budget cannot be verified: candidate lacks explicit training_steps interface; frozen source will not be rewritten')
+        raise CandidateValidationError('training-only budget cannot be verified: candidate lacks explicit training_steps interface; frozen source will not be rewritten')
     if target and not any(isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='TRAINING_PROTOCOL' for t in n.targets) and isinstance(n.value,ast.Constant) and n.value.value==('elapsed-training-loop-v1' if loop else 'required-training-target-v1') for n in tree.body):
-        raise ValueError('candidate must explicitly implement '+('elapsed-training-loop-v1 with TrainingLoopStart' if loop else 'progress-aware required-training-target-v1')+'; frozen schedules cannot be silently changed')
+        raise CandidateValidationError('candidate must explicitly implement '+('elapsed-training-loop-v1 with TrainingLoopStart' if loop else 'progress-aware required-training-target-v1')+'; frozen schedules cannot be silently changed')
 
 
 def probe_candidate_interface(repo_root, module_file, good_root, runtime, candidate_id, timeout=20, cancel=None, *, diagnostic_only=False):
@@ -107,11 +109,17 @@ def probe_candidate_interface(repo_root, module_file, good_root, runtime, candid
     if probe_dir.is_symlink() or not probe_dir.resolve(strict=True).is_relative_to(probe_root):
         raise PermissionError('candidate probe output escapes runtime')
     required = ('diagnose',) if diagnostic_only else ('train','load')
-    script = ("import importlib.util; "
-              "s=importlib.util.spec_from_file_location('candidate','/candidate/model.py'); "
-              "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
-              f"assert all(callable(getattr(m,n,None)) for n in {required!r}); "
-              "print('interface import OK')")
+    script = f"""import importlib.util, traceback, json, sys
+try:
+    s=importlib.util.spec_from_file_location('candidate','/candidate/model.py')
+    m=importlib.util.module_from_spec(s); s.loader.exec_module(m)
+    assert all(callable(getattr(m,n,None)) for n in {required!r})
+except Exception:
+    traceback.print_exc()
+    print('CANDIDATE_IMPORT_RESULT=FAILED')
+    sys.exit(1)
+print('interface import OK')
+"""
     cmd = sandbox_command(repo_root, module_file, good_root, probe_dir, ['-c', script], use_gpu=False)
     try:
         from orchestrator.codex_runner import run_cancellable
@@ -123,7 +131,10 @@ def probe_candidate_interface(repo_root, module_file, good_root, runtime, candid
     (probe_dir/'interface_stdout.log').write_text(result.stdout)
     (probe_dir/'interface_stderr.log').write_text(result.stderr)
     if result.returncode or 'interface import OK' not in result.stdout:
-        raise ValueError(f'candidate CPU interface probe failed: {(result.stdout + result.stderr)[-12000:]}')
+        detail=(result.stdout+result.stderr)[-12000:]
+        if 'CANDIDATE_IMPORT_RESULT=FAILED' in result.stdout:
+            raise CandidateValidationError('candidate CPU interface probe failed: '+detail)
+        raise RuntimeError('CPU interface worker failed before reporting a candidate result: '+detail)
     return True
 
 
@@ -132,7 +143,7 @@ def run_candidate_unit_tests(repo_root, module_file, good_root, runtime, candida
     from orchestrator.sandbox import command as sandbox_command
     module = Path(module_file).resolve(strict=True)
     if not (module.parent / 'test_model.py').is_file():
-        raise ValueError('candidate CPU unit tests failed: mandatory test_model.py is missing')
+        raise CandidateValidationError('candidate CPU unit tests failed: mandatory test_model.py is missing')
     probe_root = Path(runtime).resolve() / 'probes'
     probe_root.mkdir(parents=True, exist_ok=True)
     probe_dir = probe_root / safe_candidate_id(candidate_id)
@@ -153,6 +164,7 @@ code = pytest.main(['-q', '-ra', '-p', 'no:cacheprovider', '/candidate/test_mode
 if code == 0 and results.passed == 0:
     print('candidate validation rejected: no tests executed successfully (all skipped or xfailed)')
     code = 5
+print('CANDIDATE_TEST_RESULT=' + str(code))
 sys.exit(code)
 '''
     cmd = sandbox_command(repo_root, module, good_root, probe_dir,
@@ -167,8 +179,13 @@ sys.exit(code)
         raise TimeoutError('candidate CPU unit tests timed out') from exc
     (probe_dir/'tests_stdout.log').write_text(result.stdout)
     (probe_dir/'tests_stderr.log').write_text(result.stderr)
+    if 'CANDIDATE_TEST_RESULT=' not in result.stdout:
+        raise RuntimeError('CPU test worker did not report a validation result: '+(result.stdout+result.stderr)[-8000:])
     if result.returncode:
-        raise ValueError(f'candidate CPU unit tests failed: {(result.stdout + result.stderr)[-8000:]}')
+        detail=(result.stdout+result.stderr)[-8000:]
+        if 'CANDIDATE_TEST_RESULT=' in result.stdout:
+            raise CandidateValidationError('candidate CPU unit tests failed: '+detail)
+        raise RuntimeError('CPU test worker failed before reporting candidate tests: '+detail)
     return {'tests': 'passed', 'output': result.stdout[-300:]}
 
 

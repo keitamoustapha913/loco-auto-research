@@ -84,7 +84,7 @@ def test_replay_frozen_implementer_false_attestations(tmp_path,monkeypatch):
     seen=[]
     def invoke(*a,**k):
         seen.append(a[4])
-        return {'response':{'candidate_id':'fixture','train_contract':False,'load_contract':False,
+        return {'response':{'candidate_id':'fixture','implemented_files':['model.py'],'train_contract':False,'load_contract':False,
                             'predict_contract':False,'new_dependencies':[],'external_weights':[]}}
     monkeypatch.setattr(controller,'budgeted_invoke',invoke)
     monkeypatch.setattr(experiment_runner,'require_training_phases',lambda *a,**k:pytest.fail('frozen diagnostics must not train'))
@@ -176,7 +176,7 @@ def test_probe_preserves_full_logs_and_decisive_exception_tail(tmp_path,monkeypa
     monkeypatch.setattr(sandbox,'command',lambda *a,**kw:['fixture'])
     stderr='old context\n'*3000+'Traceback: diagnostic.py:143\nValueError: DECISIVE calibration contract\n'
     monkeypatch.setattr(experiment_runner.subprocess,'run',lambda *a,**kw:SimpleNamespace(
-        stdout='preflight output',stderr=stderr,returncode=1))
+        stdout='preflight output\nCANDIDATE_IMPORT_RESULT=FAILED\n',stderr=stderr,returncode=1))
     with pytest.raises(ValueError,match='DECISIVE calibration contract'):
         experiment_runner.probe_candidate_interface(tmp_path,tmp_path/'model.py',tmp_path,tmp_path,'fixture',diagnostic_only=True)
     assert (tmp_path/'probes/fixture/interface_stderr.log').read_text()==stderr
@@ -199,7 +199,7 @@ def test_new_training_attestation_still_fails_with_actionable_fields(tmp_path,mo
     from orchestrator import controller
     store,tree,prompts,checks=prepare(tmp_path,monkeypatch,0)
     monkeypatch.setattr(controller,'budgeted_invoke',lambda *a,**k:{'response':{
-        'candidate_id':'fixture','train_contract':False,'load_contract':True,'predict_contract':True,
+        'candidate_id':'fixture','implemented_files':['model.py'],'train_contract':False,'load_contract':True,'predict_contract':True,
         'new_dependencies':[],'external_weights':[]}})
     with pytest.raises(ValueError,match="required true fields missing: .*train_contract"):
         controller.implement_proposal(store,'fixture',validation_runtime=tmp_path)

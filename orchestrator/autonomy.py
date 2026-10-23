@@ -1,5 +1,6 @@
 """Trusted, persistent campaign state machine. Agent JSON never becomes shell code."""
 from __future__ import annotations
+from orchestrator.controller_errors import TrustedControllerError
 
 import json
 import os
@@ -11,7 +12,7 @@ import yaml
 from benchmark.data_guard import load_manifest, manifest_fingerprint
 from orchestrator.campaign_state import CampaignState, TERMINAL
 from orchestrator.state_store import StateStore
-from orchestrator.budgets import CodexBudgetExhausted
+from orchestrator.budgets import CodexBudgetExhausted, BudgetExceeded
 
 REPO = Path(__file__).resolve().parents[1]
 REQUIRED_LIMITS = ("max_gpu_hours", "max_wall_hours", "max_experiments", "max_codex_calls",
@@ -270,13 +271,13 @@ def prepare_plan_candidate(store,campaigns,campaign_id,runtime,plan,research):
                     source_sha256=sha256(Path(result['candidate_module'])))
 
 
-def recover_research_attempt(store,campaigns,campaign_id,runtime):
+def recover_research_attempt(store,campaigns,campaign_id,runtime, *, trusted_failure=None):
     """Abandon a failed attempt, not its campaign, using durable immutable evidence."""
     import subprocess
     from orchestrator.campaign_config import time_based,MAX_CONSECUTIVE_RETRIES
     from orchestrator.experiment_plan import plan_history,record_result,verify_baseline
     row=campaigns.get(campaign_id);config=json.loads(row['config_json'])
-    if not time_based(config) or row['consecutive_failures']<MAX_CONSECUTIVE_RETRIES:return False
+    if not time_based(config) or (trusted_failure is None and row['consecutive_failures']<MAX_CONSECUTIVE_RETRIES):return False
     # Resolve/check immutable references before changing any recovery state.
     evidence=campaigns.events(campaign_id,100000)
     checkpoint=next((json.loads(e['payload_json']) for e in evidence if e['kind']=='VERIFIED_RESEARCH_STATE'),None)
@@ -294,6 +295,7 @@ def recover_research_attempt(store,campaigns,campaign_id,runtime):
         plan=entry['plan']
         if plan['plan_id'] in reviewed:continue
         record_result(store,campaigns,campaign_id,plan,campaigns.runs(campaign_id),runtime,
+                      ('trusted operation quarantined; '+trusted_failure.detail['error']) if trusted_failure else
                       'retry allowance exhausted; attempt abandoned, unverified results ineligible for promotion')
         store.set_hypothesis_status(plan['hypothesis_id'],'FAILED')
         abandoned.append(plan['plan_id'])
@@ -301,13 +303,14 @@ def recover_research_attempt(store,campaigns,campaign_id,runtime):
     with store.connect() as con:
         con.execute('BEGIN IMMEDIATE')
         current=con.execute('SELECT consecutive_failures FROM campaigns WHERE id=?',(campaign_id,)).fetchone()[0]
-        if current<MAX_CONSECUTIVE_RETRIES:return False
+        if trusted_failure is None and current<MAX_CONSECUTIVE_RETRIES:return False
         for plan_id in abandoned:
             con.execute('INSERT INTO campaign_events(campaign_id,time,kind,payload_json) VALUES(?,?,?,?)',
                         (campaign_id,time.time(),'PLAN_ABANDONED',json.dumps({'plan_id':plan_id,'status':'FAILED'})))
         con.execute('INSERT INTO campaign_events(campaign_id,time,kind,payload_json) VALUES(?,?,?,?)',
                     (campaign_id,time.time(),'RECOVERY_RESTORED',json.dumps({'status':'FAILED','failures':current,
                       'verified_state':checkpoint,'abandoned_plans':abandoned,
+                      'trusted_failure_fingerprint':trusted_failure.detail['fingerprint'] if trusted_failure else None,
                       'instruction':'Revise using the recorded failure evidence; never repeat abandoned plans or alter frozen plans. No automatic weight reuse.'})))
         con.execute("UPDATE campaigns SET consecutive_failures=0,current_hypothesis='',active_run_id='',next_hypothesis='recovery:revise_from_verified_evidence',updated_at=? WHERE id=?",(time.time(),campaign_id))
     return True
@@ -514,6 +517,30 @@ def close_unfinished_comparisons(store, campaigns, campaign_id, runtime, reason)
             store.set_hypothesis_status(entry['plan']['hypothesis_id'],'INCOMPLETE')
 
 
+def handle_trusted_failure(store,campaigns,campaign_id,runtime,failure):
+    """Quarantine isolated pre-dispatch defects; never use candidate repair calls."""
+    from orchestrator.controller_errors import record_trusted_failure
+    record_trusted_failure(store,(campaigns,campaign_id),failure,
+        hypothesis_id=campaigns.get(campaign_id)['current_hypothesis'])
+    row=campaigns.get(campaign_id)
+    if failure.fatal or row['active_run_id']:
+        close_unfinished_comparisons(store,campaigns,campaign_id,runtime,failure.detail['error'])
+        campaigns.set_status(campaign_id,'FAILED','trusted infrastructure blocker: '+failure.detail['error'])
+        return
+    try:
+        restored=recover_research_attempt(store,campaigns,campaign_id,runtime,trusted_failure=failure)
+    except Exception as exc:
+        from orchestrator.controller_errors import trusted_failure as classify_trusted
+        blocker=classify_trusted(exc,'campaign.trusted_recovery',fatal=True)
+        record_trusted_failure(store,(campaigns,campaign_id),blocker)
+        close_unfinished_comparisons(store,campaigns,campaign_id,runtime,blocker.detail['error'])
+        campaigns.set_status(campaign_id,'FAILED','verified recovery unavailable: '+blocker.detail['error'])
+        return
+    if not restored:
+        close_unfinished_comparisons(store,campaigns,campaign_id,runtime,failure.detail['error'])
+        campaigns.set_status(campaign_id,'FAILED','trusted operation unavailable; safe recovery could not be established')
+
+
 def run_forever(campaign_id: str, runtime: Path, ledger: Path, idle_seconds=2):
     store = StateStore(ledger)
     campaigns = CampaignState(store)
@@ -555,6 +582,9 @@ def run_forever(campaign_id: str, runtime: Path, ledger: Path, idle_seconds=2):
             state,reason=stop_reason(campaigns,campaign_id)
             campaigns.set_status(campaign_id, state or 'BUDGET_EXHAUSTED', reason or str(exc))
             return
+        except TrustedControllerError as exc:
+            handle_trusted_failure(store,campaigns,campaign_id,runtime,exc)
+            if campaigns.get(campaign_id)['status'] in TERMINAL:return
         except Exception as exc:
             import sqlite3
             from orchestrator.codex_runner import ProviderSchemaError,AgentUnavailable
@@ -562,9 +592,19 @@ def run_forever(campaign_id: str, runtime: Path, ledger: Path, idle_seconds=2):
             if (isinstance(exc,(PermissionError,ProviderSchemaError,AgentUnavailable)) or
                 (isinstance(exc,sqlite3.Error) and not transient_db) or
                 (isinstance(exc,OSError) and not isinstance(exc,(TimeoutError,BlockingIOError)))):
-                campaigns.event(campaign_id,'SAFETY_HALTED',error=str(exc))
+                import traceback
+                campaigns.event(campaign_id,'SAFETY_HALTED',error=str(exc),error_type=type(exc).__name__,traceback=traceback.format_exc())
                 close_unfinished_comparisons(store,campaigns,campaign_id,runtime,str(exc))
                 campaigns.set_status(campaign_id,'FAILED','nonrecoverable safety/integrity/host error: '+str(exc))
+                return
+            from orchestrator.controller_errors import CandidateValidationError,trusted_failure
+            from orchestrator.codex_runner import AgentFailure
+            from orchestrator.planning_contract import PlanningValidationError
+            from benchmark.train_adapter import CandidateContractError
+            recoverable=isinstance(exc,(CandidateValidationError,PlanningValidationError,CandidateContractError,AgentFailure,TimeoutError,BlockingIOError,BudgetExceeded)) or transient_db
+            if not recoverable:
+                handle_trusted_failure(store,campaigns,campaign_id,runtime,
+                    trusted_failure(exc,'campaign.execution',fatal=True))
                 return
             campaigns.recoverable_failure(campaign_id,exc)
             campaigns.event(campaign_id, "CONTROLLER_ERROR", error=str(exc))

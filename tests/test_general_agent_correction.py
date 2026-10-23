@@ -3,6 +3,7 @@ from pathlib import Path
 import sqlite3
 import pytest
 from orchestrator import controller
+from orchestrator.controller_errors import CandidateValidationError
 from orchestrator.codex_runner import AgentFailure, InvalidAgentOutput
 from orchestrator.budgets import CodexBudgetExhausted
 from orchestrator.state_store import StateStore
@@ -22,7 +23,10 @@ def test_unfamiliar_generated_work_failures_receive_context_and_one_correction(t
         prompts.append(feedback)
         return {'generated':attempt}
     def validate(response):
-        if response['generated']==0:raise error
+        if response['generated']==0:
+            # Isolated generated-code execution reports its ownership explicitly.
+            try:raise error
+            except Exception as exc:raise CandidateValidationError(str(exc)) from exc
         return 'accepted'
     response,valid,repaired=controller._with_agent_correction(store,None,'implementer',request,validate)
     assert valid=='accepted' and repaired and len(prompts)==2
@@ -45,8 +49,8 @@ def test_security_budget_and_host_failures_never_become_agent_repair(tmp_path,er
 def test_unfamiliar_validation_failure_stops_after_single_correction(tmp_path):
     store=StateStore(tmp_path/'ledger.sqlite');calls=[]
     def request(feedback,attempt):calls.append(1);return {}
-    def validate(response):raise PreviouslyUnseenValidationError('still broken')
-    with pytest.raises(PreviouslyUnseenValidationError):
+    def validate(response):raise CandidateValidationError('still broken')
+    with pytest.raises(CandidateValidationError):
         controller._with_agent_correction(store,None,'researcher',request,validate)
     assert len(calls)==2
 

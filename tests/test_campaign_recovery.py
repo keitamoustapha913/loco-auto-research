@@ -50,7 +50,7 @@ def test_retry_loop_survives_ten_failures_and_expires_on_original_deadline(lab,m
     monkeypatch.setattr(autonomy,'preflight',lambda *a,**k:None)
     def cycle(target,campaigns,ident,folder):
         called.append(campaigns.get(ident)['consecutive_failures'])
-        if len(called)<=10:raise RuntimeError('recoverable fixture transport failure')
+        if len(called)<=10:raise codex_runner.AgentFailure('recoverable fixture transport failure')
         assert campaigns.get(ident)['created_at']==created
         assert any(e['kind']=='RECOVERY_RESTORED' for e in campaigns.events(ident))
         with target.connect() as con:con.execute('UPDATE campaigns SET created_at=created_at-14401 WHERE id=?',(ident,))
@@ -85,7 +85,7 @@ def test_semantic_validation_not_raw_agent_completion_resets_counter(lab):
     store,c,cid,_=lab;c.recoverable_failure(cid,'old failure')
     with pytest.raises(ValueError):
         controller._with_agent_correction(store,(c,cid),'researcher',lambda *a:{},
-                                         lambda response:(_ for _ in ()).throw(ValueError('bad plan')))
+                                         lambda response:(_ for _ in ()).throw(controller.CandidateValidationError('bad plan')))
     assert c.get(cid)['consecutive_failures']==1
     controller._with_agent_correction(store,(c,cid),'researcher',lambda *a:{},lambda response:True)
     assert c.get(cid)['consecutive_failures']==0

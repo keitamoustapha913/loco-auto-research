@@ -7,6 +7,7 @@ from __future__ import annotations
 import ast
 import copy
 import json
+import subprocess
 from pathlib import Path
 
 
@@ -142,6 +143,8 @@ def comparison_controls(plan, rows=()):
 def inspect_plan(plan, store=None, repo_root=None):
     """Collect all previously observed failure classes, without modifying input."""
     from orchestrator.experiment_plan import REPO,validate_plan,plan_schema
+    from orchestrator.controller_errors import CandidateValidationError
+    from benchmark.train_adapter import CandidateContractError
     from jsonschema import validate, ValidationError
     try:
         validate(plan,plan_schema(plan))
@@ -152,12 +155,12 @@ def inspect_plan(plan, store=None, repo_root=None):
     issues=local_issues(plan)
     try:plan=validate_plan(plan)
     except PlanningValidationError:pass
-    except Exception as exc:issues.append({'code':'PLAN_CONTRACT','message':str(exc)})
+    except (CandidateValidationError,CandidateContractError) as exc:issues.append({'code':'PLAN_CONTRACT','message':str(exc)})
     capabilities={}
     if store is not None:
         for ref in plan['baselines']:
             try:capabilities[ref['baseline_id']]=baseline_capability(store,ref,repo_root or REPO)
-            except Exception as exc:issues.append({'code':'BASELINE_INTEGRITY','baseline_id':ref['baseline_id'],'message':str(exc)})
+            except (ValueError,OSError,subprocess.SubprocessError) as exc:issues.append({'code':'BASELINE_INTEGRITY','baseline_id':ref['baseline_id'],'message':str(exc)})
         for arm in plan['arms']:
             if not arm['baseline_by_seed']:continue
             for bid in set(arm['baseline_by_seed'].values()):

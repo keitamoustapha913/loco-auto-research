@@ -25,13 +25,13 @@ def prepare(tmp_path, monkeypatch, failures):
     def check(*a):
         checks.append(1)
         if len(checks)<=failures:
-            raise ValueError('EXACT CPU ERROR: all 3 tests skipped: CUDA required')
+            raise controller.CandidateValidationError('EXACT CPU ERROR: all 3 tests skipped: CUDA required')
         return {'tests':'passed'}
     monkeypatch.setattr(experiment_runner,'run_candidate_unit_tests',check)
     prompts=[]
     def invoke(*a,**kw):
         prompts.append(a[4])
-        return {'response':{'candidate_id':'fixture','train_contract':True,'load_contract':True,
+        return {'response':{'candidate_id':'fixture','implemented_files':['model.py'],'train_contract':True,'load_contract':True,
                             'predict_contract':True,'new_dependencies':[],'external_weights':[]}}
     monkeypatch.setattr(controller,'budgeted_invoke',invoke)
     return store,tree,prompts,checks

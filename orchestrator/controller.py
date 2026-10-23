@@ -17,6 +17,8 @@ from orchestrator.codex_runner import invoke, create_candidate_worktree, Invalid
 from orchestrator.gpu_queue import claim_next, gpu_lock
 from orchestrator.experiment_runner import execute_run
 from orchestrator.state_store import StateStore
+from orchestrator.controller_errors import (CandidateValidationError,TrustedControllerError,
+    candidate_check,blocked_operation,record_trusted_failure,trusted_failure)
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -193,16 +195,16 @@ def budgeted_invoke(store, role, repo_root, schema, prompt, campaign=None, **kwa
     return _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=campaign, **kwargs)
 
 
-def _validate_research_proposals(store, proposals, count, require_gpu_pilot):
+def _validate_research_proposals(store, proposals, count, require_gpu_pilot, campaign=None):
     """Validate the entire batch before persisting any accepted proposal."""
     if len(proposals) < count:
-        raise ValueError(f"researcher returned {len(proposals)}; need at least {count}")
+        raise CandidateValidationError(f"researcher returned {len(proposals)}; need at least {count}")
     # Distinct scientific questions may concern the same architecture: losses,
     # learning dynamics, ablations and independent replication are valid research.
     # Mechanism/identity deduplication below remains mandatory.
     ranks = [p.get('priority_rank') for p in proposals]
     if len(set(ranks)) != len(proposals) or any(not isinstance(r, int) or r < 1 for r in ranks):
-        raise ValueError('hypothesis priority ranks must be distinct positive integers')
+        raise CandidateValidationError('hypothesis priority ranks must be distinct positive integers')
     prior = [json.loads(row['proposal_json']) for row in list_proposals(store)]
     def signature(item):
         return ' '.join((item.get('claim', '') + ' ' + item.get('controlled_change', '')).lower().split())
@@ -210,31 +212,39 @@ def _validate_research_proposals(store, proposals, count, require_gpu_pilot):
         followup = proposal.get('followup_of', '')
         followup_kind = proposal.get('followup_kind', 'new')
         if followup_kind != 'new' and not any(p['hypothesis_id']==followup for p in prior):
-            raise ValueError('scientific follow-up must name an existing parent hypothesis')
+            raise CandidateValidationError('scientific follow-up must name an existing parent hypothesis')
         if followup_kind == 'new' and followup:
-            raise ValueError('new hypothesis cannot silently reuse a parent identity')
+            raise CandidateValidationError('new hypothesis cannot silently reuse a parent identity')
         minutes = proposal.get('estimated_gpu_minutes')
         needs_training=any(a.get('execution')=='train' for a in proposal.get('experiment_plan',{}).get('arms',[]))
         if require_gpu_pilot and needs_training and (isinstance(minutes, bool) or not isinstance(minutes, (int, float))
                                   or not __import__('math').isfinite(minutes) or minutes <= 0
                                   or 'cpu-only' in proposal.get('evaluation_plan', '').lower()):
-            raise ValueError('CUDA pilot requires GPU-trained hypotheses within authorized limits; CPU-only proposals remain research leads')
+            raise CandidateValidationError('CUDA pilot requires GPU-trained hypotheses within authorized limits; CPU-only proposals remain research leads')
         if any(not isinstance(dep, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+(?:[<>=!~]+[0-9][A-Za-z0-9_.-]*)?', dep)
                for dep in proposal.get('new_dependencies', [])):
-            raise ValueError('new_dependencies must contain package names only; use [] for none')
+            raise CandidateValidationError('new_dependencies must contain package names only; use [] for none')
         duplicate = next((old for old in prior if proposal['hypothesis_id'] == old['hypothesis_id'] or
                           (not (old['hypothesis_id']==followup and followup_kind!='new') and
                            SequenceMatcher(None, signature(proposal), signature(old)).ratio() > 0.92)), None)
         if duplicate:
-            raise ValueError(f"duplicate research proposal: {proposal['hypothesis_id']}; "
+            raise CandidateValidationError(f"duplicate research proposal: {proposal['hypothesis_id']}; "
                              f"matches {duplicate['hypothesis_id']}: {duplicate.get('claim', '')} "
                              f"Controlled change: {duplicate.get('controlled_change', '')}")
         if 'experiment_plan' not in proposal:
-            raise ValueError('structured experiment_plan required for newly generated hypotheses')
+            raise CandidateValidationError('structured experiment_plan required for newly generated hypotheses')
         if proposal['experiment_plan'].get('hypothesis_id')!=proposal['hypothesis_id']:
-            raise ValueError('plan hypothesis identity differs from its proposal')
+            raise CandidateValidationError('plan hypothesis identity differs from its proposal')
         from orchestrator.planning_contract import admit_plan
         admit_plan(proposal['experiment_plan'],store,REPO)
+        plan=proposal['experiment_plan']
+        trains=any(a['execution']=='train' for a in plan['arms'])
+        scope='implementer.training' if trains else ('implementer.frozen_diagnostics' if plan['diagnostics'] else None)
+        unavailable=blocked_operation(campaign,scope) if scope else None
+        if unavailable:
+            raise CandidateValidationError('Trusted execution operation '+scope+' is quarantined for this campaign. '
+                'Do not repair controller files or repeat this operation under a new hypothesis; choose a safe independent executable investigation. '
+                'Blocker fingerprint: '+unavailable.detail['fingerprint'])
         prior.append(proposal)
 
 
@@ -249,16 +259,21 @@ def _validation_event(store, campaign, kind, role, **payload):
 
 
 def _with_agent_correction(store, campaign, role, request, validate, *,
-                           hypothesis_id=None, initial_feedback=None):
+                           hypothesis_id=None, initial_feedback=None, operation=None, isolated=False):
     """One shared correction for agent-owned output/validation failures.
 
-    Classification uses the failure's origin, not message matching. Only the
-    validation callback handles generated proposals/files/tests; host operations
-    (workspace creation, scheduling, database writes) stay outside that boundary.
+    Only explicitly owned generated-work errors enter candidate correction.
+    Unknown callback exceptions and trusted stage commits are infrastructure
+    faults, with durable quarantine for isolated pre-dispatch operations.
     """
     import sqlite3
     import traceback
     from orchestrator.autonomy import CampaignHalted, await_authorized_stage
+    from orchestrator.codex_runner import AgentFailure
+    from orchestrator.planning_contract import PlanningValidationError
+    operation=operation or role+'.validation'
+    prior=blocked_operation(campaign,operation)
+    if prior:raise prior
     feedback = ('\nTrusted candidate execution failure to correct:\n' + initial_feedback) if initial_feedback else ''
     attempts = 1 if initial_feedback is not None else 2
     timed=False
@@ -274,19 +289,29 @@ def _with_agent_correction(store, campaign, role, request, validate, *,
             response = request(feedback, attempt)
             phase = 'generated_work_validation'
             validation = validate(response)
+            phase = 'trusted_stage_commit'
             if timed:campaign[0].validated_stage(campaign[1],role,hypothesis_id=hypothesis_id)
             return response, validation, initial_feedback is not None or attempt > 0
         except Exception as exc:
+            if campaign and isinstance(exc,(TimeoutError,subprocess.TimeoutExpired,AgentFailure)):
+                from orchestrator.campaign_config import operation_cancelled
+                if operation_cancelled(campaign[0],campaign[1]):
+                    await_authorized_stage(campaign[0],campaign[1],finishing=True)
             # These controls must never become instructions to change the host,
             # request extra privileges, edit budgets, or weaken trusted checks.
             if isinstance(exc, (BudgetExceeded, CampaignHalted, PermissionError, sqlite3.Error, subprocess.SubprocessError)):
                 raise
             if isinstance(exc, OSError) and not isinstance(exc, TimeoutError):
                 raise
-            if phase == 'agent_response' and not isinstance(exc, InvalidAgentOutput):
-                raise  # CLI/transport/host failure, rather than generated output.
+            if isinstance(exc,TrustedControllerError):raise
+            if phase == 'agent_response' and isinstance(exc,AgentFailure) and not isinstance(exc,InvalidAgentOutput):
+                raise  # Existing transport retries/safety handling; not candidate correction.
+            if not isinstance(exc,(CandidateValidationError,InvalidAgentOutput,PlanningValidationError)) or phase=='trusted_stage_commit':
+                failure=trusted_failure(exc,operation,fatal=not (isolated and phase=='generated_work_validation'))
+                record_trusted_failure(store,campaign,failure,role=role,hypothesis_id=hypothesis_id)
+                raise failure from exc
             detail = {'hypothesis_id': hypothesis_id, 'attempt': attempt+1, 'stage': phase,
-                      'error_type': type(exc).__name__, 'error': str(exc),
+                      'error_type': type(exc.__cause__ or exc).__name__, 'error': str(exc),
                       'traceback': traceback.format_exc(limit=8)[-12000:]}
             _validation_event(store, campaign, 'VALIDATION_FAILED', role, **detail)
             if attempt+1 == attempts:
@@ -346,6 +371,10 @@ def add_research_proposals(store, prompt, count=3, campaign=None, personal_mode=
             if event['kind']=='EXPERIMENT_PLAN_RESULT':
                 result=json.loads(event['payload_json']).get('result',{})
                 recent_comparisons.append({k:result.get(k) for k in ('hypothesis_id','status','problems','paired_image_intervals','comparison_controls')})
+        from orchestrator.controller_errors import source_version
+        version=source_version()
+        quarantined=[json.loads(e['payload_json'])['operation'] for e in campaigns.events(cid,100000) if e['kind']=='TRUSTED_INFRASTRUCTURE_ERROR' and json.loads(e['payload_json']).get('source_version')==version]
+        instruction += '\nUnavailable trusted execution operations (cannot be repaired in candidate files): '+json.dumps(sorted(set(quarantined)))
         instruction += '\nRecent completed/incomplete investigations; justify the next decision against their evidence: '+json.dumps(recent_comparisons[-8:])
         limits = json.loads(campaigns.get(cid)['config_json'])['limits']
         usage = campaigns.usage(cid)
@@ -383,8 +412,8 @@ def add_research_proposals(store, prompt, count=3, campaign=None, personal_mode=
         from orchestrator.experiment_plan import decode_agent_plan
         for proposal in output['proposals']:
             if proposal.get('experiment_plan'):
-                proposal['experiment_plan'] = decode_agent_plan(proposal['experiment_plan'])
-        _validate_research_proposals(store, output['proposals'], count, require_gpu_pilot)
+                proposal['experiment_plan'] = candidate_check(decode_agent_plan,proposal['experiment_plan'])
+        _validate_research_proposals(store, output['proposals'], count, require_gpu_pilot, campaign=campaign)
         from orchestrator.experiment_plan import verify_baseline
         for proposal in output['proposals']:
             plan = proposal['experiment_plan']
@@ -397,14 +426,14 @@ def add_research_proposals(store, prompt, count=3, campaign=None, personal_mode=
                     real_feedback=plan['evaluation']['real_development_feedback'],critique=True,
                     source_sha256='not-implemented-yet',loop_timed=plan.get('schema_version')=='4.0')
                 if estimate['required_seconds']>remaining['max_wall_seconds']:
-                    raise ValueError('required-duration matrix cannot fit remaining research time including preparation/evaluation; revise the plan, not the target')
+                    raise CandidateValidationError('required-duration matrix cannot fit remaining research time including preparation/evaluation; revise the plan, not the target')
             if campaign and plan.get('resource_budget') and any(plan['resource_budget'][key] > allowance for key,allowance in remaining.items()):
-                raise ValueError('proposed comparison exceeds remaining authorized campaign allowance')
+                raise CandidateValidationError('proposed comparison exceeds remaining authorized campaign allowance')
             if campaign:
                 from orchestrator.campaign_config import time_based, plan_seconds
                 configuration=json.loads(campaigns.get(cid)['config_json'])
                 if time_based(configuration) and plan_seconds(plan,configuration)>remaining['max_wall_seconds']:
-                    raise ValueError('complete comparison including frozen evaluation and critique cannot fit remaining research duration')
+                    raise CandidateValidationError('complete comparison including frozen evaluation and critique cannot fit remaining research duration')
         return output['proposals']
     _, proposals, _ = _with_agent_correction(store, campaign, 'researcher', request, validate)
     for proposal in proposals:
@@ -467,7 +496,7 @@ def _validate_candidate_files(tree, hypothesis_id):
         if item.parent != candidate or item.name not in approved_names:
             extras.add(str(item.relative_to(tree)))
     if extras:
-        raise ValueError('Unapproved candidate files inside assigned workspace: ' + ', '.join(sorted(extras)) +
+        raise CandidateValidationError('Unapproved candidate files inside assigned workspace: ' + ', '.join(sorted(extras)) +
                          '. Remove these extra generated files. Allowed files: model.py, README.md, '
                          'test_model.py, candidate_manifest.json. Put licensing/provenance notes in README.md '
                          'or candidate_manifest.json. Do not modify files outside your assigned candidate directory.')
@@ -488,6 +517,10 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
             from orchestrator.autonomy import CampaignHalted
             campaign[0].set_status(campaign[1],'LIMIT_REACHED','insufficient research duration to implement and execute complete plan')
             raise CampaignHalted('insufficient research duration to implement and execute complete plan')
+    diagnostic_only = bool(proposal.get('experiment_plan')) and all(a['execution']=='frozen' for a in proposal['experiment_plan']['arms'])
+    operation='implementer.frozen_diagnostics' if diagnostic_only else 'implementer.training'
+    blocked=blocked_operation(campaign,operation)
+    if blocked:raise blocked
     reuse=False
     if campaign:
         from orchestrator.campaign_config import time_based
@@ -499,7 +532,6 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
         if not tree.is_relative_to((REPO / 'candidates' / 'worktrees').resolve()):
             raise PermissionError('repair workspace escapes assigned candidates')
     allowed_file = tree / "candidates" / hypothesis_id / "model.py"
-    diagnostic_only = bool(proposal.get('experiment_plan')) and all(a['execution']=='frozen' for a in proposal['experiment_plan']['arms'])
     if validation_runtime is not None and proposal.get('experiment_plan'):
         manifest_path=Path(validation_runtime)/'good_manifest.json'
         if manifest_path.is_file():
@@ -606,36 +638,44 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
                           hypothesis_id=hypothesis_id, attempt=attempt+1, response=response['response'])
         return response
     def validate(response):
+        from orchestrator.campaign_config import time_based
         if response["response"].get("new_dependencies") or response['response'].get('external_weights'):
             raise PermissionError("Agent requested dependencies or external weights; provenance and operator approval required")
-        _validate_candidate_files(tree, hypothesis_id)
+        candidate_check(_validate_candidate_files, tree, hypothesis_id)
         required = () if diagnostic_only else ('train_contract', 'load_contract', 'predict_contract')
         missing = [key for key in required if response['response'].get(key) is not True]
         if response['response'].get('candidate_id') != hypothesis_id or missing:
-            raise ValueError(f"implementation attestation: expected candidate_id={hypothesis_id!r}, "
+            raise CandidateValidationError(f"implementation attestation: expected candidate_id={hypothesis_id!r}, "
                 f"received {response['response'].get('candidate_id')!r}; required true fields missing: {missing}; "
                 f"execution={'frozen diagnostic only' if diagnostic_only else 'new training'}")
         if not allowed_file.is_file():
-            raise ValueError('implementation missing model.py')
+            raise CandidateValidationError(f'implementation missing model.py: create /workspace/candidates/{hypothesis_id}/model.py '
+                f'using the available Codex file-editing or shell tools inside the assigned writable directory before returning. '
+                f'The trusted controller runs candidate validation after your response; it is not a separate agent tool. '
+                f'Reported implemented_files={response["response"].get("implemented_files",[])}')
+        reported=response['response'].get('implemented_files')
+        expected_reports={'model.py',f'candidates/{hypothesis_id}/model.py',f'/workspace/candidates/{hypothesis_id}/model.py'}
+        if not isinstance(reported,list) or not expected_reports.intersection(x for x in reported if isinstance(x,str)):
+            raise CandidateValidationError('empty or mismatched implemented_files: report the actual model.py you created/verified '
+                f'at /workspace/candidates/{hypothesis_id}/model.py; a blocked/no-work response is not an implementation')
         if diagnostic_only:
-            verify_candidate_source(allowed_file, diagnostic_only=True)
+            candidate_check(verify_candidate_source, allowed_file, diagnostic_only=True)
         else:
-            verify_candidate_source(allowed_file)
+            candidate_check(verify_candidate_source, allowed_file)
         if proposal.get('experiment_plan'):
             import ast
             functions = {n.name:n for n in ast.parse(allowed_file.read_text()).body if isinstance(n,ast.FunctionDef)}
             plan = proposal['experiment_plan']
             if plan['diagnostics'] and 'diagnose' not in functions:
-                raise ValueError('experiment plan requires diagnose(predictor, assessment_good_images, diagnostic_config)')
+                raise CandidateValidationError('experiment plan requires diagnose(predictor, assessment_good_images, diagnostic_config)')
             if any(a['execution']=='train' and a['inference'] for a in plan['arms']):
                 if 'inference_config' not in {a.arg for a in functions['load'].args.args}:
-                    raise ValueError('planned inference intervention requires explicit load inference_config argument')
+                    raise CandidateValidationError('planned inference intervention requires explicit load inference_config argument')
         if campaign and not diagnostic_only:
-            from orchestrator.campaign_config import time_based
             if time_based(json.loads(campaign[0].get(campaign[1])['config_json'])):
                 from orchestrator.experiment_runner import require_training_phases
                 version=proposal.get('experiment_plan',{}).get('schema_version')
-                require_training_phases(allowed_file,target=version in {'3.0','4.0'},loop=version=='4.0')
+                candidate_check(require_training_phases, allowed_file,target=version in {'3.0','4.0'},loop=version=='4.0')
         if validation_runtime is not None:
             from orchestrator.experiment_runner import probe_candidate_interface, run_candidate_unit_tests
             good_root = Path(os.environ['LOCO_GOOD_ROOT'])
@@ -646,15 +686,16 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
                         'cancel':lambda:operation_cancelled(campaign[0],campaign[1])}
             probe_options=dict(timing)
             if diagnostic_only:probe_options['diagnostic_only']=True
-            probe_candidate_interface(REPO,allowed_file,good_root,validation_runtime,hypothesis_id,**probe_options)
+            candidate_check(probe_candidate_interface,REPO,allowed_file,good_root,validation_runtime,hypothesis_id,**probe_options)
             if timing:timing['timeout']=operation_seconds(campaign[0].get(campaign[1]),30)
-            cpu_result = run_candidate_unit_tests(REPO, allowed_file, good_root, validation_runtime, hypothesis_id,**timing)
+            cpu_result = candidate_check(run_candidate_unit_tests,REPO, allowed_file, good_root, validation_runtime, hypothesis_id,**timing)
             if campaign:
                 campaign[0].event(campaign[1], 'CANDIDATE_TESTS', hypothesis_id=hypothesis_id, **cpu_result)
             return cpu_result
         return None
     response, cpu_result, repair_used = _with_agent_correction(store, campaign, 'implementer',
-        request, validate, hypothesis_id=hypothesis_id, initial_feedback=repair_feedback)
+        request, validate, hypothesis_id=hypothesis_id, initial_feedback=repair_feedback,
+        operation='implementer.frozen_diagnostics' if diagnostic_only else 'implementer.training', isolated=diagnostic_only)
     store.set_hypothesis_status(hypothesis_id, "IMPLEMENTED")
     return {"worktree": str(tree), "candidate_module": str(allowed_file), "agent": response["response"],
             "cpu_validation": cpu_result, "repair_used": repair_used}

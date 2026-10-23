@@ -6,7 +6,7 @@ from jsonschema import validate
 from orchestrator import controller,autonomy
 from orchestrator.state_store import StateStore
 from orchestrator.campaign_state import CampaignState
-from orchestrator.codex_runner import provider_output_schema
+from orchestrator.codex_runner import provider_output_schema,AgentFailure
 from orchestrator.planning_contract import constrain_output_schema
 from orchestrator.experiment_plan import investigation_observations,baseline_reference
 from test_research_loop_interfaces import proposal
@@ -54,7 +54,7 @@ def test_requested_scout_findings_survive_transport_failure_and_restart(lab,monk
     def invoke(*a,**kw):
         calls[0]+=1
         if calls[0] in (1,3):return {'response':{'literature_request':'A specific knowledge gap','proposals':[]}}
-        if calls[0]==2:raise RuntimeError('transport fixture')
+        if calls[0]==2:raise AgentFailure('transport fixture')
         return {'response':{'literature_request':'','proposals':batch()}}
     monkeypatch.setattr(controller,'budgeted_invoke',invoke)
     monkeypatch.setattr(controller,'scout_literature',lambda *a,**kw:queries.append(kw['question']) or {'sources':['cached source']})
