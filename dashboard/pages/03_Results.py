@@ -6,8 +6,9 @@ from dashboard.campaign_timing import campaign_timing_card, training_seconds
 from dashboard.cumulative import progress_card
 from dashboard.data_access import cumulative_progress
 
-from dashboard.components import page_intro, run_details, development_result_card
-from dashboard.data_access import real_feedback_summaries, real_heatmap_sample, allowed_preview, heatmap_sample, latest_multiseed_comparison, list_runs
+
+from dashboard.components import page_intro, run_details, development_result_card, campaign_outcome_card, scientific_results_comparison, candidate_research_panel
+from dashboard.data_access import campaign_summary, pending_outbox, tracking_health, real_feedback_summaries, real_heatmap_sample, allowed_preview, heatmap_sample, latest_multiseed_comparison, list_runs
 from dashboard.presentation import (
     INFRASTRUCTURE, METRICS, classify_run, comparable_research_runs,
     experiment_rows, format_metric, metric_value, research_runs, research_summary, run_label,
@@ -45,6 +46,8 @@ with models_tab:
             except (OSError,ValueError,KeyError):
                 st.info('Localization preview unavailable or failed integrity checks.')
         st.caption('Codex’s next decision and supporting evidence are recorded separately on Research.')
+        with st.expander('Research and implementation details for this candidate'):
+            candidate_research_panel(selected_feedback['run_id'])
     with st.expander('Experiment history and technical details',expanded=not bool(feedback)):
         search, filter_col = st.columns([3, 1])
         query = search.text_input("Search models or hypotheses", placeholder="Candidate or hypothesis", key="models_search").strip().lower()
@@ -116,8 +119,11 @@ with heatmaps_tab:
                         c3.caption("No synthetic mask saved for this run.")
 
 with compare_tab:
+    campaign = campaign_summary()
+    scope = st.radio('Comparison scope', ['Latest campaign', 'All recorded evaluations'], horizontal=True) if campaign else 'All recorded evaluations'
+    scientific_results_comparison(feedback, campaign['run_ids'] if campaign and scope == 'Latest campaign' else None)
     if feedback:
-        st.subheader('Real development comparisons')
+        st.subheader('Efficiency and evaluator details')
         st.caption('Same custom split; compare only matching evaluator versions and inference devices. AU-sPRO uses the compatible development implementation.')
         st.dataframe([{'Candidate':f['candidate_id'],'Evaluator':f['evaluator_version'],
                        'Logical AU-sPRO @5%':f['metrics'].get('dev_real/logical_au_spro_0_05_compatible'),

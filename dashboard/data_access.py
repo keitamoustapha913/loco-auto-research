@@ -91,9 +91,14 @@ def campaign_summary():
         campaign["config"] = json.loads(campaign["config_json"])
     except ValueError:
         campaign["config"] = {}
-    counts = rows("SELECT COUNT(*) AS experiments, COALESCE(SUM(r.gpu_seconds),0) AS gpu_seconds "
+    counts = rows("SELECT COUNT(*) AS experiments, COALESCE(SUM(r.gpu_seconds),0) AS gpu_seconds, "
+                  "COALESCE(SUM(r.status IN ('COMPLETED','REVIEWED','PROMOTED')),0) AS successful "
                   "FROM campaign_runs cr JOIN runs r ON r.run_id=cr.run_id WHERE cr.campaign_id=?", (campaign["id"],))
     campaign["usage"] = counts[0] if counts else {"experiments": 0, "gpu_seconds": 0}
+    campaign['run_ids'] = [r['run_id'] for r in rows(
+        'SELECT r.run_id FROM campaign_runs cr JOIN runs r ON r.run_id=cr.run_id WHERE cr.campaign_id=? ORDER BY r.created_at, r.rowid', (campaign['id'],))]
+    failures = rows("SELECT COUNT(*) AS n FROM campaign_events WHERE campaign_id=? AND kind IN ('AGENT_FAILED','ATTEMPT_FAILED','CONTROLLER_ERROR')", (campaign['id'],))
+    campaign['failure_events'] = failures[0]['n'] if failures else 0
     campaign['usage']['gpu_seconds_live'] = campaign['usage']['gpu_seconds']
     if campaign.get('active_run_id'):
         active = rows('SELECT status,started_at FROM runs WHERE run_id=?', (campaign['active_run_id'],))
@@ -259,7 +264,9 @@ def tracking_health():
 
 
 def real_feedback_summaries():
-    result = rows("SELECT e.run_id,e.payload_json,r.candidate_id FROM events e JOIN runs r ON r.run_id=e.run_id WHERE e.kind='REAL_DEVELOPMENT_FEEDBACK' ORDER BY e.id DESC LIMIT 100")
+    # Select the latest feedback per run, then present candidates in execution
+    # order, independent of when tracking/evaluation events were delivered.
+    result = rows("SELECT e.run_id,e.payload_json,r.candidate_id FROM events e JOIN runs r ON r.run_id=e.run_id WHERE e.kind='REAL_DEVELOPMENT_FEEDBACK' AND e.id=(SELECT MAX(latest.id) FROM events latest WHERE latest.run_id=e.run_id AND latest.kind='REAL_DEVELOPMENT_FEEDBACK') ORDER BY r.created_at, r.rowid LIMIT 100")
     summaries = []
     seen = set()
     for row in result:
@@ -314,3 +321,33 @@ def real_heatmap_sample(summary, index, opacity=.4):
     return {'original':original,'overlay':overlay,'heatmap':Image.fromarray(np.uint8(color)),
             'ground_truth':Image.fromarray(np.uint8(union)*255),'mask_count':len(masks),
             'category':entry['category'],'score':cases[index]['image_score'],'size':original.size}
+
+
+def candidate_research_details(run_id):
+    """Join the selected run to its own proposal, implementation and critique."""
+    found = rows('SELECT * FROM runs WHERE run_id=?', (run_id,))
+    if not found:
+        return None
+    run = found[0]
+    def decode(value):
+        try:
+            item = json.loads(value)
+            return item if isinstance(item, dict) else {}
+        except (TypeError, ValueError):
+            return {}
+    run['config'] = decode(run['config_json'])
+    run['metrics'] = decode(run['metrics_json'])
+    proposals = rows('SELECT proposal_json FROM hypotheses WHERE hypothesis_id=?', (run['hypothesis_id'],))
+    implementations = rows("SELECT payload_json FROM events WHERE kind='IMPLEMENTER_RESPONSE' AND json_valid(payload_json) AND json_extract(payload_json,'$.hypothesis_id')=? AND time<=? ORDER BY id DESC LIMIT 1", (run['hypothesis_id'], run['created_at']))
+    reviews = rows("SELECT payload_json FROM events WHERE kind='CRITIC_REVIEW' AND run_id=? ORDER BY id DESC LIMIT 1", (run_id,))
+    membership = rows('SELECT campaign_id FROM campaign_runs WHERE run_id=?', (run_id,))
+    history = rows('SELECT kind,time,payload_json FROM campaign_events WHERE campaign_id=? ORDER BY id', (membership[0]['campaign_id'],)) if membership else []
+    linked = []
+    for event in history:
+        payload = decode(event['payload_json'])
+        if payload.get('run_id') == run_id or payload.get('evidence_run') == run_id or (
+            payload.get('hypothesis_id') == run['hypothesis_id'] and event['time'] <= run['created_at']):
+            linked.append(dict(event, payload=payload))
+    return {'run': run, 'proposal': decode(proposals[0]['proposal_json']) if proposals else {},
+            'implementation': decode(implementations[0]['payload_json']).get('response', {}) if implementations else {},
+            'review': decode(reviews[0]['payload_json']) if reviews else {}, 'history': linked}

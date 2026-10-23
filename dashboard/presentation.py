@@ -185,3 +185,33 @@ def development_card_metrics(feedback):
         ('Parameters', number('parameters','',0)),
         ('Peak inference VRAM', number('peak_cuda_inference_mib',' MiB',1) if device.startswith('CUDA') else 'Unavailable · CPU'),
     ]
+
+
+def real_comparison_rows(feedback, run_ids=None):
+    """Measured real-development endpoints only, in campaign execution order."""
+    import math
+    by_id = {f['run_id']: f for f in feedback}
+    selected = [by_id[rid] for rid in run_ids if rid in by_id] if run_ids is not None else list(feedback)
+    result = []
+    for f in selected:
+        def metric(key):
+            value = f.get('metrics', {}).get('dev_real/' + key)
+            return float(value) if isinstance(value, (int, float)) and math.isfinite(value) else None
+        result.append({'Candidate': f['candidate_id'].removeprefix('next_').replace('_', ' ').capitalize(),
+                       'Logical AUROC': metric('logical_image_auroc'),
+                       'Logical AU-sPRO': metric('logical_au_spro_0_05_compatible'),
+                       'Pixel AP': metric('logical_pixel_ap_pooled'),
+                       'split': f.get('split_id'), 'evaluator': f.get('evaluator_version')})
+    return result
+
+
+def localization_change(rows):
+    """Descriptive change only for a shared, explicit evaluation protocol."""
+    if len(rows) < 2 or not rows[0]['split'] or not rows[0]['evaluator']:
+        return None
+    if len({(r['split'], r['evaluator']) for r in rows}) != 1:
+        return None
+    first, last = rows[0]['Logical AU-sPRO'], rows[-1]['Logical AU-sPRO']
+    if first is None or last is None or first <= 0:
+        return None
+    return (last - first) / first * 100
