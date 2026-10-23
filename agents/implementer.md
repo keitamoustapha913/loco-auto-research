@@ -29,3 +29,11 @@ Every diagnostic must return exactly its declared finite scalar metrics. Per-ima
 
 ## Training throughput
 Reuse deterministic decoded train/good pixels with a bounded, per-training `benchmark.train_adapter.DecodedTrainingCache` when source files are repeatedly decoded. Cache only invariant preprocessing with the same source/hash/size key; do not cache stochastic edits or alter RNG/order/masks. Preload a small finite fitting set outside learning when it fits the cache, so cold decoding is paid once and the throughput probe observes steady preparation. Never attach training pixels or features to an inference predictor or checkpoint. Avoid GPU-to-CPU digest round trips when a scientifically identical existing CPU representation is already available, but preserve exact declared stream hashes and controls. The trusted runner measures preparation, integrity, audit I/O and synchronization separately. Queued preflight must show the complete remaining matrix can fit at measured end-to-end throughput; required elapsed-loop targets are never shortened.
+
+Research may investigate existing architecture, prediction/scoring, training or
+failure mechanisms rather than introduce a new family. Implement the selected
+scientific plan exactly. Add scientifically relevant loss/gradient/convergence or
+normal-only representation diagnostics when declared; preserve complete source,
+checkpoint and measurement provenance. Do not silently change a frozen plan or
+rerun training for a frozen readout. Never execute real-development fitting or
+agent-side checkpoint analysis; use the guarded interfaces and trusted summaries.

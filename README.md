@@ -548,3 +548,21 @@ permanently retaining the obsolete serial-evaluation cost. Six 900-second loops
 currently estimate about 122 minutes including evaluation/setup/critique, before
 research and implementation; an estimate is not a guarantee or a new deadline.
 Full CPU/GPU parity and CUDA speed remain unverified and require bounded authorization.
+
+### Research sources and autonomous investigation
+
+The Researcher starts from retained models, source/training implementations,
+scientific memory, failures and measured comparisons. It can improve training,
+investigate representations/scoring, replicate evidence or explore a fundamentally
+different method. Literature is optional: the Researcher can request the existing
+Scout for a specific gap, then incorporate its findings. No new operator setting
+or agent is required, and fresh-literature preferences do not force a search.
+
+Read-only evidence snapshots include recorded training/efficiency diagnostics and
+normal/synthetic per-image measurements. Real-development cases are reduced to
+category aggregates; agents receive no raw development images, masks or case
+identities. Missing learning trajectories are labeled unavailable. Checkpoint
+execution/representation probes must use a declared guarded normal-only plan.
+Zero-training frozen readout plans remain valid. After every comparison the Critic
+examines model/training changes, limitations and useful follow-ups. All research
+uses the existing budgets, exact comparison contracts and 80% localization policy.

@@ -19,3 +19,19 @@ to promote. A fixed single-seed baseline remains COMPLETE_EXPLORATORY and is
 ineligible for confirmed promotion, even when challenger seeds improve. Missing
 required work is INCOMPLETE. Only independently trained, matched baseline seeds
 can address between-method seed uncertainty; inspect exact configurations.
+
+## Internal investigation and next decision
+
+Examine what the actual source/training settings changed and how the recorded
+localization, false alarms, learning behavior and efficiency responded. Use
+investigation_observations and whole-history evidence, including negative results.
+Missing loss/gradient trajectories or spatial error analyses are missing evidence,
+not permission to invent a mechanism. Normal/synthetic per-image diagnostics are
+proxies; real-development case data remain trusted aggregate summaries only.
+
+Recommend the most informative next action: model or training investigation,
+controlled improvement, independent replication, a different scientific method,
+or targeted external research. Do not require another literature search or force
+a new architecture. Explain which measured evidence motivates the choice and
+which diagnostic would falsify it. Keep execution completeness, exploratory
+ranking, deployment readiness and confirmed improvement distinct.

@@ -5,7 +5,7 @@ The constrained response encodes settings as arrays of `{name, value_json}` pair
 
 For exact frozen baselines, copy the supplied baseline run ID, seed and source/checkpoint/configuration hashes. A historical name is not a reproducible baseline. Use source_arm_id for a frozen intervention on an earlier arm's exact same-seed checkpoint. Never pretend an absent baseline seed exists. Read supplied committed sources, configurations, failures and evidence under `/workspace/evidence/`; these are read-only and contain no development images/masks. Required diagnostics run via the candidate diagnose hook on normal assessment sources and derived synthetic controls. Request real feedback separately; the trusted scorer owns masks and scores. If a comparison remains incomplete, finish or explicitly redesign it rather than making causal claims from a different single-arm pilot.
 
-Produce falsifiable, materially distinct approaches from literature plus negative results. Each structured proposal specifies research_question, claim, controlled_change, expected_observation, references, baseline, evaluation_plan, estimated_gpu_minutes, risk_and_shortcuts, candidate_family, dependency requests, a unique priority_rank and a priority_rationale grounded in likely information gain, cost, and known failure modes. Do not repeat prior controlled changes under a new name. Do not alter trusted scores. Propose methods, not architectures mandated by external prompts.
+Produce falsifiable, materially distinct questions from existing model/training code, measured evidence, negative results and optional literature. Each structured proposal specifies research_question, claim, controlled_change, expected_observation, references, baseline, evaluation_plan, estimated_gpu_minutes, risk_and_shortcuts, candidate_family, dependency requests, a unique priority_rank and a priority_rationale grounded in likely information gain, cost, and known failure modes. Do not repeat prior controlled changes under a new name. Do not alter trusted scores. Propose methods, not architectures mandated by external prompts.
 
 Check the supplied prior hypotheses before proposing new ones. If the controller rejects your batch, it may return the exact validation failure for one bounded correction. Return a complete corrected batch, replacing duplicate IDs and repeated mechanisms with distinct hypotheses; renaming the same mechanism is insufficient. Keep valid scientific constraints, ranks and citations accurate. Correction calls use the campaign's existing Codex and wall-time allowances.
 
@@ -18,7 +18,7 @@ failed ideas. Consider unfinished comparisons and replication before unrelated
 exploration. A champion challenge must pin exact incumbent code/configuration and
 declare matched seeds, controls and measurements before execution. Historical
 single-run incumbents are exploratory, not proven winners. Only the trusted frozen
-promotion policy may promote a challenger. No development score may fit parameters.
+promotion policy may confirm a scientific champion; the separate weighted policy selects the exploratory research incumbent. No development score may fit parameters.
 For a single-seed legacy incumbent, a frozen arm may explicitly declare
 fixed_checkpoint_seed and pin that same reference in each challenger pairing.
 Its actual training seed remains unchanged. This tests improvement over that
@@ -51,3 +51,35 @@ New simplified campaigns use the generated schema_version 4.0 planning contract.
 A diagnostic-only repair may explicitly pin a failed run when trusted tooling certified its completed training checkpoint. Reuse its exact original source, checkpoint, seed and configuration; supply a separate declared diagnostic implementation. Do not treat failure as scientific success, repeat training unnecessarily, invent missing certification, or change an existing frozen plan.
 
 New v4 timing is `elapsed-training-loop-v1`: each model runs its genuine optimization loop for the configured elapsed target. Batch fetch, augmentation, transfer, learning, integrity and bookkeeping are included. One-time initialization/cache fill, preflight, final saving and evaluation are excluded. Learning computation is an efficiency diagnostic, never the target accumulator. Use an explicit TrainingLoopStart(objective) boundary after setup and before fetching the first batch. Frozen v1/v2/v3 plans retain their definitions. Do not claim matched training-time controls between a historical arithmetic-target baseline and a new elapsed-loop model; such frozen comparisons remain exploratory.
+
+## Experimental scientist: investigate the laboratory itself
+
+Internal model implementations, training code, retained checkpoints' verified
+references, comparisons, failures and accumulated evidence are primary research
+resources. Read each relevant evidence.json/investigation_observations. Inspect
+architectures, heads, feature interactions, scoring and training procedures from
+the actual source. Examine recorded losses, gradient/optimization diagnostics,
+sampling, convergence and throughput where available. Never invent missing traces.
+
+Choose the scientific route yourself: improve an existing model/training procedure,
+explain a failure, complete or replicate a comparison, explore a fundamentally
+different approach, or consult external work. Neither a paper search nor a new
+architecture family is required for every proposal. Distinct, falsifiable questions
+within one family are valid; superficial renaming remains unacceptable. Cite exact
+internal run/plan/commit references when they support an original hypothesis.
+
+For personal campaigns the batch response includes literature_request. Normally
+set it to "" and provide complete proposals. To ask the existing Scout about a
+specific external knowledge gap, set literature_request to that question and
+proposals to []. After receiving the findings, return executable proposals. The
+same campaign deadline and call accounting apply; sources remain unverified until
+actually checked. Cached fresh_literature preferences do not force a Scout stage.
+
+Agents never execute checkpoint code with their credentials or receive raw real
+anomaly images/masks. Propose representation/readout diagnostics against exact
+frozen references through the guarded runner on permitted normal inputs. Such
+plans may use zero new training. New learning remains normal-only and uses the
+required elapsed CUDA training loop. Real anomaly feedback may guide research
+selection, never fitting or calibration. Model selection retains its 60% sPRO,
+20% pixel AP, 10% normal performance, 10% efficiency weighting; exploratory
+incumbent ranking is separate from scientific confirmation.

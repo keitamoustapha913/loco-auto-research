@@ -219,6 +219,26 @@ def correct_candidate_git_commit(store, run_id, repo_root=REPO):
     return commit
 
 
+
+def existing_literature(campaigns, campaign_id):
+    """Cached notes are optional context, never a prerequisite for experiments."""
+    for event in campaigns.events(campaign_id,100000):
+        if event['kind'] in {'LITERATURE','REQUESTED_LITERATURE_COMPLETED'}:
+            return json.loads(event['payload_json'])['leads']
+    path=REPO/'literature/scout_notes.json'
+    if path.is_symlink():raise PermissionError('literature cache must not redirect trusted reads')
+    if path.is_file():
+        try:
+            if path.stat().st_size>2**21:raise ValueError('oversized optional literature cache')
+            result=json.loads(path.read_text()).get('result',{})
+        except (ValueError,AttributeError) as exc:
+            campaigns.event(campaign_id,'LITERATURE_CACHE_UNAVAILABLE',reason=str(exc))
+        else:
+            campaigns.event(campaign_id,'LITERATURE_REUSED',source=str(path),verification='unverified cached agent notes')
+            return result
+    campaigns.event(campaign_id,'INTERNAL_RESEARCH_SELECTED',reason='no external search required; Researcher chooses whether to request Scout')
+    return {}
+
 def choose_proposal(store, excluded=(), allowed_ids=None):
     """Select evidence-ranked proposals; Codex provides the research ranking."""
     from orchestrator.controller import list_proposals
@@ -340,17 +360,7 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
             fresh_events=[]  # Request revised, distinct hypotheses with preserved failure evidence.
         else:proposal = fresh[0]
     if not prior and research.get('fresh_hypotheses') and not fresh_events:
-        scout_file = REPO / 'literature' / 'scout_notes.json'
-        cached=next((json.loads(e['payload_json'])['leads'] for e in campaigns.events(campaign_id,100000)
-                     if e['kind']=='LITERATURE'),None)
-        if cached is not None:
-            leads=cached
-        elif research.get('fresh_literature') or not scout_file.is_file():
-            leads = scout_literature(store, campaign=context, personal_mode=True)
-            campaigns.event(campaign_id, 'LITERATURE', leads=leads)
-        else:
-            leads = json.loads(scout_file.read_text()).get('result', {})
-            campaigns.event(campaign_id, 'LITERATURE_REUSED', source=str(scout_file))
+        leads = existing_literature(campaigns,campaign_id)
         previous = [r for r in store.list_runs(20)
                     if r['candidate_id'] != 'toy_normal_ae' and r['status'] in
                     {'COMPLETED', 'REVIEWED', 'PROMOTED', 'REJECTED', 'FAILED'}]
@@ -363,16 +373,16 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
                              'metrics': json.loads(run['metrics_json']), 'failure': run['error'],
                              'critic': json.loads(critique['payload_json']) if critique else {}})
         prompt = ("Propose THREE distinct, ranked, falsifiable next hypotheses for good-only, "
-                  "memory-bank-free logical anomaly heatmaps. Ground your choice in these literature "
-                  "leads and measured prior results, including generator sensitivity and actual GPU use "
-                  "where measured. THIS CAMPAIGN IS AN RTX 4090 CUDA PILOT: each proposed learning strategy "
-                  "must actually train a PyTorch model on CUDA and infer on CUDA, with estimated_gpu_minutes "
-                  "strictly greater than zero and within authorized campaign limits. No CPU-only screening proposals. Do not "
+                  "memory-bank-free logical anomaly heatmaps. Choose the best research route from existing models, training code, internal evidence and optional literature "
+                  "leads. Analyze measured prior results, generator sensitivity, learning behavior and actual GPU use "
+                  "where measured. New model learning in this campaign must use RTX 4090 CUDA: each proposed learning strategy "
+                  "must train PyTorch on CUDA with estimated_gpu_minutes "
+                  "greater than zero within authorized limits. Exact frozen-checkpoint analysis/readout plans may request zero training and never retrain unnecessarily. Do not "
                   "prescribe one architecture; propose scientifically distinct mechanisms. Only normal "
                   "juice_bottle images are authorized for model learning; a one-category pilot cannot establish "
                   "claims across all five LOCO categories. Use only installed "
                   "Use the installed environment; external weights or dependencies require approval. "
-                  "Select methods from the research charter, verified literature and measured evidence. "
+                  "Select methods from the research charter and scientific evidence, including analysis of your own models and training. Consult external work only when useful. "
                   "Do not assume a preferred architecture. "
                   "new_dependencies must be []. Distinguish real-development feedback from synthetic proxies, not official LOCO "
                   "results. Literature: " + json.dumps(leads) + " Prior evidence: " + json.dumps(evidence))
@@ -399,8 +409,8 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
                   "Use installed dependencies; new_dependencies must be [] when no install is needed. " +
                   json.dumps(history))
         if research.get('require_torch_cuda'):
-            prompt += (' This is a CUDA pilot: all three proposals must train PyTorch on CUDA, '
-                       'estimated_gpu_minutes must be greater than zero and within campaign limits; no CPU-only screen.')
+            prompt += (' Newly trained models must use PyTorch/CUDA within the elapsed training-loop target. '
+                       'Frozen, provenance-pinned readout/diagnostic comparisons may use zero training; never reinitialize frozen weights.')
         generated = add_research_proposals(store, prompt, campaign=context, personal_mode=True,
                                            require_gpu_pilot=bool(research.get('require_torch_cuda')))
         ids = {item['hypothesis_id'] for item in generated}
@@ -426,13 +436,7 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
                       "use [] when nothing must be installed. Put future approval caveats in risk_and_shortcuts. "
                       "These are synthetic proxies, never official LOCO scores: " + json.dumps(history))
         else:
-            scout_file = REPO / 'literature' / 'scout_notes.json'
-            if scout_file.is_file():
-                leads = json.loads(scout_file.read_text()).get('result', {})
-                campaigns.event(campaign_id, 'LITERATURE_REUSED', source=str(scout_file))
-            else:
-                leads = scout_literature(store, campaign=context, personal_mode=True)
-                campaigns.event(campaign_id, "LITERATURE", leads=leads)
+            leads = existing_literature(campaigns,campaign_id)
             prior_runs = [r for r in store.list_runs(10) if r['candidate_id'] != 'toy_normal_ae']
             previous = [{'hypothesis': r['hypothesis_id'], 'status': r['status'],
                          'failure': r['error'], 'metrics': json.loads(r['metrics_json'])} for r in prior_runs]
@@ -444,8 +448,8 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
                       "Treat unverified leads as unverified. Leads: " + json.dumps(leads) +
                       " Previous attempts: " + json.dumps(previous))
         if research.get('require_torch_cuda'):
-            prompt += (' This is a CUDA pilot: all three proposals must train PyTorch on CUDA, '
-                       'estimated_gpu_minutes must be greater than zero and within campaign limits; no CPU-only screen.')
+            prompt += (' Newly trained models must use PyTorch/CUDA within the elapsed training-loop target. '
+                       'Frozen, provenance-pinned readout/diagnostic comparisons may use zero training; never reinitialize frozen weights.')
         generated = add_research_proposals(store, prompt, campaign=context, personal_mode=True,
                                require_gpu_pilot=bool(research.get('require_torch_cuda')))
         ids = {p['hypothesis_id'] for p in generated}

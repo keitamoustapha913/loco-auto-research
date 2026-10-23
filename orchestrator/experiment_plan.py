@@ -295,6 +295,79 @@ def verify_baseline(store, expected, repo_root=REPO):
     return source, row
 
 
+def investigation_observations(store, row, feedback):
+    """Safe research resources, not permissions to execute checkpoints as agents.
+
+    Normal/synthetic case metrics are inspectable. Real-development cases are
+    reduced to category aggregates: never mount images, masks or case identities.
+    Missing learning curves/gradient measurements remain explicitly unavailable.
+    """
+    import math
+    def number(v):return isinstance(v,(int,float)) and not isinstance(v,bool) and math.isfinite(v)
+    metrics=json.loads(row['metrics_json'])
+    result={'training_and_efficiency':{k:v for k,v in metrics.items() if number(v) and
+            k.startswith(('training/','train/','loss/','optimization/','protocol/','inference/','robustness/','diagnostic/'))},
+            'artifacts':{},'unavailable':[],
+            'checkpoint_analysis':'Use pinned source/configuration/hash references. Model execution, representation probes and gradient diagnostics require a guarded declared plan on permitted normal data, never agent-side checkpoint execution.'}
+    runtime=store.path.parent.parent if store.path.parent.name=='controller' else store.path.parent
+    folder=Path(row['artifact_dir']) if row.get('artifact_dir') else None
+    if folder is None:return dict(result,unavailable=['No recorded model artifacts'])
+    if folder.is_symlink() or folder.resolve()!=(runtime/'jobs'/row['run_id']).resolve():
+        raise PermissionError('research observation artifacts escape originating job')
+    def read(path,cap):
+        if path.is_symlink() or not path.resolve().is_relative_to(folder.resolve()):
+            raise PermissionError('unsafe research observation artifact')
+        if not path.is_file():return None
+        if path.stat().st_size>cap:
+            result['unavailable'].append(path.name+' exceeds bounded aggregate-read size; request a declared diagnostic')
+            return None
+        try:return json.loads(path.read_text())
+        except json.JSONDecodeError:
+            result['unavailable'].append(path.name+' is invalid JSON; no observations inferred')
+            return None
+    for name in ('training_timing.json','training_audit.json'):
+        value=read(folder/name,65536)
+        if isinstance(value,dict):
+            # Timing and trusted counters; candidate strings/paths are not a new
+            # instruction channel, and large tensors/audits are not mounted.
+            result['artifacts'][name]={k:v for k,v in value.items() if number(v) or isinstance(v,bool)}
+            for key,curve in value.items():
+                if (any(token in key.lower() for token in ('loss','gradient','grad_norm','learning_rate')) and
+                    isinstance(curve,list) and curve and all(number(v) for v in curve)):
+                    result['artifacts'][name][key]={'recorded_count':len(curve),
+                        'samples':curve[:4096],'truncated':len(curve)>4096}
+    for path in [folder/'development_case_metrics.json',*sorted(folder.glob('diagnostic_*.json'))[:20]]:
+        value=read(path,2**21)
+        if not isinstance(value,dict):continue
+        cases=value.get('cases',value.get('per_image',[]))
+        if not isinstance(cases,list):continue
+        observations=[]
+        for case in cases[:2000]:
+            if not isinstance(case,dict):continue
+            data=case.get('metrics',case)
+            if not isinstance(data,dict):continue
+            record={k:v for k,v in data.items() if number(v) or isinstance(v,bool)}
+            if record:observations.append(record)
+        result['artifacts'][path.name]={'scope':'authorized normal/synthetic development only; not official scores',
+            'recorded_count':len(cases),'truncated':len(cases)>2000,'per_image_measurements':observations}
+    if feedback:
+        import numpy as np
+        output=Path(feedback['artifact_dir']);cases=read(output/'case_scores.json',2**22)
+        if isinstance(cases,list):
+            aggregates={}
+            threshold=feedback.get('metrics',{}).get('dev_real/normal_only_threshold')
+            for category in ('good','logical_anomalies','structural_anomalies'):
+                scores=[c['image_score'] for c in cases if c.get('category')==category and number(c.get('image_score'))]
+                if scores:aggregates[category]={'count':len(scores),'score_quantiles':np.quantile(scores,[0,.25,.5,.75,1]).tolist(),
+                    'above_frozen_normal_threshold':sum(x>threshold for x in scores) if number(threshold) else None}
+            result['real_development_aggregate_diagnostics']=aggregates
+    if (not any(k.startswith(('loss/','optimization/')) for k in result['training_and_efficiency']) and
+        not any(isinstance(v,dict) and 'samples' in v for name in ('training_timing.json','training_audit.json')
+                for v in result['artifacts'].get(name,{}).values())):
+        result['unavailable'].append('No recorded loss/gradient trajectory; instrument normal-only learning in an explicit subsequent plan if scientifically useful')
+    return result
+
+
 def research_evidence(store, repo_root=REPO, requested=()):
     """Bounded durable context: requested baselines, recent failures, best and recent evidence.
 
@@ -316,6 +389,9 @@ def research_evidence(store, repo_root=REPO, requested=()):
     retained_models=retained(store)
     persistent_ids=[retained_models[s['retention_id']]['run_id'] for s in states(store).values()]
     persistent_ids += [retained_models[s['retention_id']]['run_id'] for s in research_states(store).values()]
+    # Retained implementations are primary research resources, including methods
+    # outside the current Pareto frontier. Keep the prompt an index, not a dump.
+    persistent_ids += [m['run_id'] for m in retained_models.values()]
     for cid in {m['cohort_id'] for m in retained_models.values()}:
         group=[m for m in retained_models.values() if m['cohort_id']==cid]
         persistent_ids += [retained_models[rid]['run_id'] for rid in frontier(group)]
@@ -324,7 +400,7 @@ def research_evidence(store, repo_root=REPO, requested=()):
         if not any(r['run_id']==rid for r in rows):
             row=store.get_run(rid)
             if row:rows.append(row)
-    wanted += [r['run_id'] for r in rows if r['status'] in {'FAILED','OOM','TIMED_OUT','INTERRUPTED'}][:2]
+    wanted += [r['run_id'] for r in rows if r['status'] in {'FAILED','OOM','TIMED_OUT','INTERRUPTED'}]
     wanted += [r['run_id'] for r in rows[:3]]
     chosen = list(dict.fromkeys(wanted))
     context, files = [], {}
@@ -333,6 +409,7 @@ def research_evidence(store, repo_root=REPO, requested=()):
         if not row or row['candidate_id']=='toy_normal_ae': continue
         item = {k:row[k] for k in ('run_id','hypothesis_id','candidate_id','status','error','git_sha','config_json')}
         item['real_feedback'] = summaries[rid]
+        item['investigation_observations'] = investigation_observations(store,row,summaries[rid])
         with store.connect() as con:
             review = con.execute("SELECT payload_json FROM events WHERE run_id=? AND kind='CRITIC_REVIEW' ORDER BY id DESC LIMIT 1",(rid,)).fetchone()
             comparison = con.execute("SELECT payload_json FROM events WHERE run_id=? AND kind='SCIENTIFIC_COMPARISON' ORDER BY id DESC LIMIT 1",(rid,)).fetchone()
@@ -736,6 +813,11 @@ def review_plan(store, campaigns, campaign_id, plan, result):
     from orchestrator.mlflow_tracker import enqueue_run_tracking
     rows = [r for r in campaigns.runs(campaign_id) if json.loads(r['config_json']).get('plan_sha256')==digest(plan)]
     prompt = ('Assess this scientific comparison using only measured evidence. Completion is execution completeness, '
+              'Study the supplied model source, training controls, recorded learning behavior, diagnostics, failures and prior comparisons. '
+              'Explain what changed, which localization or false-positive behavior supports your interpretation and what remains unmeasured. '
+              'Do not claim to inspect raw real-development heatmaps or missing learning/gradient trajectories. '
+              'Choose a useful next investigation: existing-model analysis, training improvement, replication, a new method or external research. '
+              'Literature searches are optional, not the default next step. Maintain 80% localization priority and distinguish research ranking from confirmation. '
               'not hypothesis support. If INCOMPLETE, do not assert a causal result, supported hypothesis, or promotion. '
               'Exploratory screening does not establish causality. Include exact comparison_status and plan_id. '
               'Separate single-seed results, paired differences and uncertainty; never invent missing diagnostics. '

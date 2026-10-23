@@ -171,7 +171,7 @@ def test_newer_verified_state_wins_and_corruption_halts(registry_lab,monkeypatch
         autonomy.recover_research_attempt(store,c,cid,store.path.parent)
 
 
-def test_literature_survives_researcher_retry_without_new_scout(lab,monkeypatch):
+def test_internal_research_retry_does_not_force_scout_even_with_legacy_preference(lab,monkeypatch):
     store,c,cid,runtime=lab
     cfg=json.loads(c.get(cid)['config_json']);cfg['research'].update(fresh_literature=True,fresh_hypotheses=True)
     with store.connect() as con:con.execute('UPDATE campaigns SET config_json=? WHERE id=?',(json.dumps(cfg),cid))
@@ -181,8 +181,8 @@ def test_literature_survives_researcher_retry_without_new_scout(lab,monkeypatch)
     monkeypatch.setattr(controller,'add_research_proposals',propose)
     for _ in range(2):
         with pytest.raises(RuntimeError,match='transport fixture'):autonomy.run_cycle(store,c,cid,runtime)
-    assert len(scouts)==1 and len(prompts)==2
-    assert all('verified fixture lead' in p for p in prompts)
+    assert len(scouts)==0 and len(prompts)==2
+    assert all('existing models' in p for p in prompts)
 
 
 def test_cancellation_kills_owned_subprocess_group_and_retains_diagnostics(tmp_path):

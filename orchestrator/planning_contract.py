@@ -168,9 +168,17 @@ def planning_instructions(capabilities=(), *, time_only=True):
         'frozen_baselines':list(capabilities)},sort_keys=True)
 
 
-def constrain_output_schema(schema, capabilities=(), *, time_only=True, target_training=True, loop_training=True):
+def constrain_output_schema(schema, capabilities=(), *, time_only=True, target_training=True, loop_training=True,
+                            research_request=False):
     """Generate wire constraints from the same rules used by admission."""
     result=copy.deepcopy(schema)
+    if research_request and 'proposals' in result.get('properties',{}):
+        # A request is research intent, never a shell command or an executable
+        # experiment. Trusted routing requires an empty batch and a real query.
+        result['properties']['literature_request']={'type':'string',
+            'description':'Empty when proposing; otherwise a specific external knowledge gap, with proposals=[].'}
+        if 'literature_request' not in result['required']:result['required'].append('literature_request')
+        result['properties']['proposals']['minItems']=0
     def visit(node):
         if not isinstance(node,dict):return
         props=node.get('properties',{})

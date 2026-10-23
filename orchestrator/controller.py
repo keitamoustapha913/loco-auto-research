@@ -154,7 +154,8 @@ def _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=None,
         schema_value=json.loads(Path(schema).read_text())
         if role=='researcher':
             from orchestrator.planning_contract import constrain_output_schema
-            schema_value=constrain_output_schema(schema_value,capabilities, time_only=not campaign or time_based(config))
+            schema_value=constrain_output_schema(schema_value,capabilities, time_only=not campaign or time_based(config),
+                                                 research_request=bool(kwargs.get('personal_mode')))
         provider_output_schema(schema_value)
     if campaign:
         campaigns.reserve_codex_call(campaign_id, role)
@@ -196,9 +197,9 @@ def _validate_research_proposals(store, proposals, count, require_gpu_pilot):
     """Validate the entire batch before persisting any accepted proposal."""
     if len(proposals) < count:
         raise ValueError(f"researcher returned {len(proposals)}; need at least {count}")
-    families = {p["candidate_family"] for p in proposals}
-    if len(families) < count:
-        raise ValueError("expected materially different candidate families")
+    # Distinct scientific questions may concern the same architecture: losses,
+    # learning dynamics, ablations and independent replication are valid research.
+    # Mechanism/identity deduplication below remains mandatory.
     ranks = [p.get('priority_rank') for p in proposals]
     if len(set(ranks)) != len(proposals) or any(not isinstance(r, int) or r < 1 for r in ranks):
         raise ValueError('hypothesis priority ranks must be distinct positive integers')
@@ -213,7 +214,8 @@ def _validate_research_proposals(store, proposals, count, require_gpu_pilot):
         if followup_kind == 'new' and followup:
             raise ValueError('new hypothesis cannot silently reuse a parent identity')
         minutes = proposal.get('estimated_gpu_minutes')
-        if require_gpu_pilot and (isinstance(minutes, bool) or not isinstance(minutes, (int, float))
+        needs_training=any(a.get('execution')=='train' for a in proposal.get('experiment_plan',{}).get('arms',[]))
+        if require_gpu_pilot and needs_training and (isinstance(minutes, bool) or not isinstance(minutes, (int, float))
                                   or not __import__('math').isfinite(minutes) or minutes <= 0
                                   or 'cpu-only' in proposal.get('evaluation_plan', '').lower()):
             raise ValueError('CUDA pilot requires GPU-trained hypotheses within authorized limits; CPU-only proposals remain research leads')
@@ -305,7 +307,17 @@ def add_research_proposals(store, prompt, count=3, campaign=None, personal_mode=
     instruction = prompt + '\nPreviously recorded hypotheses (do not repeat IDs or mechanisms): ' + json.dumps([
         {key: p.get(key, '') for key in ('hypothesis_id', 'claim', 'controlled_change')} for p in previous])
     instruction += (' Return distinct mechanisms; renaming the same idea is insufficient. '
-                    'Use unique hypothesis IDs and valid priority ranks.')
+                    'Use unique hypothesis IDs and valid priority ranks. Different architecture families are not required; '
+                    'distinct training changes, analysis-driven improvements and honest replications are valid. '
+                    'Existing models, implementations, measured failures and scientific memory are primary research resources. '
+                    'Choose whether to improve, investigate, replicate, ablate or explore a fundamentally different method. '
+                    'Cite internal run/plan/commit evidence when it motivates a proposal; external papers are optional. ')
+    if personal_mode:
+        instruction += (' The generated batch schema has literature_request. Normally return literature_request="" '
+                        'and complete executable proposals grounded in internal evidence. If an external knowledge gap '
+                        'requires the Literature Scout, return that precise question in literature_request and proposals=[]. '
+                        'The trusted controller routes the question within the same budgets. Do not fabricate plans or '
+                        'citations to request research. After supplied Scout findings, finish a complete proposal batch. ')
     instruction += (' Every proposal requires experiment_plan matching the controller-generated structured-output schema (the on-disk v1 schema is retained only for legacy compatibility). '
                     'Declare every arm, seed, complete training settings, size, batch_size, a continuing target-aware schedule, '
                     'prediction settings, required '
@@ -331,11 +343,26 @@ def add_research_proposals(store, prompt, count=3, campaign=None, personal_mode=
         else:
             instruction += '\nRemaining ceilings for ONE comparison (not spending targets): '+json.dumps(remaining)
     def request(feedback, attempt):
-        output = budgeted_invoke(store, "researcher", REPO, schema, instruction + feedback, timeout=240,
-                                 campaign=campaign, personal_mode=personal_mode)["response"]
-        _validation_event(store, campaign, 'RESEARCHER_RESPONSE', 'researcher',
-                          attempt=attempt+1, response=output)
-        return output
+        notes=''
+        for stage in range(2):
+            output = budgeted_invoke(store, "researcher", REPO, schema, instruction + notes + feedback, timeout=240,
+                                     campaign=campaign, personal_mode=personal_mode)["response"]
+            _validation_event(store, campaign, 'RESEARCHER_RESPONSE', 'researcher',
+                              attempt=attempt+1, response=output)
+            query=output.get('literature_request','')
+            if not query:return output
+            if not personal_mode or not isinstance(query,str) or not query.strip() or output.get('proposals') or stage:
+                raise InvalidAgentOutput('literature request must be a specific question with an empty proposal batch; use the supplied findings to finish proposals')
+            if campaign and not json.loads(campaign[0].get(campaign[1])['config_json'])['research'].get('literature_scout',True):
+                raise InvalidAgentOutput('Literature Scout is disabled; use available internal evidence or report the knowledge gap')
+            import hashlib
+            request_id=hashlib.sha256(query.strip().encode()).hexdigest()
+            cached=next((json.loads(e['payload_json'])['leads'] for e in campaign[0].events(campaign[1],100000)
+                         if e['kind']=='REQUESTED_LITERATURE_COMPLETED' and json.loads(e['payload_json']).get('request_id')==request_id),None) if campaign else None
+            if cached is None:
+                cached=scout_literature(store,campaign=campaign,personal_mode=personal_mode,question=query.strip())
+                if campaign:campaign[0].event(campaign[1],'REQUESTED_LITERATURE_COMPLETED',request_id=request_id,question=query.strip(),leads=cached)
+            notes='\nScout findings for your requested knowledge gap (agent summaries, not independent verification): '+json.dumps(cached)
     def validate(output):
         from orchestrator.experiment_plan import decode_agent_plan
         for proposal in output['proposals']:
@@ -374,12 +401,12 @@ def add_research_proposals(store, prompt, count=3, campaign=None, personal_mode=
     return proposals
 
 
-def scout_literature(store, campaign=None, personal_mode=False):
+def scout_literature(store, campaign=None, personal_mode=False, question=None):
     """Untrusted citation leads, not independently verified paper findings."""
     response = budgeted_invoke(
         store, "scout", REPO, REPO / "schemas" / "literature.schema.json",
-        "Investigate current logical anomaly localization research for MVTec LOCO AD. "
-        "Look beyond CSAD, MuDeNet and EfficientAD; describe likely failure modes "
+        (question or "Investigate logical anomaly localization research for MVTec LOCO AD without presupposing a method family.") +
+        " Describe likely failure modes "
         "and inference memory requirements. Cite sources; if you cannot verify a "
         "reference, explicitly mark it unverified. Do not access any local test data. "
         "Do not call MCP tools; use a source URL only when you can verify it within the time limit.", timeout=120,
