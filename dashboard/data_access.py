@@ -58,7 +58,9 @@ def rows(query, params=()):
 
 def list_runs(limit=500):
     results = rows("SELECT * FROM runs ORDER BY created_at DESC LIMIT ?", (max(1, min(int(limit), 1000)),))
+    retention={r['name'][len('artifact_retention:'):]:json.loads(r['value']) for r in rows("SELECT name,value FROM settings WHERE name LIKE 'artifact_retention:%'")}
     for row in results:
+        if row['run_id'] in retention:row['artifact_availability']=retention[row['run_id']]
         try:
             row["metrics"] = json.loads(row["metrics_json"])
             row["config"] = json.loads(row["config_json"])
@@ -275,6 +277,8 @@ def real_feedback_summaries():
         try:
             summary = json.loads(row['payload_json'])
             summary.update(run_id=row['run_id'],candidate_id=row['candidate_id'])
+            state=rows('SELECT value FROM settings WHERE name=?',('artifact_retention:'+row['run_id'],))
+            if state:summary['artifact_availability']=json.loads(state[0]['value'])
             comparison = rows("SELECT payload_json FROM events WHERE run_id=? AND kind='SCIENTIFIC_COMPARISON' ORDER BY id DESC LIMIT 1", (row['run_id'],))
             if comparison:
                 summary['scientific_comparison'] = json.loads(comparison[0]['payload_json'])
@@ -286,6 +290,8 @@ def real_feedback_summaries():
 
 def real_heatmap_sample(summary, index, opacity=.4):
     """Read-only development viewer: pinned image plus validated full-size map."""
+    if summary.get('artifact_availability',{}).get('status')=='ARCHIVED_METRICS_ONLY':
+        raise ValueError('Archived metrics-only record: full-resolution images intentionally retired')
     import numpy as np
     from benchmark.feedback_data import imported_root, schema
     from benchmark.data_guard import sha256_file

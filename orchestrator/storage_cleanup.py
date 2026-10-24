@@ -1,7 +1,7 @@
 """Conservative, reference-aware housekeeping in the existing trusted services.
 
-Never deletes checkpoints, metadata, logs, SQLite/MLflow data or datasets. Only
-verified map representations and explicitly owned expired staging are removed.
+Numerical evidence and datasets are permanent. Rolling-nine retention retires
+explicit bulky artifacts; remaining maps can be packed losslessly.
 """
 from __future__ import annotations
 import fcntl
@@ -19,7 +19,6 @@ from contextlib import ExitStack
 from benchmark.feedback_artifacts import safe_path, map_bytes, map_sha256
 
 INTERVAL = 1800
-TARGET_FREE = 20 * 2**30
 PASS_BYTES = 1024 * 2**20
 PASS_SECONDS = 30
 STAGING_AGE = 86400
@@ -181,7 +180,7 @@ def _remove(store, path, sha, replacement, reason, *, size, replacement_bytes=0)
 
 def _temps(store, jobs, protected):
     """Only known unpublished staging; any scientific reference preserves it."""
-    for candidate in list(jobs.glob('*/feedback/.feedback-reuse-*')) + list(jobs.glob('*/feedback/*/case_*/.storage-*')):
+    for candidate in list(jobs.glob('*/feedback/.feedback-reuse-*')) + list(jobs.glob('*/feedback/*/case_*/.storage-*')) + list(jobs.glob('*/**/.retention-pack-*')):
         try:
             safe_path(candidate,jobs)
             if candidate.relative_to(jobs).parts[0] in protected:continue
@@ -236,7 +235,7 @@ def cleanup(store, runtime, *, dry_run=False, max_bytes=PASS_BYTES, max_seconds=
     report={'reclaimed_bytes':0,'actions':0,'errors':[],'busy':False}
     with ExitStack() as stack:
         try:
-            for name in ('storage_cleanup.lock','gpu.lock','feedback.lock'):
+            for name in ('storage_cleanup.lock','gpu.lock','feedback.lock','tracking.lock'):
                 if (controller/name).is_symlink():raise ValueError('unsafe linked storage lock')
                 handle=stack.enter_context((controller/name).open('a+'))
                 fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -244,6 +243,12 @@ def cleanup(store, runtime, *, dry_run=False, max_bytes=PASS_BYTES, max_seconds=
             report['busy']=True;return report
         jobs=runtime/'jobs'
         if not jobs.exists():return report
+        from orchestrator.rolling_retention import retire
+        rolling=retire(store,runtime,max_seconds=max_seconds)
+        report['rolling']=rolling
+        report['reclaimed_bytes']+=rolling['reclaimed_bytes']
+        report['actions']+=rolling['actions']
+        report['errors'].extend(rolling['errors'])
         _reconcile(store,jobs)
         protected=protected_runs(store)
         entries=_maps(store,runtime,protected)
@@ -341,11 +346,6 @@ def maybe_cleanup(runtime, store=None, *, force=False, reason='periodic'):
             row=con.execute("SELECT value FROM settings WHERE name='storage_cleanup_last'").fetchone()
         if not force and row and now-float(row[0])<INTERVAL:
             _next_check[key]=float(row[0])+INTERVAL;return None
-        before=inventory(runtime)
-        if before['limit_bytes']-before['observed_bytes']>=TARGET_FREE:
-            with store.connect() as con:
-                con.execute('INSERT OR REPLACE INTO settings(name,value) VALUES(?,?)',('storage_cleanup_last',str(now)))
-            _next_check[key]=now+INTERVAL;return None
         result=cleanup(store,runtime)
         result['trigger']=reason
         if not result['busy']:_next_check[key]=now+INTERVAL

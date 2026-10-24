@@ -96,6 +96,9 @@ def _sync_locked(store: StateStore, tracking_uri=None, max_events=100):
             client.set_tag(mlflow_run_id, 'execution.gpu_seconds_semantics', 'exclusive_gpu_slot_wall_seconds')
             if data.get('params',{}).get('training_completion_policy')=='elapsed-training-loop-v1':
                 client.set_tag(mlflow_run_id,'training.duration_semantics','elapsed_training_loop; initialization/preflight/saving/evaluation excluded')
+            from orchestrator.rolling_retention import availability
+            retention=availability(store,run_id)
+            client.set_tag(mlflow_run_id,'research.artifact_availability',retention['status'])
             artifact_dir = Path(data.get("artifact_dir") or "/nonexistent").resolve()
             allowed_root = (Path(os.getenv('LOCO_RUNTIME', '.runtime')).resolve() / 'jobs' / run_id).resolve()
             if artifact_dir != allowed_root:
@@ -145,6 +148,7 @@ def _sync_locked(store: StateStore, tracking_uri=None, max_events=100):
                 client.set_tag(mlflow_run_id,'research.cumulative_decisions',cumulative[0][:4000])
             if retention:
                 model=json.loads(retention[0])
+                model['artifact_availability']=availability(store,run_id)
                 client.set_tag(mlflow_run_id,'research.retention_id',model['retention_id'])
                 client.set_tag(mlflow_run_id,'research.comparison_cohort',model['cohort_id'])
                 client.set_tag(mlflow_run_id,'research.retained_checkpoint_sha256',model['reference']['checkpoint_sha256'])
@@ -160,8 +164,9 @@ def _sync_locked(store: StateStore, tracking_uri=None, max_events=100):
                     client.log_dict(mlflow_run_id,model,'retention/model_record.json')
             if artifact_dir.is_dir():
                 # Allowlisted output types only. Never upload raw source images or test masks.
-                for filename in ("measurement.json", "run_manifest.json", "training_audit.json", "training_timing.json", "plan_comparison.json", "development_case_metrics.json", "stage6_comparison.json", "normal_preview.png", "synthetic_input.png", "synthetic_mask.png", "synthetic_heatmap.png", "synthetic_overlay.png", "cuda_smoke_stdout.log", "cuda_smoke_stderr.log", "cuda_smoke/summary.json"):
+                for filename in ("artifact_availability.json", "scientific_record.json", "measurement.json", "run_manifest.json", "training_audit.json", "training_timing.json", "plan_comparison.json", "development_case_metrics.json", "stage6_comparison.json", "normal_preview.png", "synthetic_input.png", "synthetic_mask.png", "synthetic_heatmap.png", "synthetic_overlay.png", "cuda_smoke_stdout.log", "cuda_smoke_stderr.log", "cuda_smoke/summary.json"):
                     item_path = artifact_dir / filename
+                    if not item_path.exists() and Path(str(item_path)+'.gz').is_file():item_path=Path(str(item_path)+'.gz')
                     if (item_path.is_file() and not item_path.is_symlink()
                             and item_path.resolve().is_relative_to(artifact_dir.resolve())):
                         client.log_artifact(mlflow_run_id, str(item_path))
@@ -175,6 +180,7 @@ def _sync_locked(store: StateStore, tracking_uri=None, max_events=100):
                     name = request.get('diagnostic_id','')
                     if not __import__('re').fullmatch(r'[A-Za-z0-9_-]{1,64}',name): continue
                     path = artifact_dir/f'diagnostic_{name}.json'
+                    if not path.exists() and Path(str(path)+'.gz').is_file():path=Path(str(path)+'.gz')
                     if path.is_file() and not path.is_symlink() and path.resolve().is_relative_to(artifact_dir):
                         client.log_artifact(mlflow_run_id,str(path))
                 checkpoint = artifact_dir / 'checkpoint' / 'model.pt'

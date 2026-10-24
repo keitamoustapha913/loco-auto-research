@@ -151,6 +151,8 @@ def retain(store, run_id, feedback, repo_root=REPO):
 
 
 def verify_archive(model):
+    if model.get('artifact_availability',{}).get('checkpoint_available') is False:
+        raise ValueError('checkpoint intentionally archived; metrics-only historical evidence')
     root=Path(model['archive'])
     if root.is_symlink(): raise ValueError('retained archive redirected')
     for name,expected in model['hashes'].items():
@@ -208,7 +210,12 @@ def frontier(models):
 
 
 def retained(store):
-    return {r['payload']['retention_id']:r['payload'] for r in records(store,'MODEL_RETAINED')}
+    from orchestrator.rolling_retention import availability
+    result={r['payload']['retention_id']:r['payload'] for r in records(store,'MODEL_RETAINED')}
+    for model in result.values():
+        state=availability(store,model['run_id'])
+        if state['status']!='FULL':model['artifact_availability']=state
+    return result
 
 
 def initialize(store, repo_root=REPO):
@@ -232,7 +239,7 @@ def initialize(store, repo_root=REPO):
             excluded.append({'run_id':r['run_id'],'reason':str(exc)})
     models=retained(store);rules=policy()
     for cid in {m['cohort_id'] for m in models.values()}:
-        candidates=[m for m in models.values() if m['cohort_id']==cid and admissible(m,rules)]
+        candidates=[m for m in models.values() if m['cohort_id']==cid and admissible(m,rules) and not m.get('artifact_availability')]
         if not candidates: continue
         best=max(candidates,key=lambda m:(m['metrics'][SPRO],m['metrics'][AP],-m['metrics'][FPR]))
         verify_archive(best)
@@ -633,7 +640,7 @@ def scientific_memory(store):
     result['evidence_history']=list(history.values())
     result['research_decisions']=research_decisions(store)
     for group in result['cohorts']:
-        group['model_index']=[{k:m[k] for k in ('retention_id','run_id','candidate_id','hypothesis_id','reference','metrics')}
+        group['model_index']=[{k:m[k] for k in ('retention_id','run_id','candidate_id','hypothesis_id','reference','metrics')} | {'artifact_availability':m.get('artifact_availability',{'status':'FULL'})}
                               for m in group.pop('models')]
     return result
 

@@ -220,6 +220,17 @@ def cell_run_id(campaign_id, plan, arm_id, seed):
 
 
 def register_plan(store, campaigns, campaign_id, plan):
+    # Publish dependencies under the same lock as artifact retirement. Validation
+    # and registration are atomic with respect to deleting a frozen baseline.
+    import fcntl
+    lock=store.path.parent/'storage_cleanup.lock'
+    if lock.is_symlink():raise ValueError('unsafe retention lock')
+    with lock.open('a+') as handle:
+        fcntl.flock(handle,fcntl.LOCK_SH)
+        return _register_plan(store,campaigns,campaign_id,plan)
+
+
+def _register_plan(store, campaigns, campaign_id, plan):
     plan=canonicalize_diagnostic_measurements(plan)
     def existing(con):
         rows = con.execute("SELECT payload_json FROM campaign_events WHERE campaign_id=? AND kind='EXPERIMENT_PLAN_REGISTERED'",
@@ -254,6 +265,9 @@ def baseline_reference(store, run_id, repo_root=REPO):
     """Resolve a completed run by immutable commit and bytes, never by its name."""
     if not re.fullmatch(r'[A-Za-z0-9_-]+',run_id):
         raise PermissionError('invalid frozen baseline run identifier')
+    from orchestrator.rolling_retention import availability
+    if availability(store,run_id)['status']!='FULL':
+        raise ValueError('baseline checkpoint intentionally retired; historical metrics and source remain, frozen replication unavailable')
     row = store.get_run(run_id)
     if not row or row['status'] not in {'COMPLETED', 'REVIEWED', 'PROMOTED', 'REJECTED','FAILED','OOM'}:
         raise ValueError('baseline must identify an existing completed frozen run')
@@ -320,11 +334,13 @@ def investigation_observations(store, row, feedback):
     def read(path,cap):
         if path.is_symlink() or not path.resolve().is_relative_to(folder.resolve()):
             raise PermissionError('unsafe research observation artifact')
-        if not path.is_file():return None
-        if path.stat().st_size>cap:
+        if not path.is_file() and not Path(str(path)+'.gz').is_file():return None
+        from orchestrator.rolling_retention import read_text
+        text=read_text(path,max_bytes=cap)
+        if text is None:
             result['unavailable'].append(path.name+' exceeds bounded aggregate-read size; request a declared diagnostic')
             return None
-        try:return json.loads(path.read_text())
+        try:return json.loads(text)
         except json.JSONDecodeError:
             result['unavailable'].append(path.name+' is invalid JSON; no observations inferred')
             return None
@@ -339,7 +355,7 @@ def investigation_observations(store, row, feedback):
                     isinstance(curve,list) and curve and all(number(v) for v in curve)):
                     result['artifacts'][name][key]={'recorded_count':len(curve),
                         'samples':curve[:4096],'truncated':len(curve)>4096}
-    for path in [folder/'development_case_metrics.json',*sorted(folder.glob('diagnostic_*.json'))[:20]]:
+    for path in [folder/'development_case_metrics.json',*sorted(set(folder.glob('diagnostic_*.json')) | {Path(str(p)[:-3]) for p in folder.glob('diagnostic_*.json.gz')})[:20]]:
         value=read(path,2**21)
         if not isinstance(value,dict):continue
         cases=value.get('cases',value.get('per_image',[]))

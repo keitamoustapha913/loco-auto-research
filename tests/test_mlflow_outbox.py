@@ -1,11 +1,13 @@
 import sys
+import pytest
 import types
 import json
 from orchestrator.state_store import StateStore
 from orchestrator.mlflow_tracker import enqueue_run_tracking, sync_outbox
 
 
-def test_mlflow_outbox_sync_with_fake_client(tmp_path, monkeypatch):
+@pytest.mark.parametrize('archived',[False,True])
+def test_mlflow_outbox_sync_with_fake_client(tmp_path, monkeypatch, archived):
     store=StateStore(tmp_path/'ledger.sqlite')
     rid=store.create_run('h','toy_normal_ae','fixture',config={'size':64,'training_completion_policy':'elapsed-training-loop-v1'})
     for status in ('IMPLEMENTED','VALIDATED','QUEUED','RUNNING'):
@@ -21,6 +23,9 @@ def test_mlflow_outbox_sync_with_fake_client(tmp_path, monkeypatch):
                     'dev_real/normal_image_fpr':.2,'dev_real/inference_e2e_ms_p95':10,
                     'dev_real/parameters':100,'dev_real/peak_cpu_rss_mib':50},
                 'reference':{'checkpoint_sha256':'fixture-checkpoint'},'policy_sha256':'fixture-policy'})))
+    if archived:
+        with store.connect() as con:
+            con.execute('INSERT INTO settings(name,value) VALUES(?,?)',('artifact_retention:'+rid,json.dumps({'status':'ARCHIVED_METRICS_ONLY','checkpoint_available':False})))
     calls=[]
     class Client:
         def __init__(self,tracking_uri): calls.append(('uri',tracking_uri))
@@ -42,6 +47,7 @@ def test_mlflow_outbox_sync_with_fake_client(tmp_path, monkeypatch):
     assert response['delivered']==1
     assert store.get_run(rid)['mlflow_run_id']=='fake-run'
     assert store.pending_tracking()==[]
+    assert any(c[0]=='tag' and c[1][1]=='research.artifact_availability' and c[1][2]==('ARCHIVED_METRICS_ONLY' if archived else 'FULL') for c in calls)
     assert any(c[0]=='metric' for c in calls)
     assert any(c[0]=='tag' and c[1][1]=='training.duration_semantics' and 'elapsed_training_loop' in c[1][2] for c in calls)
     assert {c[1][1] for c in calls if c[0]=='metric'}>={'training/loop_elapsed_seconds','training/learning_seconds','training/loop_overhead_seconds'}

@@ -16,6 +16,8 @@ def page_intro(title: str, description: str):
 def run_details(run: dict, *, compact=False):
     st.subheader(str(run.get("candidate_id") or "Unnamed model").replace("_", " "))
     st.caption(f"{classify_run(run)} · {run.get('category', 'Unknown dataset')} · {format_date(run.get('created_at'))}")
+    if run.get('artifact_availability',{}).get('status')=='ARCHIVED_METRICS_ONLY':
+        st.info('Archived · metrics-only record. Historical measurements and source remain; checkpoint and visual artifacts have been retired.')
     if run.get("error"):
         st.error(f"Run failed: {run['error']}")
     columns = st.columns(3)
@@ -60,6 +62,8 @@ def development_result_card(feedback):
     from dashboard.presentation import development_card_metrics
     st.subheader(feedback['candidate_id'].replace('_',' ').title())
     st.caption('Development · Real anomalies · Custom LOCO split, not official full-test results')
+    if feedback.get('artifact_availability',{}).get('status')=='ARCHIVED_METRICS_ONLY':
+        st.info('Archived · metrics-only research record. Checkpoint and visual artifacts are no longer retained; historical measurements and provenance remain available.')
     comparison = feedback.get('scientific_comparison')
     if comparison:
         st.caption(f"Scientific comparison: {comparison['status'].replace('_',' ').title()} · "
