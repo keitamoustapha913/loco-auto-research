@@ -406,9 +406,15 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
         history = {'hypothesis': previous['hypothesis_id'], 'status': previous['status'],
                    'metrics': json.loads(previous['metrics_json']), 'failure': previous['error'],
                    'critic': json.loads(critique['payload_json']) if critique else {}}
-        prompt = ("Propose THREE scientifically distinct next hypotheses based specifically on this prior measured "
-                  "run and critic assessment. Include a controlled falsification of the previous mechanism where "
-                  "appropriate; do not repeat rejected ideas. Synthetic metrics are development proxies only. "
+        prompt = ("Propose THREE scientifically distinct ranked next hypotheses using the retained incumbent and cumulative "
+                  "scientific evidence. The last run and Critic assessment below are context, not a mandatory research direction. "
+                  "Reconsider strategy across investigating existing evidence, developing a model, confirming an improvement, "
+                  "or changing direction. Explain why the best option has more decision value per remaining research time. "
+                  "You may abandon the previous branch, improve a different model, explore a different architecture, or pursue "
+                  "a deep diagnostic when its plausible outcomes would change a model/training/scoring decision. "
+                  "Do not automatically narrow an unsuccessful explanation merely because the Critic proposed another test. "
+                  "Recognize repeated negative/inconclusive findings and prefer existing records over redundant inference. "
+                  "No minimum training count or diagnostic quota applies. Synthetic metrics are development proxies only. "
                   "Use installed dependencies; new_dependencies must be [] when no install is needed. " +
                   json.dumps(history))
         if research.get('require_torch_cuda'):

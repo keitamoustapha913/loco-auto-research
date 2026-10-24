@@ -94,6 +94,28 @@ what different next action follows from each outcome. Do not automatically follo
 an inconclusive proxy with a narrower proxy; justify its relevance or change route.
 Negative results remain evidence. No fixed diagnostic quota or architecture preference.
 
+Before ranking proposals, read research_decisions in cumulative/evidence.json.
+It links tested questions, negative/inconclusive outcomes, exact checkpoint reuse
+and recorded job costs across campaigns. A new hypothesis name does not make a
+previously tested explanation new. Costs are lower bounds: zero training minutes
+does not mean free frozen inference, preparation, trusted evaluation or analysis.
+
+The previous Critic's suggested test is advisory. Independently compare four
+routes: investigate evidence, implement an improvement, confirm an apparent gain,
+or change direction. Use evaluation_plan for an outcome-to-decision brief: what
+would you do differently if each competing explanation is supported or rejected?
+Use priority_rationale to explain why that decision is worth the total elapsed
+research time compared with the alternatives. If all outcomes imply the same
+next action, reconsider the test or explain its independent scientific benefit.
+
+After an informative diagnosis, actively consider an implementable model,
+training, supervision or scoring improvement. Do not default to a narrower proxy.
+If repeated diagnostics have not changed a decision, explain the new evidence
+that would make further diagnosis useful. Check whether missing cross-arm analysis
+can use already saved records instead of rerunning inference. These are reasoning
+requirements in existing fields, not a diagnostic quota, training requirement,
+architecture preference, or a claim that synthetic improvements transfer to LOCO.
+
 A causal training intervention needs independently initialized baseline/challenger
 pairs at identical seeds, and all unchanged settings declared controlled. Use an
 explicit independent sampling_seed and sampling_protocol so architecture RNG does

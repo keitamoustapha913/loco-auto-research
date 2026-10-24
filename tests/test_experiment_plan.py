@@ -255,6 +255,10 @@ def test_critic_cannot_certify_incomplete_comparison(laboratory,monkeypatch):
     monkeypatch.setattr(controller,'_budgeted_invoke_once',critic)
     review=review_plan(store,c,cid,p,result)
     assert len(calls)==2 and not review['causal_claim']
+    assert 'outcome-to-action branches' in calls[0]
+    assert 'not automatically another diagnostic' in calls[0]
+    decision=next(json.loads(e['payload_json']) for e in c.events(cid) if e['kind']=='NEXT_DECISION')
+    assert decision['advisory'] is True
     assert store.list_runs()==[] and any(e['kind']=='NEXT_DECISION' for e in c.events(cid))
 
 

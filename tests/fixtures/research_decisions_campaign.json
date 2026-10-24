@@ -1,0 +1,742 @@
+{
+  "campaign_id": "3b031678-d856-4e63-991b-cadbb3f7491b",
+  "events": [
+    {
+      "kind": "EXPERIMENT_PLAN_REGISTERED",
+      "payload": {
+        "plan": {
+          "arms": [
+            {
+              "arm_id": "bce",
+              "baseline_by_seed": {
+                "659": "bce659"
+              },
+              "execution": "frozen"
+            },
+            {
+              "arm_id": "dice",
+              "baseline_by_seed": {
+                "659": "dice659"
+              },
+              "execution": "frozen"
+            },
+            {
+              "arm_id": "active_incumbent",
+              "baseline_by_seed": {
+                "659": "inc607"
+              },
+              "execution": "frozen"
+            }
+          ],
+          "baselines": [
+            {
+              "baseline_id": "bce659",
+              "checkpoint_sha256": "b3c86d1b414827b6a06c0a255b6b4a68122eeb8466b69082038f5f4c39bf3aef"
+            },
+            {
+              "baseline_id": "dice659",
+              "checkpoint_sha256": "84060ecb85cf11145ad079c7fffd512ad6d7b3251e5c61eeb12a850603ad1907"
+            },
+            {
+              "baseline_id": "inc607",
+              "checkpoint_sha256": "f2ce2db4ac92785ed51dd4efaac72e257739a898cabb2a5349899e7edef640bc"
+            }
+          ],
+          "hypothesis_id": "dense_common_budget_streamed_completion_v3",
+          "plan_id": "dense_common_budget_streamed_completion_v3_plan"
+        }
+      },
+      "time": 1792795717.4103787
+    },
+    {
+      "kind": "EXPERIMENT_PLAN_RESULT",
+      "payload": {
+        "result": {
+          "hypothesis_id": "dense_common_budget_streamed_completion_v3",
+          "plan_id": "dense_common_budget_streamed_completion_v3_plan",
+          "plan_sha256": "0529b92b0f7dbd6e7aabb451deb32b94456f18fd0827e759499f30482ccbe326",
+          "status": "COMPLETE_EXPLORATORY"
+        }
+      },
+      "time": 1792797281.2016156
+    },
+    {
+      "kind": "CRITIQUE",
+      "payload": {
+        "plan_id": "dense_common_budget_streamed_completion_v3_plan",
+        "review": {
+          "critic_concerns": [
+            "Source inspection shows the same 16,929-parameter RGB+coordinate, dilated-convolution, affine-free GroupNorm localizer. The declared training change is BCE versus BCE+0.25 soft Dice, including zero-target controls; both use constant Adam learning rate 0.001. No external pretrained weights are declared. The incumbent has different source and training seed and is descriptive, not a matched method baseline.",
+            "Current frozen runs correctly record zero new updates/exposures. Originating seed-659 BCE/Dice training reached approximately 900 seconds but performed 182689/182571 updates and 1461512/1460568 exposures. Incumbent training performed 186932 updates and 1495456 exposures. Equal elapsed budgets did not equalize training exposure. Sampling seed 7607 is declared historically, but completion marks actual streams UNVERIFIED.",
+            "Actual training seeds are BCE=659, Dice=659, incumbent=607. Pair label 659 does not change this. There is only one checkpoint per arm in this diagnostic plan; the source-bootstrap interval does not estimate training-seed uncertainty or calibration-source uncertainty.",
+            "Synthetic normal false positives are 1/36, 0/36 and 0/36 for BCE, Dice and incumbent. Artifact-matched false positives are 3/36, 2/36 and 3/36; photometric false positives remain 18/36, 16/36 and 16/36. These small counts do not establish normal robustness. Diagnostic image_alarm measures edited-image detection, not normal FPR.",
+            "Lower outside-footprint activation does not establish higher spatial precision without corresponding spatial-error evidence. Full-square targets can include unchanged or semantically valid content. Hard-copy training, limited relocation generators and one category leave seam shortcuts, missing-object interpretation and cross-category transfer unresolved.",
+            "Recorded loss/gradient trajectories are unavailable despite instrumentation described in source. No optimization-collapse or boundary-reliance mechanism can be inferred. Current real-development feedback is disabled; historical aggregate scores are evidence about the same frozen checkpoints, not fresh replication or inspected heatmaps.",
+            "GPU proxy batch-one p50 latency is 0.453888/0.458239/0.462268 ms for BCE/Dice/incumbent, with identical parameter count, checkpoint size and VRAM. These small differences lack timing uncertainty and do not establish an efficiency regression. Incumbent real-development CPU p50 is 47.712 ms under concurrent load and RSS 1029 MiB; GPU proxy timings cannot certify deployment efficiency.",
+            "The earlier operating-point job failed because calibration sources were unavailable: that was missing evidence, not a negative hypothesis result. This completed plan supplies the missing diagnostic evidence but does not retroactively complete earlier plans. Cumulative memory retains unfinished comparisons and no confirmed improvement; repeated custom-split selection remains biased.",
+            "Trusted scientific eligibility explicitly prohibits promotion. COMPLETE_EXPLORATORY establishes execution coverage only. The measured negative recall result rejects an improvement interpretation for these frozen checkpoints, while the general causal effect of Dice remains inconclusive."
+          ],
+          "hypothesis_outcome": "inconclusive",
+          "objective_measured_results": "All three frozen arms completed with all eight required measurements, 36 assessment sources, 18 disjoint calibration sources, tensor identity=1 and finite alignment=1. No jobs failed. Synthetic proxy recall at calibration pixel-FPR budget 0.001: BCE 0.714853, Dice 0.646038, retained incumbent 0.726456. Dice\u2212BCE paired-source difference is \u22120.068815, bootstrap 95% CI [\u22120.087862, \u22120.051707]; this conditions on these checkpoints. At budget 0.01, the difference is \u22120.050805. Dice reduces outside-footprint area from 0.001501 to 0.000570, but loses coverage; this is a trade-off, not demonstrated localization improvement. Historical LOCO custom-split development feedback \u2014 not official full-test results \u2014 also disfavors Dice: paired AU-sPRO differences at training seeds 653 and 659 were \u22120.036625 and \u22120.196917; pixel-AP differences were +0.018056 and \u22120.139040. Retain the seed-607 research incumbent under the 80% localization priority; confirmed improvement and deployment readiness remain unestablished.",
+          "plan_id": "dense_common_budget_streamed_completion_v3_plan",
+          "suggested_falsification": "Choose bounded existing-model analysis before further Dice training. Explicitly authorize the exact frozen BCE659, Dice659 and retained incumbent checkpoints in a new plan. Competing explanations are genuinely better spatial selectivity versus lost anomaly coverage, with threshold calibration contributing to the apparent trade-off. Request trusted aggregate real-development region coverage and background activation across fixed operating budgets, paired image-cluster uncertainty, and missing-object versus other logical-anomaly summaries where available; agents receive aggregates only. Use existing permitted synthetic size/feather cells as supporting diagnostics, not another proxy-selection campaign. Consistent real region-coverage loss without compensating precision would stop Dice optimization; preserved coverage with materially reduced background activation would justify a controlled training study. If required aggregate diagnostics are unavailable, record the gap and retain BCE rather than invent a mechanism. This analysis adds no training cost; budget trusted inference in advance using recorded evaluation costs. Any subsequent training requires independently trained matched baseline seeds, verified streams and counts, authentic trajectories, and genuine continuing optimization through the required 900-second loop."
+        }
+      },
+      "time": 1792797352.8422372
+    },
+    {
+      "kind": "EXPERIMENT_PLAN_REGISTERED",
+      "payload": {
+        "plan": {
+          "arms": [
+            {
+              "arm_id": "active_incumbent",
+              "baseline_by_seed": {
+                "659": "0891b9a1-5f10-5611-80a2-cb9d1398e54b"
+              },
+              "execution": "frozen"
+            },
+            {
+              "arm_id": "bce",
+              "baseline_by_seed": {
+                "659": "42966e3a-d5ae-5abc-836d-ae46994601ee"
+              },
+              "execution": "frozen"
+            },
+            {
+              "arm_id": "dice",
+              "baseline_by_seed": {
+                "659": "db71a135-8814-56fb-bde8-f03e13fdef8f"
+              },
+              "execution": "frozen"
+            }
+          ],
+          "baselines": [
+            {
+              "baseline_id": "0891b9a1-5f10-5611-80a2-cb9d1398e54b",
+              "checkpoint_sha256": "f2ce2db4ac92785ed51dd4efaac72e257739a898cabb2a5349899e7edef640bc"
+            },
+            {
+              "baseline_id": "42966e3a-d5ae-5abc-836d-ae46994601ee",
+              "checkpoint_sha256": "b3c86d1b414827b6a06c0a255b6b4a68122eeb8466b69082038f5f4c39bf3aef"
+            },
+            {
+              "baseline_id": "db71a135-8814-56fb-bde8-f03e13fdef8f",
+              "checkpoint_sha256": "84060ecb85cf11145ad079c7fffd512ad6d7b3251e5c61eeb12a850603ad1907"
+            }
+          ],
+          "hypothesis_id": "dense_dice_spatial_distance_selectivity_v1",
+          "plan_id": "dense_dice_spatial_distance_selectivity_v1_plan"
+        }
+      },
+      "time": 1792797556.5687084
+    },
+    {
+      "kind": "EXPERIMENT_PLAN_RESULT",
+      "payload": {
+        "result": {
+          "hypothesis_id": "dense_dice_spatial_distance_selectivity_v1",
+          "plan_id": "dense_dice_spatial_distance_selectivity_v1_plan",
+          "plan_sha256": "384ef4860e1e6dd7f3269523f6b475933f145d84a27ffbdc0ae2616e9a6668ec",
+          "status": "COMPLETE_EXPLORATORY"
+        }
+      },
+      "time": 1792800079.0355296
+    },
+    {
+      "kind": "CRITIQUE",
+      "payload": {
+        "plan_id": "dense_dice_spatial_distance_selectivity_v1_plan",
+        "review": {
+          "critic_concerns": [
+            "Execution is COMPLETE_EXPLORATORY: all three frozen jobs completed before the deadline, all required scalar measurements are present, each reports 18 calibration and 36 assessment sources, tensor identity and finite alignment equal 1, and current updates/exposures equal zero. No current job failed. Trusted scientific_eligibility separately prohibits promotion.",
+            "Actual training seeds are incumbent 607, BCE 659 and Dice 659. Pair label 659 does not match incumbent training. The incumbent is the primary descriptive research reference, not a matched method baseline. Source-bootstrap intervals condition on the two seed-659 checkpoints; they do not measure training-seed uncertainty or real-development uncertainty.",
+            "Source inspection confirms the same 16,929-parameter RGB-plus-coordinate dilated GroupNorm network for fresh BCE/Dice training, Adam, constant learning rate 0.001, batch 8, size 128 and sigmoid/bilinear inference. The historical training change was BCE versus BCE+0.25 smoothed per-image Dice, including normal controls. This assessment changes neither weights nor deployed inference. BCE/Dice share source a31dbfceecaff44f0040ce1bb8a5a80a62e11dfbe6c76a62079238eec924d342 but have distinct effective configuration and checkpoint hashes; incumbent source and weights differ.",
+            "Zero current training counts do not establish equal historical exposure. Original BCE659 used 182689 updates/1461512 exposures; Dice659 used 182571/1460568, both reaching verified 900-second loops. Incumbent training used 186932/1495456. Declared sampling_seed=7607 and indexed sampling code do not independently verify actual input/mask streams; completion explicitly marks sampling UNVERIFIED and reproducibility UNCONFIRMED.",
+            "The measured negative result is stronger for coverage than selected distance: the selected-distance interval crosses zero, whereas coverage's interval is positive. Both preregistered acceptance conditions fail. Slightly higher mean precision can coexist with empty selections, missed footprints or occasional distant errors; the prescribed empty-selection distance of 1 makes their contributions important. Their decomposition and size/feather factorial summaries are not supplied here.",
+            "Trusted aggregate logical alarms fall from BCE 45/71 to Dice 31/71, alongside normal alarms 1/47\u21920/47. Historical image thresholds differ, 0.955149 versus 0.999750. These image-alarm thresholds are distinct from the diagnostic calibration-only pixel-FPR threshold. Threshold-independent localization losses mean an image-threshold change alone cannot explain the result; no optimization or gradient mechanism is established.",
+            "Cumulative evidence records seed-653 Dice AU-sPRO deterioration with a pixel-AP gain, versus seed-659 deterioration in both; earlier favorable interior proxies therefore did not establish repeatable real logical localization. Earlier annealing reduced final BCE without improving localization. Loss/gradient trajectories remain unavailable despite instrumentation in source; no raw real-development heatmaps were inspected.",
+            "Synthetic robustness remains weak: photometric-good FPR is incumbent/BCE/Dice 0.444/0.500/0.444, and artifact-matched-good FPR 0.083/0.083/0.056. These are separate recipes and cannot be pooled with other photometric diagnostics. Relocation footprint performance does not resolve missing-object semantics, seam reliance or transfer beyond juice_bottle.",
+            "All models retain equal parameter count, checkpoint size and measured peak VRAM. GPU assessment p95 is approximately 0.463\u20130.465 ms, with no demonstrated meaningful efficiency advantage. Historical CPU development measurements around 48\u201352 ms use different conditions and cannot be replaced by GPU timings. Current assessments consumed approximately 1409 GPU-seconds despite zero training; deployment latency uncertainty and process-memory constraints remain.",
+            "Source restricts learning to train/good, with 281 fitting, 18 calibration and 36 assessment sources; no external pretrained weights or inference reference bank are declared. No leakage is evidenced, but identity/alignment checks are not a complete provenance audit. External library license provenance is not supplied. Repeated custom-split selection, 24 cumulative incomplete comparisons and single-category coverage limit generalization. Earlier interface, catalog, guard and timeout failures represent missing evidence, not measured method rejection.",
+            "Retain the seed-607 research incumbent and the separation from historical champions. Its exploratory ranking is neither confirmed improvement nor deployment certification. The current measured negative hypothesis result provides no promotion basis."
+          ],
+          "hypothesis_outcome": "rejected",
+          "objective_measured_results": "Reject the preregistered spatial-selectivity hypothesis for these frozen checkpoints. Synthetic selected distance is incumbent/BCE/Dice 0.007291/0.009764/0.028336; Dice fails the required <=0.007812 target. Dice-minus-BCE difference is +0.018572, source-bootstrap 95% CI [-0.001919, 0.043200]. Coverage distance worsens by +0.021481 [0.002002, 0.046358], failing the required upper bound <=0.01. Synthetic precision improves slightly, 0.932461\u21920.944176, while recall falls 0.692465\u21920.628049 and selected fraction falls 0.048525\u21920.043459: this is reduced coverage, not demonstrated better localization. LOCO custom-split development feedback \u2014 not official full-test results: incumbent/BCE/Dice logical AU-sPRO is 0.769354/0.724042/0.527125, pixel AP 0.594918/0.581188/0.442148, normal FPR 0.042553/0.021277/0. Both challengers trail the retained incumbent on the endpoints carrying 80% research weight. Lower false alarms do not rescue Dice's localization loss.",
+          "plan_id": "dense_dice_spatial_distance_selectivity_v1_plan",
+          "suggested_falsification": "Choose one bounded existing-model investigation, without further training initially, explicitly authorizing frozen weight reuse. Have trusted tooling summarize already-declared spatial factorial records, empty-selection frequency and authentic training traces if available; use permitted normal/synthetic sources and trusted aggregate real-development outputs only. Competing explanations are conservative selection/empty-map failures versus degraded spatial ranking, with seed-dependent optimization as an unresolved cause. Separate empty selections from nonempty spill and coverage errors, and compare coverage at calibration-only operating points without fitting on assessment. If the gap disappears only after accounting for empty selections while ranking remains comparable, investigate calibration-sensitive training; persistent nonempty coverage and ranking losses favor dropping Dice=0.25 and continuing BCE research. Stable authentic trajectories would weaken an optimization-instability explanation; absent traces cannot adjudicate it. This review costs no new 900-second training loops, though guarded diagnostic execution needs a bounded budget. Do not extend into endless synthetic probes: any ensuing training correction must face fresh matched BCE seeds, verified stream controls, complete 900-second continuing loops, disclosed exposure differences and trusted real-localization uncertainty before confirmation."
+        }
+      },
+      "time": 1792800158.4486604
+    },
+    {
+      "kind": "EXPERIMENT_PLAN_REGISTERED",
+      "payload": {
+        "plan": {
+          "arms": [
+            {
+              "arm_id": "active_incumbent",
+              "baseline_by_seed": {
+                "659": "0891b9a1-5f10-5611-80a2-cb9d1398e54b"
+              },
+              "execution": "frozen"
+            },
+            {
+              "arm_id": "bce",
+              "baseline_by_seed": {
+                "659": "42966e3a-d5ae-5abc-836d-ae46994601ee"
+              },
+              "execution": "frozen"
+            },
+            {
+              "arm_id": "dice",
+              "baseline_by_seed": {
+                "659": "db71a135-8814-56fb-bde8-f03e13fdef8f"
+              },
+              "execution": "frozen"
+            }
+          ],
+          "baselines": [
+            {
+              "baseline_id": "0891b9a1-5f10-5611-80a2-cb9d1398e54b",
+              "checkpoint_sha256": "f2ce2db4ac92785ed51dd4efaac72e257739a898cabb2a5349899e7edef640bc"
+            },
+            {
+              "baseline_id": "42966e3a-d5ae-5abc-836d-ae46994601ee",
+              "checkpoint_sha256": "b3c86d1b414827b6a06c0a255b6b4a68122eeb8466b69082038f5f4c39bf3aef"
+            },
+            {
+              "baseline_id": "db71a135-8814-56fb-bde8-f03e13fdef8f",
+              "checkpoint_sha256": "84060ecb85cf11145ad079c7fffd512ad6d7b3251e5c61eeb12a850603ad1907"
+            }
+          ],
+          "hypothesis_id": "dense_dice_empty_selection_explanation_v1",
+          "plan_id": "dense_dice_empty_selection_explanation_v1_plan"
+        }
+      },
+      "time": 1792800356.3748915
+    },
+    {
+      "kind": "EXPERIMENT_PLAN_RESULT",
+      "payload": {
+        "result": {
+          "hypothesis_id": "dense_dice_empty_selection_explanation_v1",
+          "plan_id": "dense_dice_empty_selection_explanation_v1_plan",
+          "plan_sha256": "5247bfc9e81b5f4c87a3f1557296c9d4719808778e84ac7b5b07a7db03144e5c",
+          "status": "COMPLETE_EXPLORATORY"
+        }
+      },
+      "time": 1792800604.1205802
+    },
+    {
+      "kind": "CRITIQUE",
+      "payload": {
+        "plan_id": "dense_dice_empty_selection_explanation_v1_plan",
+        "review": {
+          "critic_concerns": [
+            "Execution and scientific evidence are separate. Completion reports no failed jobs or missing requirements. However, the accessible investigation summaries do not expose the required cross-arm source/variant joins, jointly nonempty AP endpoint, four factorial summaries, or ratio-bootstrap interval. Their execution presence is accepted from the deterministic record; their numerical implications cannot be independently reviewed here. The 97.0% point ratio has no supplied uncertainty interval.",
+            "Source inspection confirms the same 16,929-parameter RGB-plus-coordinate dilated convolutional GroupNorm architecture. Historical BCE659 and Dice659 differ in dice_lambda, 0 versus 0.25, with smoothed per-image Dice including zero-target controls. Both use Adam, constant learning rate 0.001, batch 8, size 128 and sigmoid/bilinear inference. This experiment changes diagnostic analysis and adds no learning; it does not test a new architecture or training correction.",
+            "Actual training seeds are incumbent 607, BCE 659 and Dice 659. The shared comparison label 659 does not match the incumbent's training seed. BCE/Dice share source hash a31dbfceecaff44f0040ce1bb8a5a80a62e11dfbe6c76a62079238eec924d342; the incumbent uses different historical source and weights. It is the primary descriptive reference, not a matched training baseline.",
+            "Zero current updates do not mean equal historical exposure. Original incumbent training used 186932 updates/1495456 exposures; BCE659 used 182689/1461512 and Dice659 182571/1460568. Historical models reached 900-second loops, but equal elapsed budgets did not equalize updates. Sampling seed 7607 and indexed sampling are declared; actual input/mask-stream equality remains unverified.",
+            "The intervals describe assessment-source uncertainty conditional on these checkpoints, not training-seed uncertainty. The empty-contribution interval reaches zero, and the nonempty interval permits differences in either direction. Neither establishes nonempty equivalence. Full-footprint AP is lower for Dice, so an empty-selection accounting explanation cannot erase its ranking deficit.",
+            "Prior spatial diagnostics show a selectivity/coverage trade-off: Dice versus BCE selected precision rises from 0.932461 to 0.944176, while footprint recall falls from 0.692465 to 0.628049 and selected fraction falls from 0.048525 to 0.043459. Empty selections receive distance 1 by definition, making rare omissions influential. These synthetic measurements do not reveal real missing-object localization or real spatial error locations.",
+            "Whole-history LOCO custom-split development feedback \u2014 not official full-test results \u2014 already records BCE659/Dice659 logical AU-sPRO 0.724042/0.527125 and pixel AP 0.581188/0.442148, versus incumbent 0.769354/0.594918. Prior seed 653 also loses logical AU-sPRO with Dice despite improved AP. Thus Dice remains a failed localization challenger in screening; this explanatory diagnostic does not reverse that result. Real paired population uncertainty remains unavailable.",
+            "Normal assessment false positives are incumbent/BCE/Dice 0/36, 1/36 and 0/36. Artifact-matched-good false positives are 3/36, 3/36 and 2/36; photometric-good alarms remain substantial at 16/36, 18/36 and 16/36. These small counts do not establish a reliable robustness gain. Diagnostic pixel-FPR calibration and historical maximum-map image thresholds are distinct operating points.",
+            "Authentic BCE/Dice loss, gradient and update trajectories are unavailable in investigation_observations. Score saturation, optimization instability and gradient conflict remain possible explanations, not findings. No raw real-development heatmaps were inspected. Earlier seam sensitivity and generator-transfer gaps also prevent interpreting near-perfect primary synthetic AP as semantic localization.",
+            "GPU synthetic end-to-end p50 is approximately 0.456/0.455/0.459 ms, with identical parameter count, checkpoint size and VRAM; differences lack timing uncertainty. These measurements cannot replace CPU development latency: the incumbent records p50 47.712 ms, p95 50.779 ms and approximately 1029 MiB RSS. Current diagnostics cost approximately 41.1 GPU seconds total and establish no deployment efficiency improvement.",
+            "Cumulative memory retains the seed-607 exploratory incumbent under 60% logical AU-sPRO, 20% pixel AP, 10% normal performance and 10% efficiency weights. It records 24 incomplete comparisons; calibration-interface, guard, catalog and timeout failures are missing scientific evidence, not measured method rejection. No promotion or deployment certification follows from ranking. Good-only fitting and disjoint normal calibration are declared, with no external pretrained weights or inference bank; dependency license provenance is not supplied. Category transfer and final-holdout generalization remain unmeasured, and repeated custom-split selection induces bias."
+          ],
+          "hypothesis_outcome": "inconclusive",
+          "objective_measured_results": "All results in this experiment are synthetic proxies. The deterministic record reports COMPLETE_EXPLORATORY: all three frozen arms completed, each with 18 calibration sources, 36 assessment sources, identity/alignment checks equal to 1, and zero new optimizer updates or source exposures. Incumbent/BCE659/Dice659 full-footprint AP is 0.848012/0.833407/0.811061; coverage distance is 0.013230/0.014761/0.036241, respectively. Dice minus BCE coverage-distance gap is 0.021481: empty contribution accounts arithmetically for 0.020833, approximately 97.0%, and nonempty contribution for 0.000647. Paired source-bootstrap 95% intervals are [0, 0.041667] for empty contribution and [-0.006168, 0.004834] for nonempty contribution. This supports a descriptive concentration of the measured distance penalty in empty selections, but does not establish an exclusive explanation, a loss mechanism, or improved localization. Retain the active seed-607 research incumbent; promotion eligibility is explicitly false.",
+          "plan_id": "dense_dice_empty_selection_explanation_v1_plan",
+          "suggested_falsification": "Choose a bounded existing-model training investigation, then close the Dice=0.25 branch unless evidence justifies one correction. First request compact trusted summaries of already-recorded BCE/Dice trajectories, verified initialization/input/target prefixes, and the missing jointly nonempty AP and ratio-bootstrap results; use no agent-side checkpoint execution. Competing explanations are threshold-induced omission versus degraded spatial ranking, with optimization instability as a possible source of the latter. A persistent jointly nonempty AP deficit would falsify an empty-only account; the existing threshold-independent real AU-sPRO loss already falsifies a purely threshold-only explanation of real deterioration. If authentic traces show stable optimization alongside ranking loss, continue BCE-based research rather than another narrower synthetic proxy. If they reveal a reproducible Dice-specific instability, test one preregistered training correction against independently trained matched BCE seeds, with verified streams, complete 900-second continuing loops and disclosed update/exposure counts. Judge the decision primarily on trusted aggregate real logical AU-sPRO and AP, with normal false alarms and deployment-protocol efficiency as secondary constraints. Existing artifact review requires no new training; any correction requires a separately bounded budget. No synthetic rescue alone warrants promotion."
+        }
+      },
+      "time": 1792800672.4517653
+    },
+    {
+      "kind": "EXPERIMENT_PLAN_REGISTERED",
+      "payload": {
+        "plan": {
+          "arms": [
+            {
+              "arm_id": "active_incumbent",
+              "baseline_by_seed": {
+                "659": "0891b9a1-5f10-5611-80a2-cb9d1398e54b"
+              },
+              "execution": "frozen"
+            },
+            {
+              "arm_id": "bce",
+              "baseline_by_seed": {
+                "659": "42966e3a-d5ae-5abc-836d-ae46994601ee"
+              },
+              "execution": "frozen"
+            },
+            {
+              "arm_id": "dice",
+              "baseline_by_seed": {
+                "659": "db71a135-8814-56fb-bde8-f03e13fdef8f"
+              },
+              "execution": "frozen"
+            }
+          ],
+          "baselines": [
+            {
+              "baseline_id": "0891b9a1-5f10-5611-80a2-cb9d1398e54b",
+              "checkpoint_sha256": "f2ce2db4ac92785ed51dd4efaac72e257739a898cabb2a5349899e7edef640bc"
+            },
+            {
+              "baseline_id": "42966e3a-d5ae-5abc-836d-ae46994601ee",
+              "checkpoint_sha256": "b3c86d1b414827b6a06c0a255b6b4a68122eeb8466b69082038f5f4c39bf3aef"
+            },
+            {
+              "baseline_id": "db71a135-8814-56fb-bde8-f03e13fdef8f",
+              "checkpoint_sha256": "84060ecb85cf11145ad079c7fffd512ad6d7b3251e5c61eeb12a850603ad1907"
+            }
+          ],
+          "hypothesis_id": "dense_dice_joint_population_completion_v2",
+          "plan_id": "dense_dice_joint_population_completion_v2_plan"
+        }
+      },
+      "time": 1792800911.6721418
+    },
+    {
+      "kind": "EXPERIMENT_PLAN_RESULT",
+      "payload": {
+        "result": {
+          "hypothesis_id": "dense_dice_joint_population_completion_v2",
+          "plan_id": "dense_dice_joint_population_completion_v2_plan",
+          "plan_sha256": "932376ae3da98c749a001bff1113669bdc64ef8055f74b611950f7c41c0fa214",
+          "status": "COMPLETE_EXPLORATORY"
+        }
+      },
+      "time": 1792801730.31463
+    },
+    {
+      "kind": "CRITIQUE",
+      "payload": {
+        "plan_id": "dense_dice_joint_population_completion_v2_plan",
+        "review": {
+          "critic_concerns": [
+            "Preserve plan_id dense_dice_joint_population_completion_v2_plan and trusted COMPLETE_EXPLORATORY execution coverage. Trusted scientific_eligibility explicitly prohibits promotion, reports reproducibility UNCONFIRMED and causal eligibility false. Missing inspectable scientific analysis must be described without rewriting execution status.",
+            "The supplied export does not expose the required trusted ID/digest joins, jointly nonempty AP interval, joint counts, four factorial summaries or ratio-bootstrap results and undefined-ratio frequency. Emitted-record counts do not independently establish these properties. These are evidence limitations requiring reconciliation with the completion criteria, not evidence of a failed job.",
+            "Source inspection confirms the same compact RGB-plus-coordinate convolutional localizer with dilations 2/4, functional four-group normalization, ReLU and a dense logit output. Historical BCE/Dice arms share source a31dbfceecaff44f0040ce1bb8a5a80a62e11dfbe6c76a62079238eec924d342 and change dice_lambda from 0 to 0.25, including target-zero controls. Recorded Adam, constant learning rate 0.001, batch8, float32, size128 and bilinear/sigmoid inference otherwise agree. This comparison performs frozen diagnostic replay, not additional learning. No external pretrained weights are declared; pinned source provenance does not by itself verify external-code licensing.",
+            "All three effective configuration hashes and exact frozen checkpoint references are recorded separately. Actual training seeds are incumbent607 and BCE/Dice659; pair label659 is not a shared incumbent training seed. The incumbent has different source/configuration/weights and remains a descriptive primary reference, never a substituted matched BCE baseline. Historical sampling_seed7607 is declared, but completion marks actual sampling streams UNVERIFIED.",
+            "Zero current training counts apply only to replay. Historical incumbent training used 186932 updates/1495456 exposures, BCE659 182689/1461512 and Dice659 182571/1460568. Equal 900-second historical loops did not produce equal update/exposure counts. These differences and unverified streams prevent clean loss attribution.",
+            "Dice has worse threshold-independent unconditional AP as well as more empty selections. Thus empty selections alone cannot explain the entire screening deficit. Population-weighted nonempty contributions are not conditional localization errors on a shared nonempty population; their difference cannot establish spatial precision or the proposed mechanism.",
+            "Whole-history evidence does not show repeatable Dice localization improvement. Historical paired seeds653/659 have Dice-minus-BCE logical AU-sPRO differences -0.036625/-0.196917 and pixel AP differences +0.018056/-0.139040. Seed653 is a trade-off; seed659 regresses both. These are LOCO custom-split development feedback \u2014 not official full-test results. Two pairs do not establish a causal method effect, and real-development paired uncertainty is unavailable.",
+            "Normal synthetic-assessment alarms are incumbent/BCE/Dice 0/36, 1/36, 0/36; artifact-matched good alarms 3/36, 3/36, 2/36; photometric-good alarms 16/36, 18/36, 16/36. Small differences at different frozen image thresholds do not demonstrate better spatial precision. Diagnostic pixel-FPR0.001 calibration is a separate operating point; zero observed alarms does not establish zero population FPR.",
+            "Available incumbent final-decile summaries include BCE0.013177, gradient norm0.111351 and update norm0.027655. They do not supply a comparative learning trajectory or establish Dice instability. Missing loss/gradient trajectories and spatial error anatomy remain missing evidence. No raw real-development heatmaps were inspected. Full-footprint synthetic edit targets can reward seam detection and do not resolve missing-object ambiguity; generator/category generalization remains unestablished.",
+            "All arms have 16929 parameters, approximately 0.067857 MiB checkpoints and 10.407 MiB peak VRAM. Current GPU batch-one p95 values are incumbent0.462841, BCE0.458554 and Dice0.459822 ms, with no demonstrated efficiency advantage or timing uncertainty. Replay consumed approximately 691.734 GPU seconds overall. Historical CPU development latency uses a different concurrent-load protocol and excludes loading/startup; it cannot be equated with these GPU timings.",
+            "Retain research incumbent0891b9a1-5f10-5611-80a2-cb9d1398e54b: development logical AU-sPRO0.769354, pixel AP0.594918 and normal FPR2/47. Preserve 60% logical AU-sPRO plus 20% pixel AP priority; small alarm changes cannot compensate for unsupported localization gains. Research ranking is exploratory, deployment certification and confirmed improvement remain absent, and repeated custom-split selection induces selection bias. Historical interface/catalog failures and the present critic-validation failure are execution/output failures, not negative method measurements."
+          ],
+          "hypothesis_outcome": "inconclusive",
+          "objective_measured_results": "Correction: the rejected response incorrectly replaced the deterministic execution status with INCOMPLETE. The exact comparison_status is COMPLETE_EXPLORATORY; scientific uncertainty remains separate. All 3/3 frozen arms completed without reported job errors or missing scalar measurements. Each reports 18 calibration sources, 36 assessment sources, 144 variants, verified tensor identity, finite aligned maps and zero new optimizer updates/source exposures. Synthetic full-footprint AP: incumbent607 0.848012, BCE659 0.833407, Dice659 0.811061. Dice-minus-BCE unconditional paired-source AP is -0.022347, bootstrap 95% CI [-0.038118, -0.006145], using 36 source clusters and 2,000 replicates, seed94911. This interval conditions on the checkpoints; it does not measure training-seed uncertainty. Synthetic coverage distance worsens from BCE 0.014877 to Dice 0.036363, including empty contribution 0 versus 0.020833. These are measured negative screening results, while the jointly nonempty interpretation remains inconclusive.",
+          "plan_id": "dense_dice_joint_population_completion_v2_plan",
+          "suggested_falsification": "Choose a bounded existing-record investigation before more training: have trusted tooling expose the already-declared exact source/variant ID and query/target digest joins, factorial summaries and seed94917 bootstrap, recomputing joint conditioning and the empty-gap ratio in every replicate. Use existing frozen checkpoints and permitted normal/synthetic records; require no retraining or real-case access. Analysis cost is currently unreported and must stay within the authorized budget. Competing explanations are predominantly empty-selection loss versus an additional ranking deficit among jointly nonempty queries. A negative jointly nonempty AP interval falsifies an omission-only explanation; an interval spanning zero leaves that mechanism unresolved rather than supporting Dice. The result decides whether any targeted operating-point investigation is informative or this Dice branch should close. If records are unavailable, document that evidence gap while preserving COMPLETE_EXPLORATORY execution status and inconclusive hypothesis outcome. Retain the active incumbent either way; existing real-localization regressions do not justify automatic Dice replication or an endless narrower-proxy sequence. Any later training comparison needs independently trained matched BCE controls, audited actual streams/counts, authentic learning traces and trusted aggregate real logical-localization endpoints with 80% localization priority."
+        }
+      },
+      "time": 1792801871.9228547
+    },
+    {
+      "kind": "EXPERIMENT_PLAN_REGISTERED",
+      "payload": {
+        "plan": {
+          "arms": [
+            {
+              "arm_id": "active_incumbent",
+              "baseline_by_seed": {
+                "659": "0891b9a1-5f10-5611-80a2-cb9d1398e54b"
+              },
+              "execution": "frozen"
+            },
+            {
+              "arm_id": "bce",
+              "baseline_by_seed": {
+                "659": "42966e3a-d5ae-5abc-836d-ae46994601ee"
+              },
+              "execution": "frozen"
+            },
+            {
+              "arm_id": "dice",
+              "baseline_by_seed": {
+                "659": "db71a135-8814-56fb-bde8-f03e13fdef8f"
+              },
+              "execution": "frozen"
+            }
+          ],
+          "baselines": [
+            {
+              "baseline_id": "0891b9a1-5f10-5611-80a2-cb9d1398e54b",
+              "checkpoint_sha256": "f2ce2db4ac92785ed51dd4efaac72e257739a898cabb2a5349899e7edef640bc"
+            },
+            {
+              "baseline_id": "42966e3a-d5ae-5abc-836d-ae46994601ee",
+              "checkpoint_sha256": "b3c86d1b414827b6a06c0a255b6b4a68122eeb8466b69082038f5f4c39bf3aef"
+            },
+            {
+              "baseline_id": "db71a135-8814-56fb-bde8-f03e13fdef8f",
+              "checkpoint_sha256": "84060ecb85cf11145ad079c7fffd512ad6d7b3251e5c61eeb12a850603ad1907"
+            }
+          ],
+          "hypothesis_id": "dense_sigmoid_rounding_dice_gap_v1",
+          "plan_id": "dense_sigmoid_rounding_dice_gap_v1_plan"
+        }
+      },
+      "time": 1792802061.123879
+    },
+    {
+      "kind": "EXPERIMENT_PLAN_RESULT",
+      "payload": {
+        "result": {
+          "hypothesis_id": "dense_sigmoid_rounding_dice_gap_v1",
+          "plan_id": "dense_sigmoid_rounding_dice_gap_v1_plan",
+          "plan_sha256": "0b0db157a1ec37d58fdbdb9a68b28e76146056f451203b07788d3a44cd74eede",
+          "status": "COMPLETE_EXPLORATORY"
+        }
+      },
+      "time": 1792802276.0523798
+    },
+    {
+      "kind": "CRITIQUE",
+      "payload": {
+        "plan_id": "dense_sigmoid_rounding_dice_gap_v1_plan",
+        "review": {
+          "critic_concerns": [
+            "Source inspection shows the same 16,929-parameter RGB-plus-coordinate dilated convolution/GroupNorm localizer for BCE and Dice. Their originating training difference was BCE versus BCE+0.25 soft Dice, including target-zero controls. This experiment changed only diagnostic numerical routes; originating inference and thresholds remained frozen. No external pretrained weights were declared.",
+            "Actual training seeds are incumbent607, BCE659 and Dice659. Pair label659 does not make the incumbent a matched seed. Source and effective-configuration hashes distinguish the incumbent implementation from the BCE/Dice implementation. Current zero training counts do not erase originating costs: incumbent 186,932 updates/1,495,456 exposures; BCE659 182,689/1,461,512; Dice659 182,571/1,460,568. Sampling streams remain unverified despite declared sampling_seed7607.",
+            "Historical paired training seeds653/659 both showed worse Dice synthetic footprint AP. LOCO custom-split development feedback \u2014 not official full-test results \u2014 showed Dice-minus-BCE logical AU-sPRO differences -0.03662456/-0.19691660 and pixel-AP differences +0.01805593/-0.13904025. Seed653 was a localization trade-off; seed659 was a failed challenger. Two pairs do not establish between-method uncertainty or causality.",
+            "Prior synthetic spatial analysis distinguishes precision from coverage: Dice659 selected precision 0.94418 versus BCE659 0.93246, but footprint recall 0.62805 versus 0.69246 and coverage distance 0.03624 versus 0.01476. Fewer selected pixels and worse coverage accompany the AP deficit; they do not demonstrate improved logical localization. Joint-population spatial evidence remains missing.",
+            "Current normal false positives were incumbent/BCE/Dice 0/1/0 of36; photometric-good alarms 16/18/16 of36 and artifact-matched alarms 3/3/2. Different frozen thresholds, particularly Dice's 0.9997501, prevent interpreting fewer alarms as an unconditional improvement. Zero observed normal alarms does not establish zero population FPR.",
+            "These source-bootstrap intervals condition on one checkpoint per arm and 36 sources, averaging four variants within each source. They do not quantify training-seed or cross-category uncertainty. Relocation footprints do not resolve real missing-object ambiguity, generator shortcuts or semantic localization. No raw real-development heatmaps were inspected.",
+            "Trace-producing code exists, but the inspected evidence does not establish comparative loss/gradient trajectories or an optimization mechanism. The numerical result rules against material rounding recovery here; it does not explain why Dice learned worse rankings.",
+            "GPU batch-one p95 latency was approximately 0.471/0.465/0.461 ms, with identical parameter count, checkpoint size and VRAM; these small differences lack uncertainty estimates. Historical CPU development p95 was 50.779 ms incumbent, 51.257 ms BCE659 and 51.607 ms Dice659 under concurrent load. GPU timings do not establish deployment efficiency improvement.",
+            "Cumulative memory retains the seed607 research incumbent, separately from historical exploratory champions. Its development logical AU-sPRO/AP are 0.769354/0.594918, with 2/47 normal false positives. The 60% AU-sPRO plus20% pixel-AP policy gives no basis to replace it from these proxies. Prior incomplete calibration/interface, catalog, timeout and training-guard failures remain missing evidence, not measured method negatives. Trusted promotion_eligible is false; repeated development selection also limits generalization claims."
+          ],
+          "hypothesis_outcome": "rejected",
+          "objective_measured_results": "The hypothesis that float32 sigmoid rounding explains the Dice localization gap is rejected for these frozen checkpoints and this synthetic proxy. All 3/3 declared cells completed, each with 18 calibration and 36 assessment sources, all required scalars, verified tensor identity and finite alignment, zero replay error, and zero new optimizer updates/source exposures. Synthetic native/logit AP: incumbent607 0.848011756/0.848011756; BCE659 0.833407330/0.833407329; Dice659 0.811060523/0.811060558. Dice-minus-BCE rounding recovery was 3.6800e-08, source-bootstrap 95% CI [-3.0823e-11, 1.1038e-07]; the remaining logit-AP difference was -0.02234677, CI [-0.03910332, -0.00595006]. Float64 sigmoid AP equaled logit AP. This is a measured negative numerical result, not a job failure or a confirmed method comparison.",
+          "plan_id": "dense_sigmoid_rounding_dice_gap_v1_plan",
+          "suggested_falsification": "Choose a bounded existing-model training investigation, rather than another rounding proxy or immediate architecture change. First inspect authentic saved BCE/Dice deciles and verify indexed source/edit prefixes for both historical seed pairs; do not reconstruct missing trajectories. Competing explanations are a Dice-induced coverage/ranking trade-off versus seed-dependent optimization instability or unequal training exposure. If traces and stream integrity justify a new experiment, preregister independently trained matched BCE/Dice pairs with the exact same source, initialization controls and verified sampling, each completing the required 900-second continuing loop; record actual updates/exposures. Make trusted aggregate real logical AU-sPRO and pixel AP the primary endpoints with 80% combined priority, alongside normal FPR and comparable latency. Consistent logical-localization recovery without coverage/FPR regression would justify reconsidering Dice training; persistent deficits would retire this Dice setting. Synthetic spatial controls are secondary diagnostics, and no further numerical-route screening is warranted by a recovery near 1e-08."
+        }
+      },
+      "time": 1792802336.3716936
+    },
+    {
+      "kind": "EXPERIMENT_PLAN_REGISTERED",
+      "payload": {
+        "plan": {
+          "arms": [
+            {
+              "arm_id": "active_incumbent",
+              "baseline_by_seed": {
+                "659": "0891b9a1-5f10-5611-80a2-cb9d1398e54b"
+              },
+              "execution": "frozen"
+            },
+            {
+              "arm_id": "bce",
+              "baseline_by_seed": {
+                "659": "42966e3a-d5ae-5abc-836d-ae46994601ee"
+              },
+              "execution": "frozen"
+            },
+            {
+              "arm_id": "dice",
+              "baseline_by_seed": {
+                "659": "db71a135-8814-56fb-bde8-f03e13fdef8f"
+              },
+              "execution": "frozen"
+            }
+          ],
+          "baselines": [
+            {
+              "baseline_id": "0891b9a1-5f10-5611-80a2-cb9d1398e54b",
+              "checkpoint_sha256": "f2ce2db4ac92785ed51dd4efaac72e257739a898cabb2a5349899e7edef640bc"
+            },
+            {
+              "baseline_id": "42966e3a-d5ae-5abc-836d-ae46994601ee",
+              "checkpoint_sha256": "b3c86d1b414827b6a06c0a255b6b4a68122eeb8466b69082038f5f4c39bf3aef"
+            },
+            {
+              "baseline_id": "db71a135-8814-56fb-bde8-f03e13fdef8f",
+              "checkpoint_sha256": "84060ecb85cf11145ad079c7fffd512ad6d7b3251e5c61eeb12a850603ad1907"
+            }
+          ],
+          "hypothesis_id": "dense_zero_target_dice_head_opposition_v1",
+          "plan_id": "dense_zero_target_dice_head_opposition_v1_plan"
+        }
+      },
+      "time": 1792802543.2332585
+    },
+    {
+      "kind": "EXPERIMENT_PLAN_RESULT",
+      "payload": {
+        "result": {
+          "hypothesis_id": "dense_zero_target_dice_head_opposition_v1",
+          "plan_id": "dense_zero_target_dice_head_opposition_v1_plan",
+          "plan_sha256": "dd3e36df5f5776829dd39b1bb378c2c76dd6c445aae2b3b0f0471dea65be168c",
+          "status": "INCOMPLETE"
+        }
+      },
+      "time": 1792802687.2144158
+    }
+  ],
+  "proposals": [
+    {
+      "claim": "At calibration pixel FPR 0.001, Dice minus BCE source-mean full-footprint recall is at most -0.02, with a negative 95% source-bootstrap upper bound. Otherwise reject this bounded checkpoint-ranking claim.",
+      "evaluation_plan": "Zero new training. Three frozen cells complete the missing comparison before further Dice research. Calibrate separately on 18 normal sources and assess 36 independent normal sources with same-source synthetic relocations. No cross-source donors. Stream scores and retain only compact source records, avoiding the earlier oversized-artifact failure. The falling authentic BCE traces reject the simple late-divergence explanation; this comparison addresses spatial selectivity instead. If the deficit persists, discontinue Dice=0.25; if absent, retain BCE while treating synthetic versus real transfer as unresolved. No new real feedback is needed for unchanged predictors. Existing real results are LOCO custom-split development feedback \u2014 not official full-test results.",
+      "hypothesis_id": "dense_common_budget_streamed_completion_v3",
+      "priority_rationale": "Highest information per training minute: resolves an existing incomplete comparison without retraining. Dice lost logical AU-sPRO at both independent seeds, while authentic late BCE ratios were below one; another optimization remedy is poorly motivated.",
+      "research_question": "Does the exact seed-659 Dice checkpoint lose full-footprint recall relative to BCE at the same good-only pixel false-positive budget?"
+    },
+    {
+      "claim": "For the exact BCE659 and Dice659 checkpoints, empty-selection contributions must explain at least 75% of the positive Dice-minus-BCE coverage-distance gap, while Dice-minus-BCE full-footprint AP on jointly nonempty queries must be at least -0.01. Otherwise reject this bounded empty-selection explanation. This does not estimate a causal training effect.",
+      "evaluation_plan": "Three frozen arms times one pairing seed give three assessment jobs and zero training loops. Reproduce the prior four relocation cells and calibration-only pixel FPR 0.001; avoid expensive all-pairs distance tensors by using installed distance-transform operations or streamed exact reductions. Estimated total assessment cost is 12 GPU-minutes, with uncertainty informed by the prior three-job assessment's approximately 23.5 GPU-minutes. No new time allowance is requested. Use only the original campaign deadline; interrupted work is INCOMPLETE. This resolves a missing decomposition in a completed negative study, rather than repeating its acceptance test. If emptiness dominates and jointly nonempty ranking is preserved, prioritize a future matched BCE calibration-sensitive training study. If ranking or nonempty coverage remains worse, discontinue Dice=0.25 and prioritize BCE. Existing real feedback remains LOCO custom-split development feedback\u2014not official full-test results; no new real scoring is needed for unchanged predictors.",
+      "hypothesis_id": "dense_dice_empty_selection_explanation_v1",
+      "priority_rationale": "Directly adjudicates the critic's unresolved explanation for the strongest measured negative result, without another 900-second training loop. Compact records and streamed reductions address earlier storage failures. The 24 historical incomplete comparisons remain incomplete; this study does not claim to complete unrelated matrices.",
+      "research_question": "Does increased empty-selection frequency explain most of Dice659's coverage-distance deterioration, or does spatial ranking also deteriorate on queries where both checkpoints select pixels?"
+    },
+    {
+      "claim": "Dice-minus-BCE full-footprint AP on jointly nonempty queries is below -0.01. A source-bootstrap upper bound below -0.01 rejects the previous empty-only explanation; an interval spanning that margin leaves it unresolved. This is conditional checkpoint evidence, not a causal loss comparison.",
+      "evaluation_plan": "Three frozen arms times one pairing seed; zero new training. The previous experiment completed execution, but its exposed summaries omit reviewable joint-stratum and ratio results. This follow-up explicitly completes that scientific evidence rather than claiming a new mechanism. Use only same-source synthetic controls and disjoint 18/36 normal partitions. Retain all negative results and missing historical traces. If conditional ranking fails, close Dice=0.25 and continue BCE research; if preserved, retain the narrow omission accounting result but still close Dice screening because logical AU-sPRO and AP already regressed. If unresolved, report unresolved and do not launch another narrower proxy. Existing real results remain LOCO custom-split development feedback \u2014 not official full-test results. Estimated frozen work is small relative to the remaining deadline; interruption leaves this completion INCOMPLETE.",
+      "hypothesis_id": "dense_dice_joint_population_completion_v2",
+      "priority_rationale": "Closes the critic's specific unresolved falsification at approximately the prior 41-second diagnostic cost, without another 900-second training branch. The real Dice losses make branch closure more valuable than another proposed rescue.",
+      "research_question": "Does Dice659 retain a spatial-ranking deficit on the exact synthetic queries where both BCE659 and Dice659 make nonempty selections?"
+    },
+    {
+      "claim": "At calibration pixel FPR 0.001, Dice must reduce source-mean selected-to-footprint distance by at least 20% relative to BCE, without increasing footprint-to-selected distance by more than 0.01 image diagonals. Otherwise reject this bounded spatial-selectivity interpretation. This is conditional on frozen checkpoints and synthetic footprints.",
+      "evaluation_plan": "Three frozen arms times one pairing index yields three jobs and zero training. Estimate approximately 800 seconds for real evaluation from recorded roughly 267-second incumbent evaluation, plus normal-source diagnostics; this fits the remaining original deadline without an additional allowance. Request fresh trusted logical AU-sPRO@5%, pooled pixel AP, normal FPR and structural AU-sPRO separately. These are LOCO custom-split development feedback \u2014 not official full-test results. Candidate diagnose receives only disjoint normal partitions and synthetic controls. Existing trusted real endpoints do not supply the critic's requested mask-based distance or missing-object summaries; record that gap. If Dice worsens coverage distance without the specified precision benefit, stop Dice optimization. If it satisfies both synthetic endpoints and avoids real localization regression, justify a later independently initialized training comparison; this study cannot confirm a champion. Earlier failed and incomplete plans retain their status.",
+      "hypothesis_id": "dense_dice_spatial_distance_selectivity_v1",
+      "priority_rationale": "Directly addresses the critic's unresolved precision-versus-coverage explanation after a completed negative recall result. Reuses all three exact references without further Dice training and reconnects the analysis to the localization-priority real endpoints.",
+      "research_question": "Does Dice's reduced selected area represent spatially better localization, or merely omission of anomaly support, on the exact seed-659 checkpoints?"
+    },
+    {
+      "claim": "On identical native-grid queries, Dice-minus-BCE improvement from ranking logits instead of float32 sigmoid scores exceeds 0.01 with a positive 95% source-bootstrap lower bound, and the logit-ranked Dice-minus-BCE AP gap is at least -0.01. Otherwise reject this bounded numerical explanation of the observed deficit.",
+      "evaluation_plan": "Three frozen arms at one pairing index; zero optimization. Use only within-source relocation controls and 36 independent source clusters. Bootstrap Dice-minus-BCE ranking_gain separately from logit AP difference. This directly falsifies a numerical alternative to a learned ranking deficit without another operating-point proxy. If supported, preregister a later trusted real-localization readout comparison; if rejected, close this numerical rescue and retain BCE/incumbent preference. Neither outcome repairs the missing jointly nonempty analysis or changes the previous COMPLETE_EXPLORATORY status. Request no new real feedback for unchanged deployed predictors. Future selection must prioritize logical AU-sPRO@5% and pixel AP, retaining their combined 80% weight. Estimated replay and analysis fit within the original remaining deadline; no 900-second new training can fit.",
+      "hypothesis_id": "dense_sigmoid_rounding_dice_gap_v1",
+      "priority_rationale": "Directly tests a materially different explanation for the measured -0.022347 Dice-minus-BCE AP gap, using cheap shared-logit reductions instead of expensive spatial distances or retraining. A negative result ends a concrete rescue route.",
+      "research_question": "Does float32 sigmoid rounding disproportionately reduce Dice659 synthetic localization AP relative to BCE659?"
+    },
+    {
+      "claim": "For Dice659, source-mean cosine between the good-control Dice head gradient and positive-query BCE head gradient is below -0.25, with a bootstrap upper bound below -0.25, and the source-mean ratio of their norms after applying the historical Dice coefficient 0.25 exceeds 0.1. Otherwise reject this bounded head-opposition mechanism.",
+      "evaluation_plan": "Three frozen arms times one pairing index produces three jobs, with actual seeds explicitly pinned. This avoids starting a 900-second training loop that cannot fit the remaining campaign deadline. On 36 independent normal assessment sources, average four same-source relocation variants before source bootstrap. Good controls use the originating 0.95*x+0.025 recipe. Verify analytical derivatives against central finite differences on disposable head vectors without changing checkpoint tensors or enabling backward. Support would prioritize a later independently initialized BCE/all-image-Dice/positive-only-Dice training matrix with real logical AU-sPRO and pixel AP carrying 80% combined priority. Rejection retires this control-gradient explanation and retains BCE as the practical starting objective. These measurements describe local head geometry, not historical optimization trajectories or real LOCO localization. Existing trace and stream-integrity gaps remain unresolved; no missing traces are reconstructed. No continuing schedule is needed because all arms are frozen.",
+      "hypothesis_id": "dense_zero_target_dice_head_opposition_v1",
+      "priority_rationale": "Directly investigates the existing loss after numerical, threshold-only and empty-selection explanations failed. Analytical head gradients are inexpensive and executable under frozen inference, and distinguish a concrete future objective ablation from retiring Dice without another proxy-ranking screen.",
+      "research_question": "Does Dice supervision on target-zero good controls oppose the final-head direction favored by positive-example BCE strongly enough to motivate removing Dice from good controls?"
+    }
+  ],
+  "provenance": "Read-only projection of recorded campaign events and configurations; no model execution or invented agent responses. Not a complete executable plan.",
+  "runs": [
+    {
+      "category": "juice_bottle",
+      "config": {
+        "campaign_id": "3b031678-d856-4e63-991b-cadbb3f7491b",
+        "execution_kind": "frozen",
+        "frozen_baseline": {
+          "checkpoint_sha256": "b3c86d1b414827b6a06c0a255b6b4a68122eeb8466b69082038f5f4c39bf3aef"
+        },
+        "plan_id": "dense_common_budget_streamed_completion_v3_plan"
+      },
+      "finished_at": 1792796305.738698,
+      "run_id": "59ff966a-af69-5a32-a60f-e777fb6414e7",
+      "started_at": 1792795846.3165445
+    },
+    {
+      "category": "juice_bottle",
+      "config": {
+        "campaign_id": "3b031678-d856-4e63-991b-cadbb3f7491b",
+        "execution_kind": "frozen",
+        "frozen_baseline": {
+          "checkpoint_sha256": "84060ecb85cf11145ad079c7fffd512ad6d7b3251e5c61eeb12a850603ad1907"
+        },
+        "plan_id": "dense_common_budget_streamed_completion_v3_plan"
+      },
+      "finished_at": 1792796773.2064798,
+      "run_id": "9295f2f5-70f4-5563-9b0c-29d0634f1c74",
+      "started_at": 1792796309.756789
+    },
+    {
+      "category": "juice_bottle",
+      "config": {
+        "campaign_id": "3b031678-d856-4e63-991b-cadbb3f7491b",
+        "execution_kind": "frozen",
+        "frozen_baseline": {
+          "checkpoint_sha256": "f2ce2db4ac92785ed51dd4efaac72e257739a898cabb2a5349899e7edef640bc"
+        },
+        "plan_id": "dense_common_budget_streamed_completion_v3_plan"
+      },
+      "finished_at": 1792797280.3945138,
+      "run_id": "a12ea65a-1973-581b-b18a-483b242141fa",
+      "started_at": 1792796791.382417
+    },
+    {
+      "category": "juice_bottle",
+      "config": {
+        "campaign_id": "3b031678-d856-4e63-991b-cadbb3f7491b",
+        "execution_kind": "frozen",
+        "frozen_baseline": {
+          "checkpoint_sha256": "f2ce2db4ac92785ed51dd4efaac72e257739a898cabb2a5349899e7edef640bc"
+        },
+        "plan_id": "dense_dice_spatial_distance_selectivity_v1_plan"
+      },
+      "finished_at": 1792798286.7431867,
+      "run_id": "da78b8f5-5e37-5f0b-97ea-513149f7f708",
+      "started_at": 1792797796.7322278
+    },
+    {
+      "category": "juice_bottle",
+      "config": {
+        "campaign_id": "3b031678-d856-4e63-991b-cadbb3f7491b",
+        "execution_kind": "frozen",
+        "frozen_baseline": {
+          "checkpoint_sha256": "b3c86d1b414827b6a06c0a255b6b4a68122eeb8466b69082038f5f4c39bf3aef"
+        },
+        "plan_id": "dense_dice_spatial_distance_selectivity_v1_plan"
+      },
+      "finished_at": 1792799040.6880584,
+      "run_id": "4d1725d4-3a6f-5d3a-a014-53284ea3c6da",
+      "started_at": 1792798579.2068493
+    },
+    {
+      "category": "juice_bottle",
+      "config": {
+        "campaign_id": "3b031678-d856-4e63-991b-cadbb3f7491b",
+        "execution_kind": "frozen",
+        "frozen_baseline": {
+          "checkpoint_sha256": "84060ecb85cf11145ad079c7fffd512ad6d7b3251e5c61eeb12a850603ad1907"
+        },
+        "plan_id": "dense_dice_spatial_distance_selectivity_v1_plan"
+      },
+      "finished_at": 1792799793.0360074,
+      "run_id": "206c1fd6-31f6-5269-b7c6-e320711fc6cb",
+      "started_at": 1792799331.047349
+    },
+    {
+      "category": "juice_bottle",
+      "config": {
+        "campaign_id": "3b031678-d856-4e63-991b-cadbb3f7491b",
+        "execution_kind": "frozen",
+        "frozen_baseline": {
+          "checkpoint_sha256": "f2ce2db4ac92785ed51dd4efaac72e257739a898cabb2a5349899e7edef640bc"
+        },
+        "plan_id": "dense_dice_empty_selection_explanation_v1_plan"
+      },
+      "finished_at": 1792800553.8681233,
+      "run_id": "602a9177-6492-5258-b7ee-f4b68ff99d66",
+      "started_at": 1792800538.1791394
+    },
+    {
+      "category": "juice_bottle",
+      "config": {
+        "campaign_id": "3b031678-d856-4e63-991b-cadbb3f7491b",
+        "execution_kind": "frozen",
+        "frozen_baseline": {
+          "checkpoint_sha256": "b3c86d1b414827b6a06c0a255b6b4a68122eeb8466b69082038f5f4c39bf3aef"
+        },
+        "plan_id": "dense_dice_empty_selection_explanation_v1_plan"
+      },
+      "finished_at": 1792800573.124945,
+      "run_id": "6e6e3a68-2ee1-5b08-841d-91f8fd522050",
+      "started_at": 1792800557.9421213
+    },
+    {
+      "category": "juice_bottle",
+      "config": {
+        "campaign_id": "3b031678-d856-4e63-991b-cadbb3f7491b",
+        "execution_kind": "frozen",
+        "frozen_baseline": {
+          "checkpoint_sha256": "84060ecb85cf11145ad079c7fffd512ad6d7b3251e5c61eeb12a850603ad1907"
+        },
+        "plan_id": "dense_dice_empty_selection_explanation_v1_plan"
+      },
+      "finished_at": 1792800603.2634432,
+      "run_id": "2a4a222f-3ae7-585a-92e8-8c53fbaa55ef",
+      "started_at": 1792800588.0862248
+    },
+    {
+      "category": "juice_bottle",
+      "config": {
+        "campaign_id": "3b031678-d856-4e63-991b-cadbb3f7491b",
+        "execution_kind": "frozen",
+        "frozen_baseline": {
+          "checkpoint_sha256": "f2ce2db4ac92785ed51dd4efaac72e257739a898cabb2a5349899e7edef640bc"
+        },
+        "plan_id": "dense_dice_joint_population_completion_v2_plan"
+      },
+      "finished_at": 1792801266.226741,
+      "run_id": "f88568f6-3bd6-540e-bc1a-c4c4ee57139e",
+      "started_at": 1792801024.6359782
+    },
+    {
+      "category": "juice_bottle",
+      "config": {
+        "campaign_id": "3b031678-d856-4e63-991b-cadbb3f7491b",
+        "execution_kind": "frozen",
+        "frozen_baseline": {
+          "checkpoint_sha256": "b3c86d1b414827b6a06c0a255b6b4a68122eeb8466b69082038f5f4c39bf3aef"
+        },
+        "plan_id": "dense_dice_joint_population_completion_v2_plan"
+      },
+      "finished_at": 1792801497.8586168,
+      "run_id": "b23b77cf-345a-5a26-9bbb-9a9750156fcd",
+      "started_at": 1792801270.350477
+    },
+    {
+      "category": "juice_bottle",
+      "config": {
+        "campaign_id": "3b031678-d856-4e63-991b-cadbb3f7491b",
+        "execution_kind": "frozen",
+        "frozen_baseline": {
+          "checkpoint_sha256": "84060ecb85cf11145ad079c7fffd512ad6d7b3251e5c61eeb12a850603ad1907"
+        },
+        "plan_id": "dense_dice_joint_population_completion_v2_plan"
+      },
+      "finished_at": 1792801729.4985094,
+      "run_id": "0baf0988-ec33-5520-9cf3-cb6fdd432a64",
+      "started_at": 1792801501.987385
+    },
+    {
+      "category": "juice_bottle",
+      "config": {
+        "campaign_id": "3b031678-d856-4e63-991b-cadbb3f7491b",
+        "execution_kind": "frozen",
+        "frozen_baseline": {
+          "checkpoint_sha256": "f2ce2db4ac92785ed51dd4efaac72e257739a898cabb2a5349899e7edef640bc"
+        },
+        "plan_id": "dense_sigmoid_rounding_dice_gap_v1_plan"
+      },
+      "finished_at": 1792802216.1946986,
+      "run_id": "db1c0421-f8ed-5dc7-ac4d-61a701f40f01",
+      "started_at": 1792802200.0140996
+    },
+    {
+      "category": "juice_bottle",
+      "config": {
+        "campaign_id": "3b031678-d856-4e63-991b-cadbb3f7491b",
+        "execution_kind": "frozen",
+        "frozen_baseline": {
+          "checkpoint_sha256": "b3c86d1b414827b6a06c0a255b6b4a68122eeb8466b69082038f5f4c39bf3aef"
+        },
+        "plan_id": "dense_sigmoid_rounding_dice_gap_v1_plan"
+      },
+      "finished_at": 1792802255.5399394,
+      "run_id": "71688a27-f4fc-5dfb-a434-da2c4b6984d5",
+      "started_at": 1792802239.8574233
+    },
+    {
+      "category": "juice_bottle",
+      "config": {
+        "campaign_id": "3b031678-d856-4e63-991b-cadbb3f7491b",
+        "execution_kind": "frozen",
+        "frozen_baseline": {
+          "checkpoint_sha256": "84060ecb85cf11145ad079c7fffd512ad6d7b3251e5c61eeb12a850603ad1907"
+        },
+        "plan_id": "dense_sigmoid_rounding_dice_gap_v1_plan"
+      },
+      "finished_at": 1792802275.2335243,
+      "run_id": "ad0c447d-5b0e-5673-93e1-2bf2be72508c",
+      "started_at": 1792802259.61583
+    }
+  ]
+}

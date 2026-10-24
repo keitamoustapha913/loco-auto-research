@@ -60,6 +60,11 @@ def _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=None,
         initialize(store,repo_root)
         recover_comparisons(store,repo_root)
         memory=scientific_memory(store)
+        if 'research_decisions' not in memory:
+            # Older memory producers/snapshots remain usable; derive the new
+            # read-only index rather than dropping accumulated evidence.
+            from orchestrator.model_registry import research_decisions
+            memory=dict(memory,research_decisions=research_decisions(store))
         folder=store.path.parent/'research_evidence'/'cumulative'/canonical(memory)
         if folder.parent.is_symlink() or folder.is_symlink():raise PermissionError('unsafe cumulative context')
         folder.mkdir(parents=True,exist_ok=True,mode=0o700)
@@ -78,6 +83,21 @@ def _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=None,
                    'prior ablations and confirmation needs before choosing research. You choose methods freely. '
                    'An exploratory record score is not a confirmed improvement. Current retained heads: '+
                    json.dumps([{k:c.get(k) for k in ('cohort_id','research_state','research_incumbent','state','champion')} for c in memory['cohorts']]))
+        if role in {'researcher','critic'}:
+            from orchestrator.model_registry import DECISION_GUIDANCE
+            context=memory['research_decisions']
+            cid=campaign[1] if campaign else None
+            dataset=json.loads(campaign[0].get(cid)['config_json'])['campaign']['dataset'] if campaign else None
+            # New campaigns must see prior diagnostic branches too, not an empty
+            # current-campaign window that effectively resets scientific knowledge.
+            series=[g for g in context['checkpoint_series'] if not dataset or g['dataset'] in (None,dataset)]
+            prompt += ('\nSCIENTIFIC DECISION CHECK: '+DECISION_GUIDANCE+
+                '\nWhole-history tested questions, negative findings and outcome-to-decision reasoning are in '
+                '/workspace/evidence/cumulative/evidence.json at research_decisions. '
+                'Recorded campaign activity and repeated-checkpoint investigations (costs are lower bounds): '+
+                json.dumps({'campaign_activity':context['campaign_activity'].get(cid,{}),'checkpoint_series':series}))
+        else:
+            prompt += '\nResearch-direction advice is for the planner. Implement the exact approved scientific plan; do not change its arms, seeds, controls or schedule.'
         kwargs['reference_files']=files
         if role=='researcher':
             from orchestrator.planning_contract import baseline_capability
@@ -353,6 +373,8 @@ def add_research_proposals(store, prompt, count=3, campaign=None, personal_mode=
         'sampling_protocol/sampling_seed controls independent of model-initialization RNG; match optimizer, preprocessing '
         'and architecture except the stated intervention. Equal elapsed training time does not match exposure/update counts; '
         'record and interpret both. Unmatched frozen models are descriptive, not causal method comparisons. ')
+    from orchestrator.model_registry import DECISION_GUIDANCE
+    instruction += '\nDecision-driven selection, using existing fields rather than a new contract: '+DECISION_GUIDANCE
     instruction += (' Every proposal requires experiment_plan matching the controller-generated structured-output schema (the on-disk v1 schema is retained only for legacy compatibility). '
                     'Declare every arm, seed, complete training settings, size, batch_size, a continuing target-aware schedule, '
                     'prediction settings, required '

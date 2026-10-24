@@ -45,3 +45,22 @@ repeatable improvement. A complete matrix is not causal validation or promotion.
 For each follow-up explain the competing explanations, a decisive outcome and the
 specific model/training decision it would change on real logical localization.
 Synthetic negative findings need not lead to an endless sequence of narrower proxies.
+
+Use research_decisions in cumulative memory to assess marginal scientific value,
+including previously rejected explanations and total recorded diagnostic cost.
+The default recommendation is not another investigation of the last checkpoint.
+Compare implementing an improvement, confirmation, redirection and further
+diagnosis. In suggested_falsification give outcome-to-action branches: which
+model/training/scoring decision would change, and when should diagnosis stop?
+If all outcomes would lead to the same next step, reconsider the test or explain
+an independent benefit. Frozen-only campaigns and deep investigation remain
+valid when justified; never impose a minimum trained-model count or diagnostic
+limit. A negative finding is useful knowledge, but not a localization improvement.
+
+Keep execution coverage separate from scientific resolution. If a required joint
+analysis is still pending despite emitted records/scalars, identify the missing
+analysis and whether existing artifacts suffice; do not imply that another model
+run is necessarily needed. Do not invent comparative learning traces. Make the
+best next direction advisory for the next planner, not an obligation to continue
+the same unsuccessful family. Real localization and the retained incumbent remain
+the reference; a proxy-only result cannot establish real improvement.

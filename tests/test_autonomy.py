@@ -208,6 +208,9 @@ def test_next_hypothesis_generation_uses_measured_critique(tmp_path, monkeypatch
         autonomy.run_cycle(store, campaigns, cid, tmp_path)
     assert '0.42' in prompts[0]
     assert 'shortcut risk' in prompts[0]
+    assert 'context, not a mandatory research direction' in prompts[0]
+    assert 'No minimum training count or diagnostic quota' in prompts[0]
+    assert 'change' in prompts[0] and 'developing a model' in prompts[0]
     assert campaigns.get(cid)['current_hypothesis'] == 'new_h'
 
 

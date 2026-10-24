@@ -353,6 +353,22 @@ def investigation_observations(store, row, feedback):
             if record:observations.append(record)
         result['artifacts'][path.name]={'scope':'authorized normal/synthetic development only; not official scores',
             'recorded_count':len(cases),'truncated':len(cases)>2000,'per_image_measurements':observations}
+        # Nested records used to disappear from the agent's evidence view. Show
+        # what is already saved without mounting arbitrary strings, IDs or maps;
+        # availability does not certify that the cross-arm analysis was done.
+        nested=value.get('evidence')
+        if isinstance(nested,dict):
+            inventory={}
+            for key,part in nested.items():
+                if not isinstance(key,str) or not re.fullmatch(r'[A-Za-z0-9_]{1,100}',key):continue
+                if isinstance(part,list):
+                    keys=part[0].keys() if part and isinstance(part[0],dict) else []
+                    inventory[key]={'recorded_count':len(part),'record_fields':[k for k in keys
+                        if isinstance(k,str) and re.fullmatch(r'[A-Za-z0-9_]{1,100}',k)]}
+                elif key.endswith('status') and isinstance(part,str):
+                    inventory[key]={'declared_status':part.split()[0] if part.split() and part.split()[0] in
+                        {'COMPLETE','INCOMPLETE','PENDING'} else 'RECORDED_TEXT','verified_analysis':False}
+            result['artifacts'][path.name]['saved_evidence_inventory']=inventory
     if feedback:
         import numpy as np
         output=Path(feedback['artifact_dir']);cases=read(output/'case_scores.json',2**22)
@@ -849,6 +865,12 @@ def review_plan(store, campaigns, campaign_id, plan, result):
               'Exploratory screening does not establish causality. Include exact comparison_status and plan_id. '
               'Separate single-seed results, paired differences and uncertainty; never invent missing diagnostics. '
               + json.dumps({'plan':plan,'completion':result,'runs':rows}))
+    from orchestrator.model_registry import DECISION_GUIDANCE
+    prompt += ('\nDecision-driven critique: '+DECISION_GUIDANCE+
+        ' Use suggested_falsification to state outcome-to-action branches and when to stop diagnosis, '
+        'not automatically another diagnostic. Explain whether the finding now supports implementing a change, '
+        'confirmation, redirection, or a genuinely decision-changing further investigation. '
+        'Report unresolved required analysis separately even when scalar execution coverage is complete.')
     def request(feedback, attempt):
         return controller._budgeted_invoke_once(store, 'critic', controller.REPO, REPO/'schemas/plan_review.schema.json',
             prompt+feedback, campaign=(campaigns,campaign_id), timeout=180, personal_mode=True)
@@ -874,6 +896,7 @@ def review_plan(store, campaigns, campaign_id, plan, result):
     campaigns.event(campaign_id,'NEXT_DECISION',action=review['recommended_next_action'],
                     evidence_plan=plan['plan_id'],evidence_run=rows[-1]['run_id'] if rows else '',
                     reason=review['objective_measured_results'],comparison_status=result['status'],
+                    proposed_next_investigation=review.get('suggested_falsification',''),advisory=True,
                     next_hypothesis=f"evidence-followup:{plan['hypothesis_id']}:{review['recommended_next_action']}")
     campaigns.update(campaign_id,next_hypothesis=f"evidence-followup:{plan['hypothesis_id']}:{review['recommended_next_action']}")
     from orchestrator.campaign_config import time_based

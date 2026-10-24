@@ -513,6 +513,101 @@ def localization_history(store, models=None):
     return timeline
 
 
+DECISION_GUIDANCE = (
+    'Choose among investigating existing evidence, developing a model, confirming an improvement, '
+    'or changing direction. The last Critic suggestion is advisory, not a mandatory next experiment. '
+    'Before another diagnostic, compare its marginal value and measured execution cost with those alternatives. '
+    'Rank by total elapsed research cost, not training minutes or call counts: zero new training is not zero '
+    'execution time. Include frozen inference, preparation, evaluation and analysis in feasibility. '
+    'In existing proposal fields explain the question, motivating observations, competing explanations, '
+    'support AND rejection outcomes, and the different model/training/scoring or continue/revise/abandon '
+    'decision each plausible outcome would cause. If every outcome leads to the same next action, '
+    'reconsider the diagnostic unless an explicit independent scientific benefit justifies it. '
+    'Connect that decision to real logical pixel localization, not merely a better synthetic score. '
+    'Repeated inconclusive or negative findings on the same checkpoints require new justification, '
+    'not another name. Distinguish missing exported analysis from a question requiring more inference. '
+    'Reuse existing records before rerunning a model. '
+    'If required analysis cannot be performed through approved interfaces, record that gap and choose a '
+    'feasible alternative rather than repeatedly requesting the same unavailable analysis. '
+    'A useful finding should prompt consideration of an implementable improvement or a different direction; '
+    'no architecture family is preferred. '
+    'Deep diagnostics and diagnostic-only campaigns remain permitted when decision-changing evidence '
+    'justifies the time. There is no diagnostic quota, minimum training count, or automatic preference '
+    'for training. Literature is optional. Preserve matched controls for causal claims, the elapsed '
+    'training-loop target, and 80% real-localization research priority.'
+)
+
+
+def research_decisions(store):
+    """Read-only, whole-history decision/cost index; no scientific value score.
+
+    Exact frozen checkpoint identities expose repetition across renamed studies.
+    Counts describe activity, never prohibit a route or establish scientific merit.
+    """
+    with store.connect() as con:
+        tables={r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        proposals={r['hypothesis_id']:json.loads(r['proposal_json']) for r in con.execute('SELECT hypothesis_id,proposal_json FROM hypotheses')}
+        runs=[dict(r) for r in con.execute('SELECT run_id,category,config_json,metrics_json,started_at,finished_at FROM runs')]
+        events=list(con.execute("SELECT campaign_id,time,kind,payload_json FROM campaign_events WHERE kind IN ('EXPERIMENT_PLAN_REGISTERED','EXPERIMENT_PLAN_RESULT','CRITIQUE') ORDER BY id")) if 'campaign_events' in tables else []
+    studies={}
+    for row in events:
+        payload=json.loads(row['payload_json']);kind=row['kind']
+        data=payload.get('plan',{}) if kind=='EXPERIMENT_PLAN_REGISTERED' else payload.get('result',{}) if kind=='EXPERIMENT_PLAN_RESULT' else payload.get('review',{})
+        key=(row['campaign_id'],data.get('plan_id',payload.get('plan_id')))
+        if not key[1]:continue
+        study=studies.setdefault(key,{'campaign_id':key[0],'plan_id':key[1],'registered_at':row['time']})
+        study[kind]=data
+    by_plan={};categories={}
+    for row in runs:
+        config=json.loads(row['config_json'])
+        by_plan.setdefault((config.get('campaign_id'),config.get('plan_id')),[]).append((row,config))
+        categories.setdefault(config.get('campaign_id'),set()).add(row['category'])
+    history=[];series={};campaigns={}
+    for (cid,pid),study in studies.items():
+        plan=study.get('EXPERIMENT_PLAN_REGISTERED',{});result=study.get('EXPERIMENT_PLAN_RESULT',{});review=study.get('CRITIQUE',{})
+        hid=plan.get('hypothesis_id',result.get('hypothesis_id',''));proposal=proposals.get(hid,{})
+        records=by_plan.get((cid,pid),[]);matched=[r for r,_ in records]
+        kinds=[cfg.get('execution_kind') for _,cfg in records]
+        hashes={cfg.get('frozen_baseline',{}).get('checkpoint_sha256') for _,cfg in records}
+        hashes.discard(None)
+        if not hashes and plan.get('arms') and all(a.get('execution')=='frozen' for a in plan['arms']):
+            used={ref for arm in plan['arms'] for ref in arm.get('baseline_by_seed',{}).values()}
+            hashes={b['checkpoint_sha256'] for b in plan.get('baselines',[]) if b.get('baseline_id') in used and b.get('checkpoint_sha256')}
+        frozen=bool(plan.get('arms')) and all(a.get('execution')=='frozen' for a in plan['arms'])
+        wall=sum(r['finished_at']-r['started_at'] for r in matched if r['finished_at'] is not None and r['started_at'] is not None)
+        item={'campaign_id':cid,'plan_id':pid,'hypothesis_id':hid,
+              'question':proposal.get('research_question',hid),'claim':proposal.get('claim',''),
+              'execution_status':result.get('status','UNFINISHED'),'hypothesis_outcome':review.get('hypothesis_outcome','NOT_REVIEWED'),
+              'finding':review.get('objective_measured_results',''),'remaining_concerns':review.get('critic_concerns',[]),
+              'suggested_next_investigation':review.get('suggested_falsification',''),
+              'frozen_only':frozen,'checkpoint_hashes':sorted(hashes),'recorded_job_seconds':wall,
+              'new_training_runs':kinds.count('train'),'frozen_runs':kinds.count('frozen'),
+              'decision_rationale':proposal.get('priority_rationale',''),
+              'outcome_to_decision_proposal':proposal.get('evaluation_plan','')}
+        history.append(item)
+        stats=campaigns.setdefault(cid,{'new_training_runs':0,'frozen_runs':0,'recorded_job_seconds':0.,'reviewed_questions':0})
+        for name in ('new_training_runs','frozen_runs','recorded_job_seconds'):stats[name]+=item[name]
+        stats['reviewed_questions']+=bool(review)
+        if frozen and hashes:
+            known=categories.get(cid,set())
+            category=matched[0]['category'] if matched else next(iter(known)) if len(known)==1 else None
+            group=series.setdefault((category,tuple(sorted(hashes))),{'dataset':category,'checkpoint_hashes':sorted(hashes),
+                'studies':[],'recorded_job_seconds':0.,'reviewed_outcomes':[]})
+            group['studies'].append({'campaign_id':cid,'plan_id':pid,'hypothesis_id':hid,
+                                    'question':item['question'],'outcome':item['hypothesis_outcome']})
+            group['recorded_job_seconds']+=wall
+            if review:group['reviewed_outcomes'].append(item['hypothesis_outcome'])
+    for group in series.values():
+        group['reconsideration']=('The same frozen checkpoints already have reviewed findings. Compare the marginal value '
+            'of another diagnostic with developing an improvement, confirmation, or changing direction; justify what '
+            'new outcome would change a decision. This is a reconsideration prompt, not a diagnostic limit.') if len(group['studies'])>1 and group['reviewed_outcomes'] else ''
+    return {'investigated_questions':history,'checkpoint_series':list(series.values()),'campaign_activity':campaigns,
+            'interpretation':'Recorded job durations exclude unrecorded preparation, agent and real-evaluation costs. '
+                             'Run counts include recorded attempts, not a count of successfully validated trained models. '
+                             'Execution completion, hypothesis resolution and confirmed improvement are different. '
+                             'Repetition is indexed by exact checkpoints, not architecture names or diagnostic quotas.'}
+
+
 def scientific_memory(store):
     """Whole-history compact index plus retained provenance, never anomaly data."""
     result=progress(store)
@@ -536,6 +631,7 @@ def scientific_memory(store):
                  'paired_image_intervals') if k in payload}}
         history[identity]['run_ids'].append(row['run_id'])
     result['evidence_history']=list(history.values())
+    result['research_decisions']=research_decisions(store)
     for group in result['cohorts']:
         group['model_index']=[{k:m[k] for k in ('retention_id','run_id','candidate_id','hypothesis_id','reference','metrics')}
                               for m in group.pop('models')]
