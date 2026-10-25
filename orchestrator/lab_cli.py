@@ -466,7 +466,7 @@ def research_summary(campaigns, row, process, report=False):
             ('plan_id','status','expected_jobs','recorded_jobs','problems')}
     if report:
         limits = config['limits']
-        result['limits'] = ({k:limits[k] for k in ('research_hours','training_minutes_per_experiment')}
+        result['limits'] = ({k:limits.get(k,30) for k in ('research_hours','training_minutes_per_experiment','time_minutes_per_research_agents_calls')}
                             if time_based(config) else limits)
         if time_based(config): result['technical_accounting']['limits'] = limits
         result['runs'] = [{**{k: r[k] for k in ('run_id', 'hypothesis_id', 'candidate_id', 'status',

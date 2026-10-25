@@ -235,6 +235,9 @@ def test_v4_confirmation_demands_matched_controls_but_exploration_remains_free()
     assert any(e['code']=='CONFIRMATION_PREREQUISITES' for e in report['errors'])
     p['training'].update(sampling_protocol='independent_normal_rng_v1',sampling_seed=73)
     p['controlled_variables']=list(p['training'])
+    p['confirmation_requirements']={'normal_images':47,'max_additional_false_positives':1,
+        'paired_controls':['initial_state','optimizer','input:0'],
+        'uncertainty':'Paired training seeds and source images; marginal normal counts; repeated development selection.'}
     assert inspect_plan(p)['valid']
     assert inspect_plan(p)['scientific_eligibility']['promotion_eligible']  # ceiling, not an actual promotion
 

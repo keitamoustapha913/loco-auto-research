@@ -312,7 +312,7 @@ def test_personal_implementer_receives_exact_workspace_and_real_interface(tmp_pa
             output['path'].write_text('{}')
             return SimpleNamespace(returncode=0,stderr='')
         monkeypatch.setattr(codex_sandbox,'command',cmd)
-        monkeypatch.setattr(codex_runner.subprocess,'run',run)
+        monkeypatch.setattr(codex_runner,'run_cancellable',run)
         codex_runner.invoke('implementer',repo,schema,'offline contract',worktree=tree,personal_mode=True)
         assert f'/workspace/candidates/{tree.name}/model.py' in captured['task']
         assert 'No separate trusted-runner command tool exists' in captured['task']

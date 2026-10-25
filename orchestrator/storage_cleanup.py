@@ -232,7 +232,9 @@ def cleanup(store, runtime, *, dry_run=False, max_bytes=PASS_BYTES, max_seconds=
     controller=runtime/'controller'
     if controller.is_symlink() or (runtime/'jobs').is_symlink():raise ValueError('unsafe linked storage roots')
     controller.mkdir(exist_ok=True)
-    report={'reclaimed_bytes':0,'actions':0,'errors':[],'busy':False}
+    from orchestrator.agent_diagnostics import prune
+    diagnostic_reclaimed=prune(controller/'agent_invocations')
+    report={'reclaimed_bytes':diagnostic_reclaimed,'actions':0,'errors':[],'busy':False}
     with ExitStack() as stack:
         try:
             for name in ('storage_cleanup.lock','gpu.lock','feedback.lock','tracking.lock'):

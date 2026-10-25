@@ -7,6 +7,7 @@ campaign:
 limits:
   research_hours: 4
   training_minutes_per_experiment: 15
+  time_minutes_per_research_agents_calls: 30
 research:
   synthetic_diagnostics: false
   real_development_feedback: true

@@ -88,7 +88,7 @@ def command(repo_root: Path, role: str, schema: Path, output: Path, task: str,
     elif role == "implementer":
         raise ValueError("implementer requires assigned candidate directory")
     args += ["--chdir", "/workspace", "--", "/opt/node/bin/node",
-             "/opt/node/lib/node_modules/@openai/codex/bin/codex.js", "exec",
+             "/opt/node/lib/node_modules/@openai/codex/bin/codex.js", "exec", "--json",
              "--skip-git-repo-check", "--cd", "/workspace", "--sandbox",
              "workspace-write" if role == "implementer" else "read-only",
              "--output-schema", "/workspace/schema.json",

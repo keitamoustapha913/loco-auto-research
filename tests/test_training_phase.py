@@ -174,7 +174,7 @@ def test_phase_contract_through_full_cpu_runner_in_bubblewrap(tmp_path,target):
     from scripts.demo_run import make_fixture
     repo=Path(__file__).parents[1];copy=tmp_path/'repo'
     folder=copy/'candidates/phase_fixture';folder.mkdir(parents=True)
-    for package,names in [('benchmark',BENCHMARK_FILES),('scripts',('__init__.py','run_candidate.py','training_phase.py','candidate_smoke.py','stage7_eval.py','stage7_texture_eval.py','stage8_eval.py','feedback_infer.py'))]:
+    for package,names in [('benchmark',BENCHMARK_FILES),('scripts',('__init__.py','run_candidate.py','training_phase.py','paired_controls.py','candidate_smoke.py','stage7_eval.py','stage7_texture_eval.py','stage8_eval.py','feedback_infer.py'))]:
         (copy/package).mkdir()
         for name in names:shutil.copyfile(repo/package/name,copy/package/name)
     shutil.copyfile(repo/'pyproject.toml',copy/'pyproject.toml')

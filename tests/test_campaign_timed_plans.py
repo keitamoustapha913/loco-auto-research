@@ -175,7 +175,7 @@ def test_sandbox_planner_reads_the_actual_generated_contract(tmp_path,monkeypatc
         response['path'].write_text(json.dumps(agent_plan(timed_plan())))
         return SimpleNamespace(returncode=0,stderr='')
     monkeypatch.setattr(codex_sandbox,'command',command)
-    monkeypatch.setattr(codex_runner.subprocess,'run',run)
+    monkeypatch.setattr(codex_runner,'run_cancellable',run)
     result=codex_runner.invoke('researcher',REPO,path,'offline schema transport fixture',personal_mode=True)
     assert result['response']['schema_version']=='2.0'
 

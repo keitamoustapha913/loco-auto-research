@@ -62,6 +62,7 @@ class TrainingClock:
                         audit_io_seconds=0.,setup_sync_seconds=0.,learning_sync_seconds=0.)
         self.initial_preparation_seconds=0.;self.finalization_seconds=0.
         self.loop_mode=loop;self.loop_started=None;self.loop_finished=None;self.last_boundary=None
+        self.paired_controls={}
         self.last_iteration_seconds=0.
         self.publish()
 
@@ -82,6 +83,7 @@ class TrainingClock:
               'overshoot_seconds':max(0,self.duration()-self.budget) if self.target else 0,
               'last_iteration_seconds':self.last_iteration_seconds,
               'completed_steps':self.steps,'phase_started_monotonic':self.phase_started}
+        if self.paired_controls:data['paired_controls']=self.paired_controls
         data['execution_profile']={'version':'training-throughput-v1','costs':dict(self.costs),
             'initial_preparation_seconds':self.initial_preparation_seconds,
             'finalization_seconds':self.finalization_seconds,'observed_wall_seconds':started-self.created,
@@ -131,6 +133,8 @@ class TrainingClock:
 
 def run_training_phases(module, config, manifest, output, *, budget=None, preflight_steps=None):
     output=Path(output);audit=output.parent/'training_timing.json'
+    from scripts.paired_controls import PairedControls
+    paired=None
     provider=getattr(module,'training_steps',None)
     if not callable(provider):
         audit.write_text(json.dumps({'protocol':VERSION,'status':'UNVERIFIABLE','verified':False,
@@ -193,6 +197,7 @@ def run_training_phases(module, config, manifest, output, *, budget=None, prefli
         if any(state_fingerprint(model)!=value for model,value in expected):
             raise TrainingTimeUnverifiable('model parameters/buffers changed during unmeasured preparation or checkpoint saving')
     try:
+        paired=PairedControls(config.get('paired_control_requirements',[]),output.parent)
         iterator=iter(provider(config,manifest,output))
         progress=None
         if target and not hasattr(iterator,'send'):raise TrainingTimeUnverifiable('target training requires a progress-aware generator')
@@ -217,6 +222,7 @@ def run_training_phases(module, config, manifest, output, *, budget=None, prefli
                 if target and clock.duration()<budget:
                     raise TrainingTargetIncomplete(f'training ended prematurely: {clock.duration():.6f} of required {budget:.6f} '+('training-loop elapsed seconds' if loop else 'actual learning seconds'))
                 metadata=stopped.value
+                clock.paired_controls=paired.finish()
                 clock.status='COMPLETED';clock.verified=True;clock.publish()
                 return metadata,clock.duration()
             preparation=time.perf_counter()-section;clock.costs['preparation_seconds']+=preparation
@@ -279,6 +285,7 @@ def run_training_phases(module, config, manifest, output, *, budget=None, prefli
                 if step.use_closure:step.optimizer.step(closure)
                 else:
                     closure();step.optimizer.step()
+            paired.step(step)
             clock.measure(update);clock.steps+=1
             boundary=time.perf_counter();clock.last_boundary=boundary
             clock.last_iteration_seconds=boundary-iteration_started
@@ -298,6 +305,7 @@ def run_training_phases(module, config, manifest, output, *, budget=None, prefli
         clock.verified=False;clock.publish()
         raise
     finally:
+        if paired is not None:paired.close()
         try:
             # Cleanup stays outside the timer but cannot perform uncharged learning.
             if iterator is not None and hasattr(iterator,'close'):iterator.close()

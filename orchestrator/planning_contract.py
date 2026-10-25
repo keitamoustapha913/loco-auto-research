@@ -13,6 +13,13 @@ from pathlib import Path
 
 MATCHED_SAMPLING_CONTROLS = ('sampling_protocol', 'sampling_seed')
 
+CONFIRMATION_REQUIREMENTS = {'type':['object','null'],'additionalProperties':False,
+    'properties':{'normal_images':{'type':'integer','minimum':1},
+        'max_additional_false_positives':{'type':'integer','minimum':0},
+        'paired_controls':{'type':'array','minItems':1,'uniqueItems':True,'items':{'type':'string'}},
+        'uncertainty':{'type':'string','minLength':20}},
+    'required':['normal_images','max_additional_false_positives','paired_controls','uncertainty']}
+
 
 class PlanningValidationError(ValueError):
     def __init__(self, issues):
@@ -82,7 +89,11 @@ def evidence_classification(plan, rows=None):
     if not plan['completion_criteria']:reasons.append('Predeclared acceptance/completion criteria are missing.')
     if plan.get('schema_version')=='4.0':
         reasons.extend(comparison_controls(plan)['confounds'])
+        if plan.get('confirmation') and not plan.get('confirmation_requirements'):
+            reasons.append('Future confirmation requires sample-aware normal counts, observed paired controls and scoped uncertainty.')
     if rows is not None:
+        if plan.get("schema_version")=="4.0" and plan.get("confirmation"):
+            reasons.extend(comparison_controls(plan,rows)["confounds"])
         for arm in plan['arms']:
             selected=[r for r in rows if json.loads(r['config_json']).get('plan_sha256')==digest(plan) and json.loads(r['config_json']).get('plan_arm')==arm['arm_id']]
             configs=[json.loads(r['config_json']) for r in selected]
@@ -129,11 +140,17 @@ def comparison_controls(plan, rows=()):
     # A sampling protocol and seed are executable candidate settings, not prose.
     stream_declared=set(MATCHED_SAMPLING_CONTROLS)<=declared
     if not stream_declared:confounds.append('Sampling protocol/independent sampling seed are not declared matched controls.')
+    verification={'status':'NOT_MEASURED','pairs':[]}
+    if rows and plan.get('schema_version')=='4.0':
+        from orchestrator.confirmation import verify_pairs
+        verification=verify_pairs(plan,rows)
+        if verification['status']!='VERIFIED':confounds.append('Actual paired training controls are not verified: '+verification['status'])
     return {'intended_differences':{a['arm_id']:a['difference'] for a in arms},
         'changed_training_settings':sorted(k for k in all_keys if any(c.get(k)!=settings[0].get(k) for c in settings[1:])),
         'actual_seeds_by_arm':{a['arm_id']:[training_seed(a,s) for s in plan['seeds']] for a in arms},
         'confounds':list(dict.fromkeys(confounds)), 'observed_training_counts':counts,
-        'sampling_stream_status':'DECLARED_NOT_INDEPENDENTLY_VERIFIED' if stream_declared else 'UNVERIFIED',
+        'sampling_stream_status':verification['status'] if rows else 'DECLARED_NOT_INDEPENDENTLY_VERIFIED' if stream_declared else 'UNVERIFIED',
+        'paired_control_verification':verification,
         'causal_claim_eligible':plan['kind']=='controlled_comparison' and not confounds,
         'reproducibility_status':'UNCONFIRMED',
         'interpretation':'Equal elapsed training time does not imply equal updates/exposures or identical sampled prefixes. '
@@ -158,6 +175,15 @@ def inspect_plan(plan, store=None, repo_root=None):
     except (CandidateValidationError,CandidateContractError) as exc:issues.append({'code':'PLAN_CONTRACT','message':str(exc)})
     capabilities={}
     if store is not None:
+        if plan.get('confirmation') and plan.get('confirmation_requirements'):
+            pinned=json.loads((REPO/'configs/development_feedback.json').read_text())['split_id']
+            with store.connect() as con:
+                observations=con.execute("SELECT payload_json FROM events WHERE kind='REAL_DEVELOPMENT_FEEDBACK' ORDER BY id DESC LIMIT 500").fetchall()
+            normal_counts={v.get('metrics',{}).get('dev_real/normal_images') for row in observations
+                for v in [json.loads(row[0])] if v.get('split_id')==pinned}
+            if plan['confirmation_requirements']['normal_images'] not in normal_counts:
+                issues.append({'code':'NORMAL_SAMPLE_COUNT','message':'Confirmation normal_images must match trusted feedback counts on the pinned development split.',
+                    'observed_counts':sorted(n for n in normal_counts if n is not None)})
         for ref in plan['baselines']:
             try:capabilities[ref['baseline_id']]=baseline_capability(store,ref,repo_root or REPO)
             except (ValueError,OSError,subprocess.SubprocessError) as exc:issues.append({'code':'BASELINE_INTEGRITY','baseline_id':ref['baseline_id'],'message':str(exc)})
@@ -212,6 +238,7 @@ def planning_instructions(capabilities=(), *, time_only=True):
         'required_nonnegative_training_key':None if time_only else 'expected_optimizer_updates',
         'required_training':('Each new model must run its genuine optimization loop for the complete elapsed operator target. Initialization and final saving are excluded; in-loop batch preparation, transfers, learning, integrity checks and bookkeeping count. Declare TRAINING_PROTOCOL=elapsed-training-loop-v1 and yield TrainingLoopStart(objective) after initialization/cache fill and before the first batch iteration. No fixed steps/epochs or expected final update/exposure counts. Declare a scientifically appropriate continuing schedule; progress-aware training_steps receives elapsed_seconds, target_seconds, target_reached, optimizer_updates and source_exposures. Finalize only on target_reached; never restart/reinitialize or pad with sleep/dummy work.' if time_only else 'Preserve the exact authorized legacy training steps, epochs, exposures and original timing restrictions.'),
         'confirmation':('Set confirmation=true only for a proposed confirmed promotion study. Preregister the exact real endpoint keys: dev_real/logical_au_spro_0_05_compatible, dev_real/logical_pixel_ap_pooled, dev_real/normal_image_fpr, dev_real/inference_e2e_ms_p95, dev_real/parameters, dev_real/peak_cpu_rss_mib, with at least three independent seeds and matched controls. Ordinary exploratory plans may set false.' if time_only else 'Legacy plans retain their original evidence and promotion classification; do not add new fields.'),
+        'confirmation_requirements':('For a future confirmation set normal_images to the actual good-image count, max_additional_false_positives to a predeclared integer count (one of 47 is 2.13%, not 2%), paired_controls to relevant actual observations: initial_state, optimizer, input:0 etc (indices of prepared TrainingStep.args). Select inputs encoding source/augmentation/mask streams that should match; exclude the intervened target/input and explain why. Matching seeds alone does not verify streams. State uncertainty separately for independent paired training seeds, grouped/paired source images, normal-binomial uncertainty and repeated development-set selection. Use null for exploratory work. This does not change historical criteria or assert population/generalization guarantees.'),
         'controlled_variables':'Names of real training keys, not sentences. Values must be declared, equal across arms and recorded in every frozen baseline.',
         'matched_training_controls_for_confirmation':['batch_size','size',*MATCHED_SAMPLING_CONTROLS] if time_only else list(MATCHED_TRAINING_CONTROLS),
         'diagnostic_measurements':'diagnostics[].required_metrics is authoritative. For source=diagnostic use diagnostic_id/metric; diagnostic/diagnostic_id/metric is a storage alias accepted only for the same declared metric. Never duplicate requests via aliases or invent metric names. Paired metric names must be declared.',
@@ -245,6 +272,9 @@ def constrain_output_schema(schema, capabilities=(), *, time_only=True, target_t
                 if target_training:
                     props['confirmation']={'type':'boolean'}
                     if 'confirmation' not in node['required']:node['required'].append('confirmation')
+                    if loop_training:
+                        props['confirmation_requirements']=copy.deepcopy(CONFIRMATION_REQUIREMENTS)
+                        if 'confirmation_requirements' not in node['required']:node['required'].append('confirmation_requirements')
                 props.pop('resource_budget',None)
                 node['required'] = [key for key in node.get('required',[]) if key!='resource_budget']
             pair=props['training'].get('items',{})

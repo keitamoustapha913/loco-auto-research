@@ -11,10 +11,16 @@ import tempfile
 import uuid
 import signal
 import time
+import selectors
+import traceback
 from jsonschema import validate, Draft202012Validator, SchemaError, ValidationError
 
 class AgentFailure(RuntimeError):
     pass
+
+
+class AgentTimedOut(AgentFailure):
+    """Recoverable invocation failure, distinct from scientific/candidate errors."""
 
 
 class InvalidAgentOutput(AgentFailure):
@@ -29,24 +35,77 @@ class ProviderSchemaError(AgentFailure):
     """Local schema defect: never retry it as an agent-output repair."""
 
 
-def run_cancellable(command, *, timeout, cancel=None, deadline=None, **kwargs):
+def run_cancellable(command, *, timeout, cancel=None, deadline=None, observation=None, **kwargs):
     """Poll cancellation and reap the whole owned process group on every exit."""
+    from orchestrator.agent_diagnostics import TAIL_BYTES
     task=kwargs.pop('input',None)
+    text_mode=kwargs.pop('text',False)
     kwargs.pop('capture_output',None)
-    end=min(time.time()+timeout,deadline if deadline is not None else float('inf'))
-    partial_out=partial_err=None
+    start=time.time(); end_mono=time.monotonic()+max(0,min(timeout,deadline-start if deadline is not None else timeout))
+    observed=observation if observation is not None else {}
+    output={'stdout':b'', 'stderr':b''}; totals={'stdout':0,'stderr':0}
+    task=task.encode() if isinstance(task,str) else task
     with subprocess.Popen(command,stdin=subprocess.PIPE if task is not None else subprocess.DEVNULL,
                           stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True,**kwargs) as process:
+        observed.update(pid=process.pid,last_observed_at=start,last_output_at=None,progress_events=[])
+        selector=selectors.DefaultSelector()
+        for stream,name in ((process.stdout,'stdout'),(process.stderr,'stderr')):
+            os.set_blocking(stream.fileno(),False);selector.register(stream,selectors.EVENT_READ,name)
+        pending=memoryview(task or b''); lines=b''
+        if task:
+            os.set_blocking(process.stdin.fileno(),False);selector.register(process.stdin,selectors.EVENT_WRITE,'stdin')
+        elif process.stdin:process.stdin.close()
+        last_sample=0.
         try:
-            while True:
-                if (cancel and cancel()) or time.time()>=end:
-                    raise subprocess.TimeoutExpired(command,timeout,output=partial_out,stderr=partial_err)
-                try:
-                    out,err=process.communicate(input=task,timeout=min(.25,max(.001,end-time.time())))
-                    return subprocess.CompletedProcess(command,process.returncode,out,err)
-                except subprocess.TimeoutExpired as exc:
-                    partial_out,partial_err=exc.output,exc.stderr
-                    task=None  # communicate retains pending stdin; never resend the prompt.
+            while selector.get_map() or process.poll() is None:
+                now=time.time()
+                if (cancel and cancel()) or time.monotonic()>=end_mono:
+                    observed['termination_reason']=('campaign_deadline' if deadline is not None and now>=deadline else
+                        'call_deadline' if time.monotonic()>=end_mono else 'cancelled')
+                    raise subprocess.TimeoutExpired(command,timeout,output=output['stdout'],stderr=output['stderr'])
+                if now-last_sample>=1:
+                    observed['last_observed_at']=now;last_sample=now
+                    try:
+                        import psutil
+                        p=psutil.Process(process.pid)
+                        children=p.children(recursive=True)
+                        cpu=sum(sum(proc.cpu_times()[:2]) for proc in [p]+children)
+                        previous=observed.get('process_sample',{}).get('cpu_seconds')
+                        if previous is not None and cpu!=previous:observed['last_process_counter_change_at']=now
+                        observed['process_sample']={'status':p.status(),'cpu_seconds':cpu,'children':len(children)}
+                    except (OSError,psutil.Error):pass
+                for key,_ in selector.select(min(.1,max(.001,end_mono-time.monotonic()))):
+                    name=key.data
+                    if name=='stdin':
+                        try:pending=pending[os.write(key.fd,pending[:65536]):]
+                        except BrokenPipeError:pending=memoryview(b'')
+                        if not pending:selector.unregister(key.fileobj);key.fileobj.close()
+                        continue
+                    chunk=os.read(key.fd,65536)
+                    if not chunk:selector.unregister(key.fileobj);continue
+                    totals[name]+=len(chunk);output[name]=(output[name]+chunk)[-TAIL_BYTES:]
+                    observed['last_output_at']=now
+                    if name=='stdout':
+                        lines+=chunk
+                        while b'\n' in lines:
+                            line,lines=lines.split(b'\n',1)
+                            try:
+                                event=json.loads(line)
+                                if isinstance(event,dict) and isinstance(event.get('type'),str):
+                                    observed['progress_events']=(observed['progress_events']+[{'at':now,'type':event['type'][:128]}])[-32:]
+                                    if event['type']=='turn.failed':
+                                        from orchestrator.agent_diagnostics import redact
+                                        observed['termination_reason']='structured_terminal_failure'
+                                        error=event.get('error',{})
+                                        if isinstance(error,dict) and error.get('code') in {'invalid_api_key','authentication_error'}:
+                                            raise AgentUnavailable('Codex reported nonrecoverable authentication failure')
+                                        raise AgentFailure('Codex turn failed: '+redact(json.dumps(event))[-1024:])
+                            except (ValueError,UnicodeDecodeError):pass
+                        lines=lines[-TAIL_BYTES:]
+            observed['termination_reason']='completed' if process.returncode==0 else 'process_error'
+            out,err=output['stdout'],output['stderr']
+            return subprocess.CompletedProcess(command,process.returncode,out.decode(errors='replace') if text_mode else out,
+                                               err.decode(errors='replace') if text_mode else err)
         finally:
             if process.poll() is None:
                 try:os.killpg(process.pid,signal.SIGTERM)
@@ -54,6 +113,14 @@ def run_cancellable(command, *, timeout, cancel=None, deadline=None, **kwargs):
                 try:process.wait(timeout=.5)
                 except subprocess.TimeoutExpired:
                     os.killpg(process.pid,signal.SIGKILL);process.wait()
+            # Descendants must not survive a completed wrapper or inherited pipes.
+            try:os.killpg(process.pid,signal.SIGTERM)
+            except ProcessLookupError:pass
+            try:os.killpg(process.pid,signal.SIGKILL)
+            except ProcessLookupError:pass
+            selector.close()
+            observed.update(exit_code=process.returncode,stdout=output['stdout'].decode(errors='replace'),
+                            stderr=output['stderr'].decode(errors='replace'),output_bytes=totals)
 
 
 def preflight_provider_schema(schema):
@@ -134,8 +201,8 @@ def provider_output_schema(schema):
     return preflight_provider_schema(result)
 
 
-def invoke(role: str, repo_root: Path, schema_path: Path, prompt: str, timeout=180, worktree=None,
-           personal_mode=False, reference_files=None, cancel=None, deadline=None):
+def invoke(role: str, repo_root: Path, schema_path: Path, prompt: str, timeout=1800, worktree=None,
+           personal_mode=False, reference_files=None, cancel=None, deadline=None, invocation_id=None, diagnostics_dir=None):
     if role not in {"scout", "researcher", "implementer", "critic"}:
         raise ValueError("unknown agent role")
     root = Path(repo_root).resolve(strict=True)
@@ -185,33 +252,55 @@ def invoke(role: str, repo_root: Path, schema_path: Path, prompt: str, timeout=1
                                       reference_files=reference_files, planning_reference=planning_reference)
             env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
         else:
-            command = ["codex", "exec", "--cd", str(cwd), "--sandbox", "workspace-write" if role == "implementer" else "read-only", "--output-schema", str(provider_schema_file), "--output-last-message", str(response_file), '-']
+            command = ["codex", "exec", "--json", "--cd", str(cwd), "--sandbox", "workspace-write" if role == "implementer" else "read-only", "--output-schema", str(provider_schema_file), "--output-last-message", str(response_file), '-']
             env = {k: v for k, v in os.environ.items() if k not in ("LOCO_SEALED_ROOT", "MLFLOW_TRACKING_TOKEN", "GITHUB_TOKEN")}
+        invocation_id=invocation_id or uuid.uuid4().hex
+        observation={'invocation_id':invocation_id,'role':role,'started_at':time.time(),
+                     'campaign_deadline':deadline,'timeout_seconds':min(timeout,1800),
+                     'prompt_sha256':hashlib.sha256(task.encode()).hexdigest()}
         try:
-            # Whole-history evidence can exceed Linux's per-argument size limit.
-            # The CLI's stdin prompt mode preserves the exact task and sandbox.
-            if cancel is not None or deadline is not None:
+            try:
+                # Whole-history evidence can exceed Linux's per-argument size limit.
+                # The CLI's stdin prompt mode preserves the exact task and sandbox.
                 done=run_cancellable(command,input=task,cwd=cwd,env=env,text=True,
-                                     timeout=timeout,cancel=cancel,deadline=deadline)
-            else:
-                done = subprocess.run(command, input=task, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout, check=False)
-        except FileNotFoundError as exc:
-            raise AgentUnavailable("Codex CLI not installed on server") from exc
-        except subprocess.TimeoutExpired as exc:
-            detail = (exc.stderr or b'')
-            if isinstance(detail, bytes):
-                detail = detail.decode(errors='replace')
-            raise AgentFailure(f"Codex invocation timed out: {detail[-600:]}") from exc
-        if done.returncode:
-            raise AgentFailure(f"Codex exited {done.returncode}: {done.stderr[-800:]}")
-        if not response_file.is_file():
-            raise InvalidAgentOutput('Codex completed without the required structured response file')
-        try:
-            output = json.loads(response_file.read_text())
-            validate(instance=output, schema=schema)
-        except (json.JSONDecodeError,ValidationError) as exc:
-            raise InvalidAgentOutput(f"Codex produced invalid schema-constrained JSON: {exc}\n"
-                                     f"Rejected response: {response_file.read_text()[-8000:]}") from exc
+                                     timeout=min(timeout,1800),cancel=cancel,deadline=deadline,observation=observation)
+            except FileNotFoundError as exc:
+                raise AgentUnavailable("Codex CLI not installed on server") from exc
+            except subprocess.TimeoutExpired as exc:
+                from orchestrator.agent_diagnostics import redact
+                detail = (exc.stderr or b'')
+                if isinstance(detail, bytes):
+                    detail = detail.decode(errors='replace')
+                observation.setdefault('termination_reason','call_deadline')
+                observation['traceback']=traceback.format_exc()[-8192:]
+                raise AgentTimedOut(f"Codex invocation timed out ({observation['termination_reason']}; invocation {invocation_id}): {redact(detail[-600:])}") from exc
+            except Exception:
+                observation['traceback']=traceback.format_exc()[-8192:]
+                raise
+            if done.returncode:
+                from orchestrator.agent_diagnostics import redact
+                raise AgentFailure(f"Codex exited {done.returncode}: {redact(done.stderr[-800:])}")
+            if not response_file.is_file():
+                raise InvalidAgentOutput('Codex completed without the required structured response file')
+            try:
+                output = json.loads(response_file.read_text())
+                validate(instance=output, schema=schema)
+            except (json.JSONDecodeError,ValidationError) as exc:
+                from orchestrator.agent_diagnostics import redact
+                raise InvalidAgentOutput(redact(f"Codex produced invalid schema-constrained JSON: {exc}\n"
+                                         f"Rejected response: {response_file.read_text()[-8000:]}")) from exc
+        except Exception as exc:
+            observation["error_type"]=type(exc).__name__
+            observation["traceback"]=traceback.format_exc()[-8192:]
+            raise
+        finally:
+            observation.update(finished_at=time.time(),response_file_created=response_file.is_file())
+            observation.setdefault('exit_code',None)
+            observation.setdefault('termination_reason','invocation_error')
+            if response_file.is_file():observation['response_tail']=response_file.read_bytes()[-65536:].decode(errors='replace')
+            if diagnostics_dir is not None:
+                from orchestrator.agent_diagnostics import save
+                save(diagnostics_dir,invocation_id,observation)
     return {"response": output, "prompt_sha256": hashlib.sha256(task.encode()).hexdigest(), "schema_sha256": hashlib.sha256(Path(schema_path).read_bytes()).hexdigest()}
 
 

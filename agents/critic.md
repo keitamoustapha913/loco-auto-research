@@ -64,3 +64,13 @@ run is necessarily needed. Do not invent comparative learning traces. Make the
 best next direction advisory for the next planner, not an obligation to continue
 the same unsuccessful family. Real localization and the retained incumbent remain
 the reference; a proxy-only result cannot establish real improvement.
+
+For future confirmation use predeclared false-positive **counts** at the actual
+normal sample size: 1/47 is 2.13%, so a 2% delta permits zero additional alarms.
+Never reinterpret historical criteria. Report marginal normal-count uncertainty,
+paired training-seed variability, and paired/grouped source intervals separately.
+Repeated selection on the same development split remains a limitation even when
+all intervals favor the challenger. Equal seeds alone do not verify initialization
+or source/edit/mask streams: inspect trusted paired_control_verification, its
+declared scope and unequal update/exposure counts. Missing observations prohibit
+causal confirmation, but do not invalidate exploratory research-incumbent ranking.

@@ -66,7 +66,7 @@ def command(repo_root, candidate_file, data_root, output_dir, inner_command, use
         if not diagnostic.is_relative_to(repo/'candidates') or diagnostic.name != 'model.py':
             raise PermissionError('diagnostic provider must be an approved candidate source')
         args += ['--dir','/diagnostics','--ro-bind',diagnostic.parent,'/diagnostics']
-    for name in ('__init__.py', 'run_candidate.py', 'training_phase.py', 'candidate_smoke.py', 'stage7_eval.py', 'stage7_texture_eval.py', 'stage8_eval.py', 'feedback_infer.py'):
+    for name in ('__init__.py', 'run_candidate.py', 'training_phase.py', 'paired_controls.py', 'candidate_smoke.py', 'stage7_eval.py', 'stage7_texture_eval.py', 'stage8_eval.py', 'feedback_infer.py'):
         args += ['--ro-bind', repo / 'scripts' / name, '/lab/scripts/' + name]
     if case_dir is not None:
         cases = Path(case_dir).resolve(strict=True)

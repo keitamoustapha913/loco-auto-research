@@ -5,6 +5,15 @@ import math
 
 TIME_VERSION = 'campaign-time-v1'
 MAX_CONSECUTIVE_RETRIES = 10
+AGENT_MINUTES = 'time_minutes_per_research_agents_calls'
+
+
+def agent_seconds(config):
+    """A per-invocation ceiling, never a training/evaluation or idle timeout."""
+    minutes = config.get('limits', {}).get(AGENT_MINUTES, 30)
+    if isinstance(minutes, bool) or not isinstance(minutes, (int, float)) or not math.isfinite(minutes) or not 0 < minutes <= 30:
+        raise ValueError(AGENT_MINUTES + ' must be positive and at most 30 minutes')
+    return minutes * 60
 LEGACY_LIMITS = ('max_gpu_hours', 'max_wall_hours', 'max_experiments', 'max_codex_calls',
                  'max_job_seconds', 'max_consecutive_failures', 'max_parallel_gpu_jobs')
 
@@ -18,7 +27,7 @@ def normalize(config):
     limits = config['limits']
     simplified = any(k in limits for k in ('research_hours', 'training_minutes_per_experiment'))
     if simplified:
-        if not time_based(config) and set(limits) - {'research_hours', 'training_minutes_per_experiment'}:
+        if not time_based(config) and set(limits) - {'research_hours', 'training_minutes_per_experiment', AGENT_MINUTES}:
             raise ValueError('do not mix time settings with legacy campaign limits')
         for key in ('research_hours', 'training_minutes_per_experiment'):
             value = limits.get(key)
@@ -31,10 +40,12 @@ def normalize(config):
         # Adapter fields for existing scientific contracts. Counts are unlimited;
         # serialization, deadlines, disk safety and failure recovery still apply.
         config['limits'] = dict(research_hours=hours, training_minutes_per_experiment=minutes,
+            **{AGENT_MINUTES: agent_seconds(config) / 60},
             max_wall_hours=hours, max_gpu_hours=hours, max_experiments=None, max_codex_calls=None,
             max_job_seconds=math.ceil(hours*3600),
             max_consecutive_failures=MAX_CONSECUTIVE_RETRIES, max_parallel_gpu_jobs=1)
     else:
+        if AGENT_MINUTES in limits:agent_seconds(config)
         for key in LEGACY_LIMITS:
             value = limits.get(key)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:

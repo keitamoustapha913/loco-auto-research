@@ -67,7 +67,7 @@ def read_training_timing(path):
     """Bound reads from candidate-writable audit artifacts; never treat setup as training."""
     import math
     path=Path(path)
-    if not path.is_file() or path.is_symlink() or path.stat().st_size>4096:return {}
+    if not path.is_file() or path.is_symlink() or path.stat().st_size>16384:return {}
     try:
         value=json.loads(path.read_text())
         if not isinstance(value,dict) or value.get('status') not in {'RUNNING','TRAINING','PREPARING','COMPLETED','FAILED','TIMED_OUT','UNVERIFIABLE'}:return {}

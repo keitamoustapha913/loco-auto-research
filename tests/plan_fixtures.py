@@ -5,6 +5,7 @@ import json
 
 def agent_plan(plan):
     plan=copy.deepcopy(plan)
+    if plan.get('schema_version')=='4.0':plan.setdefault('confirmation_requirements',None)
     def pairs(value):return [{'name':key,'value_json':json.dumps(val)} for key,val in value.items()]
     plan['training']=pairs(plan['training'])
     for arm in plan['arms']:

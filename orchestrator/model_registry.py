@@ -324,7 +324,7 @@ def consider_comparison(store, campaigns, campaign_id, plan, result, repo_root=R
                     # changes to training settings other than seed and plan metadata are not.
                     ignored={'seed','campaign_id','campaign_name','timeout_seconds','plan_id','plan_sha256','plan_arm',
                              'execution_kind','execution_mode','frozen_baseline','diagnostics','diagnostic_provider',
-                             'cuda_smoke_required','trusted_source_sha256'}
+                             'cuda_smoke_required','trusted_source_sha256','paired_control_requirements'}
                     def scientific(cfg):return {k:v for k,v in cfg.items() if k not in ignored and not k.startswith('plan_')}
                     incumbent_cfg=incumbent.get('learning_configuration',incumbent['configuration'])
                     for _,b in pairs:
@@ -341,9 +341,23 @@ def consider_comparison(store, campaigns, campaign_id, plan, result, repo_root=R
                     for side in (0,1):
                         if len({p[side]['reference']['checkpoint_sha256'] for p in pairs})<len(plan['seeds']):
                             reason.append('repeated checkpoint is not independent seed replication')
+                    normal_policy=plan.get('confirmation_requirements')
                     for a,b in pairs:
-                        if not admissible(a,rules):reason.append('deployment FPR/parameter ceiling exceeded')
-                        if a['metrics'][FPR]>b['metrics'][FPR]:reason.append('normal false positives regressed')
+                        if normal_policy:
+                            from orchestrator.confirmation import normal_interval
+                            am,bm=a['metrics'],b['metrics']
+                            n=normal_policy['normal_images']
+                            if am.get('dev_real/normal_images')!=n or bm.get('dev_real/normal_images')!=n:
+                                reason.append('confirmation normal-image count differs from predeclared sample')
+                            elif am['dev_real/normal_false_positives']-bm['dev_real/normal_false_positives']>normal_policy['max_additional_false_positives']:
+                                reason.append('predeclared additional normal false-positive count exceeded')
+                            intervals.setdefault('normal_counts',[]).append({
+                                'challenger':normal_interval(am['dev_real/normal_false_positives'],am['dev_real/normal_images']),
+                                'baseline':normal_interval(bm['dev_real/normal_false_positives'],bm['dev_real/normal_images'])})
+                            if am[PARAMETERS]>rules['max_parameters']:reason.append('parameter ceiling exceeded')
+                        else:
+                            if not admissible(a,rules):reason.append('deployment FPR/parameter ceiling exceeded')
+                            if a['metrics'][FPR]>b['metrics'][FPR]:reason.append('normal false positives regressed')
                         if a['metrics'][AP]<b['metrics'][AP]:reason.append('pixel precision regressed in a seed')
                         for metric,drop in (('dev_real/logical_image_auroc',rules['max_logical_detection_drop']),
                                             ('dev_real/structural_au_spro_0_05_compatible',rules['max_structural_localization_drop'])):
@@ -401,7 +415,7 @@ def recover_comparisons(store, repo_root=REPO):
         value=json.loads(r['payload_json']);cid=r['campaign_id']
         if r['kind']=='EXPERIMENT_PLAN_REGISTERED':registered[(cid,value['plan']['plan_id'])]=value['plan']
         elif r['kind']=='EXPERIMENT_PLAN_RESULT':results[(cid,value['result']['plan_id'])]=value['result']
-        elif value.get('plan_id'):reviewed.add((cid,value['plan_id']))
+        elif value.get('plan_id'):reviewed.add((value.get('evidence_campaign_id',cid),value['plan_id']))
     for key in reviewed & registered.keys() & results.keys():
         decisions=consider_comparison(store,campaigns,key[0],registered[key],results[key],repo_root)
         # Persist durable tracking delivery even if the previous process exited

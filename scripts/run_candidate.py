@@ -473,6 +473,11 @@ def run(module_file, manifest_file, config, output):
             if key.startswith('synthetic_') or key == 'artifact_control_status': provenance.pop(key)
     if config.get('plan_sha256'):
         import os
+        if timing_audit.get('paired_controls'):
+            for entry in timing_audit['paired_controls'].get('observed',{}).values():
+                if isinstance(entry,dict) and 'file' in entry:
+                    provenance['artifact_hashes'][entry['file']]=sha256_file(output/entry['file'])
+            provenance['artifact_hashes']['training_timing.json']=sha256_file(output/'training_timing.json')
         provenance.update(effective_configuration=config, training_audit=training_audit,
                           plan_sha256=config['plan_sha256'], plan_id=config['plan_id'],
                           plan_arm=config['plan_arm'], execution_kind=config['execution_kind'],

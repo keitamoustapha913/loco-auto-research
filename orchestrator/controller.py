@@ -53,6 +53,8 @@ def run_worker_once(store, manifest_path, runtime, personal_mode_authorized=Fals
 
 
 def _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=None, **kwargs):
+    import uuid
+    invocation_id=uuid.uuid4().hex
     requested = kwargs.pop('evidence_run_ids', ())
     capabilities=[]
     if kwargs.get('personal_mode') and role in {'researcher','implementer','critic'}:
@@ -143,12 +145,13 @@ def _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=None,
         elif remaining < 10:
             raise RuntimeError('campaign wall-time budget exhausted before Codex call')
         if time_based(config):
-            from orchestrator.campaign_config import operation_seconds,operation_cancelled
-            kwargs['timeout']=operation_seconds(row,180)
+            from orchestrator.campaign_config import agent_seconds,operation_cancelled
+            kwargs['timeout']=min(agent_seconds(config),remaining)
             kwargs['deadline']=row['created_at']+limits['max_wall_hours']*3600
             kwargs['cancel']=lambda:operation_cancelled(campaigns,campaign_id)
         else:
-            kwargs['timeout'] = min(int(kwargs.get('timeout', 180)), remaining)
+            from orchestrator.campaign_config import agent_seconds
+            kwargs['timeout'] = min(float(kwargs.get('timeout', agent_seconds(config))), agent_seconds(config), remaining)
         recent_failures = [e for e in campaigns.events(campaign_id,100)
                            if e['kind'] in {'ATTEMPT_FAILED','VALIDATION_FAILED','PLAN_REVIEW_FAILED','CONTROLLER_ERROR','RECOVERY_RESTORED'}][:10]
         if recent_failures:
@@ -181,9 +184,11 @@ def _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=None,
         provider_output_schema(schema_value)
     if campaign:
         campaigns.reserve_codex_call(campaign_id, role)
-        campaigns.event(campaign_id, 'AGENT_STARTED', role=role)
+        campaigns.event(campaign_id, 'AGENT_STARTED', role=role, invocation_id=invocation_id)
     else:
         store.reserve_codex_call(role)
+    kwargs['invocation_id']=invocation_id
+    kwargs['diagnostics_dir']=store.path.parent/'agent_invocations'
     try:
         if role=='researcher' and schema_value is not None:
             import tempfile
@@ -195,10 +200,12 @@ def _budgeted_invoke_once(store, role, repo_root, schema, prompt, campaign=None,
             result = invoke(role, repo_root, schema, prompt, **kwargs)
     except Exception as exc:
         if campaign:
-            campaigns.event(campaign_id, 'AGENT_FAILED', role=role, error=str(exc))
+            campaigns.event(campaign_id, 'AGENT_FAILED', role=role, invocation_id=invocation_id,
+                error=str(exc), diagnostics_path=str(kwargs['diagnostics_dir']/(invocation_id+'.json')))
         raise
     if campaign:
-        campaigns.event(campaign_id, 'AGENT_COMPLETED', role=role)
+        campaigns.event(campaign_id, 'AGENT_COMPLETED', role=role, invocation_id=invocation_id,
+            diagnostics_path=str(kwargs['diagnostics_dir']/(invocation_id+'.json')))
     return result
 
 

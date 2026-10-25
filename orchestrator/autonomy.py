@@ -56,7 +56,7 @@ def load_campaign_config(path=None):
     defaults=yaml.safe_load((REPO/'configs/autonomy.yaml').read_text())
     for section in ('research','tracking','security'):
         config[section]=dict(defaults[section], **config.get(section,{}))
-    if 'research_hours' in config['limits'] and set(config['limits'])-{'research_hours','training_minutes_per_experiment'}:
+    if 'research_hours' in config['limits'] and set(config['limits'])-{'research_hours','training_minutes_per_experiment','time_minutes_per_research_agents_calls'}:
         raise ValueError('do not mix time settings with legacy campaign limits')
     from orchestrator.campaign_config import normalize, time_based
     config = normalize(config)
@@ -290,10 +290,15 @@ def recover_research_attempt(store,campaigns,campaign_id,runtime, *, trusted_fai
     except (ValueError,OSError,subprocess.SubprocessError) as exc:
         raise PermissionError('verified recovery state integrity unavailable: '+str(exc)) from exc
     reviewed={json.loads(e['payload_json']).get('plan_id') for e in evidence if e['kind'] in {'CRITIQUE','PLAN_ABANDONED'}}
-    abandoned=[]
+    abandoned=[];deferred=[]
     for entry in plan_history(campaigns,campaign_id):
         plan=entry['plan']
         if plan['plan_id'] in reviewed:continue
+        completed=next((json.loads(e['payload_json'])['result'] for e in evidence
+            if e['kind']=='EXPERIMENT_PLAN_RESULT' and json.loads(e['payload_json'])['result']['plan_id']==plan['plan_id']),None)
+        if completed and completed['status'] in {'COMPLETE_CONTROLLED','COMPLETE_EXPLORATORY'}:
+            deferred.append(plan['plan_id'])
+            continue  # Critic failure cannot invalidate completed scientific measurements.
         record_result(store,campaigns,campaign_id,plan,campaigns.runs(campaign_id),runtime,
                       ('trusted operation quarantined; '+trusted_failure.detail['error']) if trusted_failure else
                       'retry allowance exhausted; attempt abandoned, unverified results ineligible for promotion')
@@ -307,9 +312,13 @@ def recover_research_attempt(store,campaigns,campaign_id,runtime, *, trusted_fai
         for plan_id in abandoned:
             con.execute('INSERT INTO campaign_events(campaign_id,time,kind,payload_json) VALUES(?,?,?,?)',
                         (campaign_id,time.time(),'PLAN_ABANDONED',json.dumps({'plan_id':plan_id,'status':'FAILED'})))
+        for plan_id in deferred:
+            con.execute('INSERT INTO campaign_events(campaign_id,time,kind,payload_json) VALUES(?,?,?,?)',
+                (campaign_id,time.time(),'REVIEW_DEFERRED',json.dumps({'plan_id':plan_id,'evidence_campaign_id':campaign_id,
+                 'reason':'review retry allowance exhausted; completed evidence preserved for later authorized review'})))
         con.execute('INSERT INTO campaign_events(campaign_id,time,kind,payload_json) VALUES(?,?,?,?)',
                     (campaign_id,time.time(),'RECOVERY_RESTORED',json.dumps({'status':'FAILED','failures':current,
-                      'verified_state':checkpoint,'abandoned_plans':abandoned,
+                      'verified_state':checkpoint,'abandoned_plans':abandoned,'pending_reviews':deferred,
                       'trusted_failure_fingerprint':trusted_failure.detail['fingerprint'] if trusted_failure else None,
                       'instruction':'Revise using the recorded failure evidence; never repeat abandoned plans or alter frozen plans. No automatic weight reuse.'})))
         con.execute("UPDATE campaigns SET consecutive_failures=0,current_hypothesis='',active_run_id='',next_hypothesis='recovery:revise_from_verified_evidence',updated_at=? WHERE id=?",(time.time(),campaign_id))
@@ -336,8 +345,9 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
     from orchestrator.experiment_plan import plan_history, execute_plan, review_plan, validate_plan, register_plan, record_result
     # Resume the immutable comparison, never regenerate or replay a recorded cell.
     with store.connect() as con:
-        reviewed_plans = {json.loads(r[0]).get('plan_id') for r in con.execute(
-            "SELECT payload_json FROM campaign_events WHERE campaign_id=? AND kind IN ('CRITIQUE','PLAN_ABANDONED')", (campaign_id,))}
+        reviewed_plans = {v.get('plan_id') for r in con.execute(
+            "SELECT payload_json FROM campaign_events WHERE campaign_id=? AND kind IN ('CRITIQUE','PLAN_ABANDONED','REVIEW_DEFERRED')", (campaign_id,))
+            for v in [json.loads(r[0])] if v.get('evidence_campaign_id',campaign_id)==campaign_id}
     for registered in plan_history(campaigns, campaign_id):
         pending = registered['plan']
         if pending['plan_id'] not in reviewed_plans:
@@ -352,6 +362,27 @@ def run_cycle(store: StateStore, campaigns: CampaignState, campaign_id: str, run
             await_authorized_stage(campaigns, campaign_id, finishing=True)
             review_plan(store, campaigns, campaign_id, pending, result)
             return
+    # New authorizations may finish critiques of earlier complete comparisons.
+    # Numerical evidence and checkpoints are reused; execute_plan is never called.
+    from orchestrator.experiment_plan import pending_reviews
+    with store.connect() as con:
+        deferred={ (v.get('evidence_campaign_id',campaign_id),v['plan_id'])
+            for r in con.execute("SELECT payload_json FROM campaign_events WHERE campaign_id=? AND kind='REVIEW_DEFERRED'",(campaign_id,))
+            for v in [json.loads(r[0])] }
+    for item in (pending_reviews(store,config['campaign']['dataset']) if config['campaign'].get('start_from')=='previous_best' else []):
+        origin=item['evidence_campaign_id'];pending=item['plan']
+        if origin==campaign_id or (origin,pending['plan_id']) in deferred:continue
+        try:
+            review_plan(store,campaigns,campaign_id,pending,item['result'],evidence_campaign_id=origin)
+        except Exception:
+            failures=sum(e['kind']=='REVIEW_INTERRUPTED' and
+                json.loads(e['payload_json']).get('evidence_campaign_id')==origin and
+                json.loads(e['payload_json']).get('plan_id')==pending['plan_id'] for e in campaigns.events(campaign_id,100000))
+            if failures>=10:
+                campaigns.event(campaign_id,'REVIEW_DEFERRED',plan_id=pending['plan_id'],evidence_campaign_id=origin,
+                    reason='review retries exhausted; preserve evidence and continue independent research')
+            raise
+        return
     fresh_events = [event for event in campaigns.events(campaign_id, 100)
                     if event['kind'] == 'EVIDENCE_ADAPTED_HYPOTHESES']
     if not prior and research.get('fresh_hypotheses') and fresh_events:

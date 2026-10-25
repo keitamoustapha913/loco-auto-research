@@ -24,7 +24,7 @@ def test_large_prompt_uses_stdin_without_command_argument_expansion(tmp_path,mon
         response=output['path'] if personal_mode else Path(command[command.index('--output-last-message')+1])
         response.write_text('{}')
         return SimpleNamespace(returncode=0,stderr='')
-    monkeypatch.setattr(runner.subprocess,'run',run)
+    monkeypatch.setattr(runner,'run_cancellable',run)
     result=invoke('researcher',repo,schema,'evidence '*40000,personal_mode=personal_mode)
     assert captured['command'][-1]=='-'
     assert len(captured['input'])>131072
@@ -71,6 +71,6 @@ def test_provider_uniqueitems_omission_never_accepts_duplicate_seeds(tmp_path,mo
         assert 'uniqueItems' not in json.loads(provider.read_text())['properties']['seeds']
         Path(command[command.index('--output-last-message')+1]).write_text('{"seeds":[7,7]}')
         return SimpleNamespace(returncode=0,stderr='')
-    monkeypatch.setattr(runner.subprocess,'run',run)
+    monkeypatch.setattr(runner,'run_cancellable',run)
     with pytest.raises(InvalidAgentOutput,match='non-unique'):
         invoke('researcher',repo,schema,'fixture')

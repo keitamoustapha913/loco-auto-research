@@ -25,7 +25,7 @@ RESERVED = {'device', 'seed', 'category', 'timeout_seconds', 'model_sha256', 'ca
             'cuda_smoke_required', 'inference', 'diagnostics', 'frozen_baseline', 'execution_kind', 'diagnostic_provider',
             'trusted_source_sha256','data_pin','baseline_effective_configuration','training_budget_seconds','campaign_configuration_version','research_deadline',
             'max_job_seconds','max_gpu_seconds','max_wall_seconds','max_jobs','training_completion_policy',
-            'training_target_seconds','diagnostic_preflight_required','paired_diagnostic_metrics'}
+            'training_target_seconds','diagnostic_preflight_required','paired_diagnostic_metrics','paired_control_requirements'}
 REQUIRED_TRAINING_POSITIVE = ('steps', 'batch_size', 'size', 'expected_source_exposures')
 MATCHED_TRAINING_CONTROLS = REQUIRED_TRAINING_POSITIVE + ('expected_optimizer_updates',)
 
@@ -114,6 +114,9 @@ def plan_schema(plan):
     if plan.get('schema_version') in {'3.0','4.0'}:
         schema['properties']['confirmation']={'type':'boolean'}
         schema['required'].append('confirmation')
+    if plan.get('schema_version')=='4.0':
+        from orchestrator.planning_contract import CONFIRMATION_REQUIREMENTS
+        schema['properties']['confirmation_requirements']=copy.deepcopy(CONFIRMATION_REQUIREMENTS)
     return schema
 
 
@@ -130,6 +133,15 @@ def validate_plan(plan, hypothesis_id=None):
     try:digest(plan)  # Reject NaN/infinity inside generated settings.
     except ValueError as exc:raise CandidateValidationError(str(exc)) from exc
     plan=canonicalize_diagnostic_measurements(plan)
+    criteria=plan.get('confirmation_requirements')
+    if criteria:
+        import re
+        keys=criteria['paired_controls']
+        if len(keys)>8 or not any(k.startswith('input:') for k in keys) or any(
+            k not in {'initial_state','optimizer'} and not re.fullmatch(r'input:[0-9]{1,2}',k) for k in keys):
+            raise CandidateValidationError('confirmation paired_controls must identify relevant prepared input indices; at most eight controls')
+        if criteria['max_additional_false_positives']>criteria['normal_images']:
+            raise CandidateValidationError('additional false-positive count cannot exceed declared normal-image sample')
     from orchestrator.planning_contract import local_issues, PlanningValidationError
     issues=local_issues(plan)
     if issues:raise PlanningValidationError(issues)
@@ -616,7 +628,15 @@ def comparison_result(plan, runs, feedback=None):
         eligibility.update(promotion_eligible=False,evidence_level='INCOMPLETE')
         eligibility['reasons'].append('Requested execution or measured evidence is incomplete.')
     fixed=any(a.get('fixed_checkpoint_seed') is not None for a in plan['arms'])
-    return {'comparison_controls':controls,'scientific_eligibility':eligibility, 'plan_id': plan['plan_id'], 'hypothesis_id': plan['hypothesis_id'],
+    from orchestrator.confirmation import normal_interval
+    normal_uncertainty=[]
+    for row in runs:
+        measurements=feedback.get(row['run_id'],{}).get('metrics',{})
+        n=measurements.get('dev_real/normal_images');fp=measurements.get('dev_real/normal_false_positives')
+        if isinstance(n,(int,float)) and isinstance(fp,(int,float)) and 0<=fp<=n and n>=1 and int(n)==n and int(fp)==fp:
+            normal_uncertainty.append(dict(normal_interval(fp,n),run_id=row['run_id']))
+    return {'comparison_controls':controls,'normal_false_positive_uncertainty':normal_uncertainty,
+            'scientific_eligibility':eligibility, 'plan_id': plan['plan_id'], 'hypothesis_id': plan['hypothesis_id'],
             'plan_sha256': digest(plan), 'version': contract_version(plan), 'kind': plan['kind'],
             'status': 'INCOMPLETE' if problems else ('COMPLETE_CONTROLLED' if plan['kind'] == 'controlled_comparison' and not fixed else 'COMPLETE_EXPLORATORY'),
             'expected_jobs': len(expected), 'recorded_jobs': len(found), 'problems': problems,
@@ -721,7 +741,7 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
         source_hash = sha256(module) if module else ''
         trusted_files = ['orchestrator/autonomy.py','orchestrator/controller.py','orchestrator/experiment_plan.py',
                          'orchestrator/planning_contract.py','orchestrator/experiment_runner.py','orchestrator/sandbox.py','orchestrator/development_feedback.py',
-                         'scripts/run_candidate.py','scripts/training_phase.py','scripts/feedback_infer.py','scripts/candidate_smoke.py',
+                         'scripts/run_candidate.py','scripts/training_phase.py','scripts/paired_controls.py','scripts/feedback_infer.py','scripts/candidate_smoke.py',
                          'benchmark/train_adapter.py','benchmark/feedback_metrics.py','benchmark/feedback_data.py',
                          'benchmark/feedback_artifacts.py','orchestrator/storage_cleanup.py',
                          'schemas/experiment_plan.schema.json','configs/development_feedback.json']
@@ -811,6 +831,8 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
                 candidate_id = origin['candidate_id']
             if plan.get('schema_version') in {'3.0','4.0'}:
                 effective['paired_diagnostic_metrics']={d['diagnostic_id']:sorted({x['metric'] for x in plan['paired_comparisons'] if x['diagnostic_id']==d['diagnostic_id']}) for d in plan['diagnostics']}
+            if plan.get('confirmation_requirements') and arm['execution']=='train':
+                effective['paired_control_requirements']=plan['confirmation_requirements']['paired_controls']
             effective['trusted_source_sha256'] = trusted_hashes
             effective['data_pin'] = data_pin
             rid = controller.queue_candidate(store, plan['hypothesis_id'], candidate_id, 'juice_bottle', 'pilot', 'cuda',
@@ -867,10 +889,77 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
     return result
 
 
-def review_plan(store, campaigns, campaign_id, plan, result):
+def pending_reviews(store, dataset=None):
+    """Read-only durable queue, including completed studies from older campaigns."""
+    with store.connect() as con:
+        rows=con.execute("SELECT e.* FROM campaign_events e JOIN campaigns c ON c.id=e.campaign_id "
+                         "WHERE e.kind IN ('EXPERIMENT_PLAN_REGISTERED','EXPERIMENT_PLAN_RESULT','CRITIQUE') ORDER BY e.id").fetchall()
+        configs={r['id']:json.loads(r['config_json']) for r in con.execute('SELECT id,config_json FROM campaigns')}
+    plans={};results={};reviewed=set()
+    for row in rows:
+        value=json.loads(row['payload_json']);cid=row['campaign_id']
+        if dataset and configs[cid]['campaign']['dataset']!=dataset:continue
+        if row['kind']=='EXPERIMENT_PLAN_REGISTERED':
+            plan=value['plan'];plans[(cid,plan['plan_id'])]=plan
+        elif row['kind']=='EXPERIMENT_PLAN_RESULT':
+            result=value['result'];results[(cid,result['plan_id'])]=result
+        elif value.get('plan_id'):reviewed.add((value.get('evidence_campaign_id',cid),value['plan_id']))
+    return [{'evidence_campaign_id':key[0],'plan':plans[key],'result':result}
+            for key,result in results.items() if key in plans and key not in reviewed
+            and result['status'] in {'COMPLETE_CONTROLLED','COMPLETE_EXPLORATORY'}]
+
+
+def reconstruct_review(store, campaigns, evidence_campaign_id, plan, result):
+    """Verify persisted numerical evidence; never train, evaluate or invent review."""
+    if result.get('plan_sha256')!=digest(plan):raise PermissionError('pending review plan hash mismatch')
+    rows=[r for r in campaigns.runs(evidence_campaign_id)
+          if json.loads(r['config_json']).get('plan_sha256')==digest(plan)]
+    by_id={r['run_id']:r for r in rows};availability=[]
+    from benchmark.data_guard import sha256_file
+    for cell in result['cells']:
+        row=by_id.get(cell.get('run_id'))
+        if row is None or row['status'] not in {'COMPLETED','REVIEWED','PROMOTED','REJECTED'}:
+            raise PermissionError('pending review lacks completed originating run')
+        cfg=json.loads(row['config_json'])
+        if (cfg.get('plan_arm')!=cell['arm'] or cfg.get('plan_pair_seed',cfg['seed'])!=cell['seed'] or
+            cell.get('effective_configuration_sha256')!=digest(cfg)):
+            raise PermissionError('pending review effective configuration mismatch')
+        checkpoint=Path(row['artifact_dir'])/'checkpoint/model.pt'
+        expected=cell.get('checkpoint_sha256')
+        if not expected:
+            with store.connect() as con:
+                feedback=con.execute("SELECT payload_json FROM events WHERE run_id=? AND kind='REAL_DEVELOPMENT_FEEDBACK' ORDER BY id DESC LIMIT 1",(row['run_id'],)).fetchone()
+            if feedback:expected=json.loads(feedback[0]).get('checkpoint_sha256')
+            else:
+                manifest=Path(row['artifact_dir'])/'run_manifest.json'
+                if manifest.is_file():expected=json.loads(manifest.read_text()).get('checkpoint_sha256')
+        # Existing bytes must be intact. Archived bytes are explicitly unavailable;
+        # the numerical critique remains possible, exact frozen replay does not.
+        if checkpoint.is_symlink():raise PermissionError('unsafe pending checkpoint link')
+        if checkpoint.is_file() and (not expected or sha256_file(checkpoint)!=expected):
+            raise PermissionError('pending review checkpoint hash mismatch')
+        if checkpoint.is_file():
+            # Includes immutable Git source, original configuration and metadata.
+            from orchestrator.controller import REPO as source_repo
+            reference,_,_=baseline_reference(store,row['run_id'],source_repo)
+            if cell.get('source_sha256')!=reference['source_sha256']:
+                raise PermissionError('pending review source hash mismatch')
+        availability.append({'run_id':row['run_id'],'checkpoint_available':checkpoint.is_file(),
+                             'checkpoint_sha256':expected})
+    if len(rows)!=len(plan['arms'])*len(plan['seeds']):raise PermissionError('pending review run coverage mismatch')
+    return rows,availability
+
+
+def review_plan(store, campaigns, campaign_id, plan, result, *, evidence_campaign_id=None):
     from orchestrator import controller
     from orchestrator.mlflow_tracker import enqueue_run_tracking
-    rows = [r for r in campaigns.runs(campaign_id) if json.loads(r['config_json']).get('plan_sha256')==digest(plan)]
+    origin=evidence_campaign_id or campaign_id
+    if result['status']!='INCOMPLETE':
+        rows,availability=reconstruct_review(store,campaigns,origin,plan,result)
+    else:
+        rows=[r for r in campaigns.runs(origin) if json.loads(r['config_json']).get('plan_sha256')==digest(plan)]
+        availability=[]
+    campaigns.event(campaign_id,'REVIEW_PENDING',plan_id=plan['plan_id'],evidence_campaign_id=origin)
     prompt = ('Assess this scientific comparison using only measured evidence. Completion is execution completeness, '
               'Study the supplied model source, training controls, recorded learning behavior, diagnostics, failures and prior comparisons. '
               'Explain what changed, which localization or false-positive behavior supports your interpretation and what remains unmeasured. '
@@ -880,7 +969,7 @@ def review_plan(store, campaigns, campaign_id, plan, result):
               'not hypothesis support. If INCOMPLETE, do not assert a causal result, supported hypothesis, or promotion. '
               'Exploratory screening does not establish causality. Include exact comparison_status and plan_id. '
               'Separate single-seed results, paired differences and uncertainty; never invent missing diagnostics. '
-              + json.dumps({'plan':plan,'completion':result,'runs':rows}))
+              + json.dumps({'plan':plan,'completion':result,'runs':rows,'checkpoint_availability':availability}))
     from orchestrator.model_registry import DECISION_GUIDANCE
     prompt += ('\nDecision-driven critique: '+DECISION_GUIDANCE+
         ' Use suggested_falsification to state outcome-to-action branches and when to stop diagnosis, '
@@ -900,14 +989,23 @@ def review_plan(store, campaigns, campaign_id, plan, result):
                 (plan.get('schema_version')=='4.0' and not result.get('comparison_controls',{}).get('causal_claim_eligible',False))))):
             raise controller.CandidateValidationError('critic attempted a scientific claim unsupported by completed controlled work')
         return review
-    _, review, _ = controller._with_agent_correction(store, (campaigns,campaign_id), 'critic', request, check)
+    try:
+        _, review, _ = controller._with_agent_correction(store, (campaigns,campaign_id), 'critic', request, check)
+    except Exception as exc:
+        campaigns.event(campaign_id,'REVIEW_INTERRUPTED',plan_id=plan['plan_id'],evidence_campaign_id=origin,
+                        error=str(exc),error_type=type(exc).__name__)
+        from orchestrator.codex_runner import AgentTimedOut
+        if isinstance(exc,AgentTimedOut):
+            campaigns.event(campaign_id,'REVIEW_DEFERRED',plan_id=plan['plan_id'],evidence_campaign_id=origin,
+                reason='Critic deadline expired; preserve completed evidence, allow independent work, resume in a later authorized campaign')
+        raise
     for row in rows:
         with store.connect() as con:
             con.execute('INSERT INTO events(run_id,time,kind,payload_json) VALUES(?,?,?,?)',
                         (row['run_id'], time.time(), 'CRITIC_REVIEW', json.dumps(review)))
         if row['status']=='COMPLETED': store.transition(row['run_id'],'REVIEWED')
         enqueue_run_tracking(store,row['run_id'],event_key_suffix='plan-review:'+digest(plan))
-    campaigns.event(campaign_id,'CRITIQUE',plan_id=plan['plan_id'],review=review,
+    campaigns.event(campaign_id,'CRITIQUE',plan_id=plan['plan_id'],evidence_campaign_id=origin,review=review,
                     run_id=rows[-1]['run_id'] if rows else '')
     campaigns.event(campaign_id,'NEXT_DECISION',action=review['recommended_next_action'],
                     evidence_plan=plan['plan_id'],evidence_run=rows[-1]['run_id'] if rows else '',
@@ -926,7 +1024,8 @@ def review_plan(store, campaigns, campaign_id, plan, result):
         references=[]
         for row in rows:
             feedback=latest_summary(store,row['run_id']) or {}
-            if row['status'] in {'COMPLETED','REVIEWED','PROMOTED','REJECTED'} and feedback.get('checkpoint_unchanged') is True:
+            available=next((x['checkpoint_available'] for x in availability if x['run_id']==row['run_id']),False)
+            if available and row['status'] in {'COMPLETED','REVIEWED','PROMOTED','REJECTED'} and feedback.get('checkpoint_unchanged') is True:
                 reference,_,_=baseline_reference(store,row['run_id'],controller.REPO)
                 references.append(reference)
         if references:
@@ -934,7 +1033,7 @@ def review_plan(store, campaigns, campaign_id, plan, result):
                             result_status=result['status'],critique=review)
     store.set_hypothesis_status(plan['hypothesis_id'],'INCOMPLETE' if result['status']=='INCOMPLETE' else 'COMPLETED')
     from orchestrator.model_registry import consider_comparison
-    decisions=consider_comparison(store,campaigns,campaign_id,plan,result,controller.REPO)
+    decisions=consider_comparison(store,campaigns,origin,plan,result,controller.REPO)
     for row in rows:
         with store.connect() as con:
             con.execute('INSERT INTO events(run_id,time,kind,payload_json) VALUES(?,?,?,?)',

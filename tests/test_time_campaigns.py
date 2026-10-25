@@ -216,7 +216,7 @@ def test_existing_cli_start_pause_resume_report_stop_with_simple_config(registry
     assert lab_cli.research_command('resume',runtime,store.path)['status']=='RUNNING'
     report=lab_cli.research_command('report',runtime,store.path)
     assert report['training_seconds_per_experiment']==900
-    assert set(report['limits'])=={'research_hours','training_minutes_per_experiment'}
+    assert set(report['limits'])=={'research_hours','training_minutes_per_experiment','time_minutes_per_research_agents_calls'}
     assert 'max_job_seconds' in report['technical_accounting']['limits']
     assert lab_cli.research_command('stop',runtime,store.path)['status']=='STOPPED'
     assert registry.states(store)==before and path.read_bytes()==original

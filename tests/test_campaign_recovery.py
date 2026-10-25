@@ -67,7 +67,7 @@ def test_previous_campaign_failures_do_not_affect_new_campaign(lab):
     assert c.get(fresh)['consecutive_failures']==0 and c.usage(fresh)['wall_seconds']<2
 
 
-def test_all_agent_roles_receive_remaining_deadline_not_legacy_cap(lab,monkeypatch):
+def test_all_agent_roles_receive_thirty_minutes_or_remaining_campaign(lab,monkeypatch):
     store,c,cid,_=lab;received=[]
     monkeypatch.setenv('LOCO_CODEX_MAX_CALLS','0');monkeypatch.setenv('LOCO_JOB_TIMEOUT_SECONDS','1')
     def fake(*a,**kw):received.append(kw);return {'response':{}}
@@ -76,7 +76,7 @@ def test_all_agent_roles_receive_remaining_deadline_not_legacy_cap(lab,monkeypat
         controller._budgeted_invoke_once(store,role,Path('.'),None,'fixture',campaign=(c,cid),timeout=1)
     assert len(received)==4
     for kw in received:
-        assert 14300<kw['timeout']<=14400 and not kw['cancel']()
+        assert 1799<kw['timeout']<=1800 and not kw['cancel']()
         assert kw['deadline']==c.get(cid)['created_at']+14400
     c.set_status(cid,'STOPPING');assert all(kw['cancel']() for kw in received)
 
