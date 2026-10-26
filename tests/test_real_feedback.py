@@ -127,7 +127,8 @@ def test_durable_feedback_preserves_history_and_dashboard(tmp_path,monkeypatch):
     from streamlit.testing.v1 import AppTest
     app=AppTest.from_file(Path(__file__).parents[1]/'dashboard/pages/03_Results.py').run()
     assert not app.exception
-    assert any('Real-anomaly' in x.value for x in app.subheader)
+    assert any('Custom development split' in x.value for x in app.caption)
+    assert any(x.label=='Logical AU-sPRO' for x in app.metric)
 
 
 def test_feedback_reaches_critic_not_candidate_inputs(tmp_path,monkeypatch):

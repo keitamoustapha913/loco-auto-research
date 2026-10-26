@@ -14,19 +14,20 @@ section.main > div {padding-top: 2rem;}
 [data-testid="stMainBlockContainer"] {padding-top: 2rem; padding-bottom: 2rem;}
 [data-testid="stMetricValue"] {font-size: clamp(1.25rem, 2vw, 2rem);}
 [data-testid="stMetric"] {min-width: 0;}
+[data-testid="stBaseButton-tertiary"] {justify-content: flex-start; text-align: left;}
+[data-testid="stBaseButton-tertiary"] > div {width: 100%; text-align: left; justify-content: flex-start;}
 @media (max-width: 1100px) {
   [data-testid="stHorizontalBlock"]:has([data-testid="stMetric"]) {flex-wrap: wrap;}
   [data-testid="stHorizontalBlock"]:has([data-testid="stMetric"]) > [data-testid="stColumn"] {flex: 1 1 160px; min-width: 160px;}
 }
 </style>''', unsafe_allow_html=True)
-st.sidebar.title("LOCO Research Lab")
-st.sidebar.caption("Normal-only learning · Localization-first research")
+st.sidebar.caption("LOCO Research Lab · Normal-only training")
 st.sidebar.divider()
 
 page = st.navigation([
-    st.Page("pages/01_Home.py", title="Home", icon="🏠", default=True),
-    st.Page("pages/02_Research.py", title="Research", icon="🔬"),
-    st.Page("pages/03_Results.py", title="Results", icon="📊"),
-    st.Page("pages/04_System.py", title="System", icon="⚙️"),
+    st.Page("pages/01_Home.py", title="Home", icon=":material/home:", default=True),
+    st.Page("pages/02_Research.py", title="Research", icon=":material/science:"),
+    st.Page("pages/03_Results.py", title="Results", icon=":material/insights:"),
+    st.Page("pages/04_System.py", title="System", icon=":material/monitor_heart:"),
 ])
 page.run()

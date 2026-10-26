@@ -167,6 +167,9 @@ def test_populated_campaign_pages_render_and_filter(ledger,monkeypatch):
         app=AppTest.from_file(entry,default_timeout=15).run()
         assert not app.exception,name
         if name=='02_Research.py':
+            assert not app.tabs  # scientific detail is opened explicitly
+            app.button[0].click().run()
+            assert not app.exception
             assert any('Actual recorded' in m.value for m in app.markdown)
             assert len(app.expander)<10
             app.sidebar.selectbox[0].select(cid).run()

@@ -7,7 +7,7 @@ from dashboard.research_data import authorization_state,decode
 from dashboard.data_access import campaign_summary,gpu_status,service_status,tracking_health,pending_outbox,queue_paused,tracking_errors,log_tail,runtime_root,rows,list_runs
 from dashboard.presentation import format_date,classify_run,INFRASTRUCTURE
 
-page_intro('Laboratory health','Services, authorization scope, storage retention and actionable diagnostics.')
+page_intro('System','Laboratory health and available storage.')
 
 
 @st.cache_data(ttl=120)
@@ -19,18 +19,22 @@ def storage_inventory(path):
 @st.fragment(run_every='30s')
 def health():
     campaign=campaign_summary();services=service_status();gpu=gpu_status()
-    metric_columns([('Research worker','Running' if campaign and campaign['worker_running'] else 'Inactive'),('MLflow',tracking_health()),('Tracking deliveries pending',pending_outbox())])
-    st.caption('Research activity: '+(campaign['status'].replace('_',' ').title() if campaign else 'No campaign'))
-    table([{'Service':name.title(),'Health':'Running' if okay else 'Unavailable'} for name,okay in services.items()])
-    if gpu.get('available'):st.caption(f"{gpu.get('name','GPU')} · utilization {gpu['utilization_percent']}% · {gpu['memory_used_mib']:,} / {gpu['memory_total_mib']:,} MiB")
-    st.subheader('Authorization and execution')
-    state,reason=authorization_state(campaign,queue_paused());st.write('**'+state+'** · '+reason)
-    st.caption('New execution eligibility is checked against the authorization file by loco-lab research start. The dashboard does not grant authorization or infer eligibility from legacy environment flags.')
-    if campaign:st.caption(f"Last / active campaign: {campaign['id']} · {campaign.get('reason') or 'No stop reason'}")
-    st.subheader('Storage and retention')
+    ready=all(services.values()) and tracking_health()=='Connected'
+    st.subheader('Services healthy' if ready else 'Attention needed')
+    if campaign and campaign['status']=='RUNNING' and not campaign['worker_running']:
+        st.warning('The campaign is active but its research worker is unavailable.')
+    st.caption(('Research worker running' if campaign and campaign['worker_running'] else 'No research worker running')+
+        f" · {pending_outbox()} tracking deliveries pending")
+    if gpu.get('available'):st.caption(f"{gpu.get('name','GPU')} · {gpu['utilization_percent']}% utilization")
+    with st.expander('Services and authorization'):
+        table([{'Service':name.title(),'Health':'Running' if okay else 'Unavailable'} for name,okay in services.items()])
+        state,reason=authorization_state(campaign,queue_paused());st.write('**'+state+'** · '+reason)
+        st.caption('New execution eligibility is checked by loco-lab research start. Historical campaign authorization is distinct from present activity.')
+        if campaign:st.caption(campaign['id']+' · '+(campaign.get('reason') or campaign['status']))
+    st.subheader('Storage')
     try:
         storage=storage_inventory(str(runtime_root()));used=storage['observed_bytes']/2**30;quota=storage['limit_bytes']/2**30
-        metric_columns([('Runtime used',f'{used:.2f} GiB'),('Runtime quota',f'{quota:.0f} GiB'),('Available under quota',f'{max(0,quota-used):.2f} GiB')])
+        metric_columns([('Available',f'{max(0,quota-used):.1f} GiB'),('Used',f'{used:.1f} / {quota:.0f} GiB')])
         st.progress(min(1.,used/quota) if quota else 0.)
     except (OSError,ValueError) as exc:st.warning('Storage inventory unavailable: '+str(exc))
     retained=[dict(run_id=r['name'].split(':',1)[1],**decode(r['value'])) for r in rows("SELECT name,value FROM settings WHERE name LIKE 'artifact_retention:%'")]
@@ -42,11 +46,11 @@ def health():
         if r['category']=='fixture' or r['candidate_id'] in {'toy_normal_ae','toy_normal_ae_cuda'} or cfg.get('execution_kind')=='frozen' or cfg.get('frozen_baseline') or r['run_id'] in archived_ids:continue
         path=runtime_root()/'jobs'/r['run_id']/'checkpoint/model.pt'
         if not path.is_symlink() and path.resolve().is_relative_to((runtime_root()/'jobs').resolve()) and path.is_file():full.append(dict(r,status='FULL'))
-    st.caption(f"{len(full)} full-retained model-producing records · {len(archived)} metrics-only archives. Rolling policy selects nine, with explicit active/protected-reference exceptions.")
+    st.caption(f"{len(full)} retained models · {len(archived)} archived records")
     last=rows("SELECT time,payload_json FROM events WHERE kind='STORAGE_CLEANUP_PASS' ORDER BY id DESC LIMIT 1")
     if last:st.caption('Last automatic cleanup: '+format_date(last[0]['time']))
     else:st.caption('No completed cleanup audit recorded.')
-    st.caption('Cleanup runs at startup, completion, admission pressure and about every 30 minutes. This read-only page never runs cleanup.')
+
     with st.expander('Retained records and cleanup audit'):
         if full:table([{'Run':r['run_id'],'Status':r['status']} for r in full])
         if last:st.json(decode(last[0]['payload_json']))

@@ -4,7 +4,7 @@ The four pages have separate responsibilities: Home reports the selected
 campaign's current state; Research explores comparisons, arms, seeds and critiques;
 Results compares numerical model evidence and opens retained visual artifacts;
 System reports services, authorization scope and storage. Campaign selection is
-shared. Comparisons paginate eight at a time and model tables 25 at a time.
+shared. Comparisons paginate six at a time and model tables 20 at a time.
 
 ## Training boundaries
 
@@ -95,8 +95,19 @@ A future authorized live campaign remains necessary to observe new candidate
 control declarations and real GPU training efficiency. Original-scorer equivalence
 and independent final-holdout generalization remain unverified.
 
-Final validation: 712 tests passed with `LOCO_TEST_BWRAP=1`, including real CPU
+Final validation: 713 tests passed with `LOCO_TEST_BWRAP=1`, including real CPU
 Bubblewrap integration. SQLite-to-MLflow comparison found zero mismatches among
 910 development metric values for the regression campaign. The historical
 run-metrics fingerprint and all retained incumbent archive hashes were unchanged;
 tracking had zero pending deliveries. No live research configuration was edited.
+
+## Simplified operator views
+
+Home uses two compact cards: campaign activity and the retained model. Results
+opens directly on the model reference and six primary measurements, with only one
+model selector. Localization previews load only on an explicit button press.
+Research uses six clickable investigations per page; findings, arms/seeds and
+scientific evidence open in a dismissible detail view. Model table rows also open
+result details. Browsing/comparing models, full scientific records and service
+diagnostics remain available on demand. UI-only presentation labels never change
+scientific identities, measurements, selection policy or execution settings.
