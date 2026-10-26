@@ -61,6 +61,7 @@ def comparison_records(campaign_id):
         record['status']=status
         record['expected']=len(record['plan']['arms'])*len(record['plan']['seeds'])
         record['completed']=sum(r['status'] in {'COMPLETED','REVIEWED','PROMOTED'} for r in record['runs'])
+    for number,record in enumerate(records.values(),1):record['order']=number
     return list(records.values())
 
 
@@ -84,11 +85,14 @@ def model_results(campaign_id=None):
     run_records={r['run_id']:r for r in rows('SELECT * FROM runs ORDER BY created_at,rowid')}
     memberships={r['run_id']:r['campaign_id'] for r in rows('SELECT * FROM campaign_runs')}
     from dashboard.presentation import classify_run, INFRASTRUCTURE
+    from dashboard.experiment_timeline import execution_contexts
+    contexts=execution_contexts(campaign_id)
     result=[]
     for f in feedback:
         r=run_records[f['run_id']];f['run']=dict(r,config=decode(r['config_json']),metrics=decode(r['metrics_json']))
         if classify_run(f['run'])==INFRASTRUCTURE or r['candidate_id']=='toy_normal_ae_cuda':continue
         f['campaign_id']=memberships.get(f['run_id']);f['config']=f['run']['config']
+        f['execution']=contexts.get(f['run_id'])
         result.append(f)
     return result
 
@@ -156,8 +160,9 @@ def comparison_matrix(record):
 
 
 def leaderboard_row(f):
-    m=f['metrics'];cfg=f.get('config',{});run=f.get('run',{})
-    return {'Run':f['run_id'],'Candidate':f['candidate_id'].replace('_',' '),'Arm':cfg.get('plan_arm','—'),
+    from dashboard.experiment_timeline import timestamp
+    m=f['metrics'];cfg=f.get('config',{});run=f.get('run',{});execution=f.get('execution') or {}
+    return {'#':execution.get('order'),'Started':timestamp(execution.get('started_at',run.get('started_at'))),'Run':f['run_id'],'Candidate':f['candidate_id'].replace('_',' '),'Arm':cfg.get('plan_arm','—'),
         'Seed':cfg.get('seed'),'Status':run.get('status','Unavailable'),
         'Logical AU-sPRO':m.get(SPRO),'Logical pixel AP':m.get(AP),
         'Logical AUROC':m.get('dev_real/logical_image_auroc'),

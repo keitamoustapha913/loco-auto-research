@@ -7,6 +7,7 @@ from dashboard.presentation import format_duration
 from dashboard.campaign_timing import training_seconds
 from dashboard.data_access import real_heatmap_sample
 from dashboard.components import candidate_research_panel
+from dashboard.experiment_timeline import timestamp,seconds
 
 
 def readable_name(identifier):
@@ -26,6 +27,14 @@ def model_card(record, incumbent_id=None, *, key='model'):
     reference='Current research reference · ' if record['run_id']==incumbent_id else ''
     evidence=record.get('scientific_comparison',{}).get('scientific_eligibility',{}).get('evidence_level','Exploratory')
     st.caption(f"{reference}{str(evidence).replace('_',' ').capitalize()} · seed {cfg.get('seed','?')} · {cfg.get('plan_arm','legacy')}")
+    execution=record.get('execution')
+    if execution:
+        number=str(execution['order']) if execution['order'] is not None else 'not recorded'
+        st.caption('Experiment #'+number+' · Campaign started '+timestamp(execution['campaign_started']))
+        st.caption('Started '+timestamp(execution['started_at'])+' · Finished '+timestamp(execution['finished_at']))
+        st.caption('Job duration '+seconds(execution['job_seconds'])+' · Development evaluation '+('reused' if execution['evaluation_reused'] else seconds(execution['evaluation_seconds'])))
+    else:
+        st.caption('Execution order not linked to a campaign · Started '+timestamp(run.get('started_at'))+' · Finished '+timestamp(run.get('finished_at')))
     score=lambda name:f'{metrics[name]:.4f}' if metrics.get(name) is not None else 'Unavailable'
     metric_columns([('Logical AU-sPRO',score(SPRO)),('Logical pixel AP',score(AP)),
         ('Normal false positives',f"{metrics.get('dev_real/normal_false_positives','?')} / {metrics.get('dev_real/normal_images','?')}")])
@@ -66,7 +75,8 @@ def model_card(record, incumbent_id=None, *, key='model'):
 def comparison_details(record):
     plan=record['plan'];result=record['result'] or {};review=record.get('review')
     st.subheader(readable_name(plan['hypothesis_id']))
-    st.caption(record['status']+f" · {record['completed']} / {record['expected']} model runs complete")
+    st.caption('Study #'+str(record.get('order','?'))+' · '+record['status']+f" · {record['completed']} / {record['expected']} model runs complete")
+    st.caption('Plan recorded '+timestamp(record['registered_at']))
     findings,design,technical=st.tabs(['Finding','Arms and seeds','Evidence'])
     with findings:
         st.write(record.get('proposal',{}).get('claim') or plan.get('scientific_question') or plan.get('hypothesis') or 'See the frozen plan for the scientific question.')

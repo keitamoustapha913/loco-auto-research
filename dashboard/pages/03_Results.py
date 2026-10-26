@@ -35,8 +35,10 @@ else:
                 pages=max(1,(len(filtered)+19)//20)
                 page=st.selectbox('Page',range(1,pages+1)) if pages>1 else 1
                 visible=filtered[(page-1)*20:page*20]
-                event=table([{k:v for k,v in leaderboard_row(f).items() if k in {'Candidate','Arm','Seed','Logical AU-sPRO','Logical pixel AP','Normal FP','Artifacts'}}
+                event=table([{k:v for k,v in leaderboard_row(f).items() if k in {'#','Started','Candidate','Arm','Seed','Logical AU-sPRO','Logical pixel AP','Normal FP','Artifacts'}}
                     for f in visible],on_select='rerun',selection_mode='single-row',key='browse:'+','.join(f['run_id'] for f in visible),column_config={
+                        '#':st.column_config.NumberColumn('Experiment',format='%d',width='small'),
+                        'Started':st.column_config.TextColumn('Started · Paris',width='medium'),
                         'Logical AU-sPRO':st.column_config.NumberColumn(format='%.4f'),
                         'Logical pixel AP':st.column_config.NumberColumn(format='%.4f')})
                 opened=visible[event.selection.rows[0]]['run_id'] if event.selection.rows else None

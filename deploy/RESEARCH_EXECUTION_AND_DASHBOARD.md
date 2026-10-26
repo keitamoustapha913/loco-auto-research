@@ -95,7 +95,7 @@ A future authorized live campaign remains necessary to observe new candidate
 control declarations and real GPU training efficiency. Original-scorer equivalence
 and independent final-holdout generalization remain unverified.
 
-Final validation: 713 tests passed with `LOCO_TEST_BWRAP=1`, including real CPU
+Final validation: 719 tests passed with `LOCO_TEST_BWRAP=1`, including real CPU
 Bubblewrap integration. SQLite-to-MLflow comparison found zero mismatches among
 910 development metric values for the regression campaign. The historical
 run-metrics fingerprint and all retained incumbent archive hashes were unchanged;
@@ -111,3 +111,25 @@ scientific evidence open in a dismissible detail view. Model table rows also ope
 result details. Browsing/comparing models, full scientific records and service
 diagnostics remain available on demand. UI-only presentation labels never change
 scientific identities, measurements, selection policy or execution settings.
+
+## Experiment chronology
+
+Research opens on a numbered Timeline of individual model jobs, distinct from the
+numbered scientific studies under Investigations. Numbers follow recorded actual
+starts within each originating campaign, with creation/row order breaking ties;
+queued jobs have no invented execution number. All dates explicitly use
+Europe/Paris (including CET/CEST). Pagination preserves the original numbers.
+
+The table separates training-loop time, job wall time and development-evaluation
+time. Execution-finish transition events take precedence over `finished_at`, which
+later promotion/rejection can overwrite. Shared critique time is not charged to
+individual model rows. Cached evaluation reuse is identified rather than reporting
+its original evaluation duration as current execution time. Missing measurements
+remain unrecorded; historical arithmetic-only timing is not relabeled as loop time.
+
+Results links each model to its actual campaign and execution number, including
+retained models originating in earlier campaigns. The 12-hour regression campaign
+has 37 recorded starts: first 2026-10-25 13:44:43 CET and last 2026-10-26 01:11:20 CET.
+The retained seed-863 model is experiment 7 of the prior campaign. No historical
+records, model rankings or scientific measurements are modified. The full offline
+suite passes 719 tests, including CPU Bubblewrap integration.
