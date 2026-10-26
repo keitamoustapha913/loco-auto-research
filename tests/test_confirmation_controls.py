@@ -64,7 +64,7 @@ def test_actual_state_inputs_and_optimizer_join_and_detect_mismatch(tmp_path,mon
     assert comparison_controls(plan,rows)['sampling_stream_status']=='VERIFIED'
     # Tampering fails hash checks before it can support any confirmation.
     path=Path(rows[1]['artifact_dir'])/'paired_input_0.sha256';path.write_bytes(b'x'*64)
-    assert verify_pairs(plan,rows)['status']=='UNVERIFIED'
+    assert verify_pairs(plan,rows)['status']=='MISMATCHED'
 
 
 def test_missing_observations_never_become_verified_by_equal_seeds(tmp_path):
@@ -72,4 +72,4 @@ def test_missing_observations_never_become_verified_by_equal_seeds(tmp_path):
     rows=[{'artifact_dir':str(tmp_path),'config_json':json.dumps(dict(plan['training'],plan_sha256=digest(plan),
         plan_arm=a['arm_id'],seed=3)),'metrics_json':'{}'} for a in plan['arms']]
     controls=comparison_controls(plan,rows)
-    assert not controls['causal_claim_eligible'] and controls['sampling_stream_status']=='UNVERIFIED'
+    assert not controls['causal_claim_eligible'] and controls['sampling_stream_status']=='NOT_MEASURED'

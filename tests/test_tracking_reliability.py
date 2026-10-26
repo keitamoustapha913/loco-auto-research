@@ -75,8 +75,11 @@ def test_dashboard_empty_and_recorded_pages(tmp_path, monkeypatch):
     recorded = AppTest.from_file(page).run()
     assert not recorded.exception
     assert recorded.info  # Toy runs are excluded from research results by default.
-    recorded.toggle[0].set_value(True).run()
-    assert recorded.dataframe
+    # Infrastructure fixtures are no longer mixed into scientific results.
+    # Their historical ledger records remain inspectable by the System view.
+    assert not recorded.dataframe  # no toy rows in the scientific leaderboard
+    from dashboard.data_access import list_runs
+    assert list_runs()
 
 
 def test_tracking_adds_research_sources_and_critique(tmp_path, monkeypatch):

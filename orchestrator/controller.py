@@ -638,6 +638,7 @@ def implement_proposal(store, hypothesis_id, campaign=None, personal_mode=False,
             "Implement diagnose(predictor, assessment_good_images, diagnostic_config). "
             "Tests must execute on CPU, not be entirely skipped. No unapproved dependencies or external weights. "
             f"Exact proposal: {json.dumps(proposal,sort_keys=True)}")
+    instruction += ('\nFor disjoint synthetic donors declare a literal SYNTHETIC_EDIT_GEOMETRY list with kind=disjoint_square_copy, height, width and all sides (optional inclusive destination_y/destination_x ranges). Verify the complete sampling domain, including central maximum patches, before training. A frozen impossible geometry must fail, never resample or change the recipe. For actual matching evidence select relevant prepared input indices in confirmation_requirements.paired_controls; prose requests and equal seeds produce no trusted stream verification. Exploratory work may leave this null, with causal claims unavailable.')
     instruction += ('\nDiagnostic input contract: calibration_good_images is a separate authorized validation/good RGB float32 batch; '
         'calibration_source_ids and assessment_source_ids are disjoint SHA256 identities. frozen_normal_threshold is '
         'already fixed by normal-only calibration. Never recalibrate on assessment inputs or change predictor state. '

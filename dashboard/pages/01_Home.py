@@ -1,137 +1,63 @@
-"""At-a-glance state: service health and research authorization are different facts."""
+"""Current research at a glance. Campaign details and model tables live elsewhere."""
 import json
-import os
-import time
-
 import streamlit as st
-
-from dashboard.campaign_timing import campaign_training_seconds
 from dashboard.components import page_intro
-from dashboard.cumulative import progress_card
-from dashboard.data_access import cumulative_progress
-from dashboard.data_access import (
-    campaign_summary, dataset_summary, get_events, get_proposals, gpu_status, ledger_summary,
-    list_runs, pending_outbox, queue_paused, service_status, tracking_health,
-)
-from dashboard.presentation import (
-    autonomy_state, classify_run, direction_label, format_date, format_duration, parse_event,
-    research_summary, run_label,
-)
+from dashboard.campaign_timing import campaign_training_seconds
+from dashboard.view import campaign_picker,metric_columns
+from dashboard.research_data import campaign_runs,comparison_records,campaign_stats,active_incumbent,SPRO,AP,LABEL
+from dashboard.data_access import campaign_summary,queue_paused
+from dashboard.presentation import format_duration,autonomy_state
+import os
 
-page_intro("Home", "Laboratory health, research activity, and approved compute.")
+page_intro('Research overview','Campaign activity, scientific progress and the retained research reference.')
+campaign=campaign_picker()
 
 
-@st.cache_data(ttl=60)
-def cached_dataset_summary():
-    return dataset_summary()
+@st.fragment(run_every='15s')
+def overview():
+    current=campaign_summary(campaign['id']) if campaign else None
+    if not current:
+        state,reason=autonomy_state(os.environ,queue_paused())
+        st.metric('Autonomous research',state);st.caption(reason)
+        st.info('No campaign has been recorded yet.')
+        if state=='Authorized':st.page_link('pages/02_Research.py',label='Review current research →')
+        return
+    runs=campaign_runs(current['id']);comparisons=comparison_records(current['id']);s=campaign_stats(current,runs,comparisons)
+    metric_columns([('Campaign',current['status'].replace('_',' ').title()),('Research elapsed',format_duration(s['elapsed'])),('Time remaining',format_duration(s['remaining'])),('Training-loop duration',format_duration(campaign_training_seconds(current,runs)))])
+    allowance=current['config']['limits'].get('research_hours',current['config']['limits'].get('max_wall_hours',0))*3600
+    st.progress(min(1.,s['elapsed']/allowance) if allowance else 0.,text=current['name'])
+    active=next((r for r in runs if r['status']=='RUNNING'),None)
+    agent=next((e for e in current['events'] if e['kind'] in {'AGENT_STARTED','AGENT_COMPLETED','AGENT_FAILED'}),None)
+    with st.container(border=True):
+        st.subheader('Current activity')
+        if current['status'] not in {'RUNNING','PAUSED','STOPPING'}:
+            st.write('Campaign finished. '+(current.get('reason') or ''))
+        elif not current['worker_running']:st.warning('Campaign worker is absent; recorded work may be interrupted.')
+        elif active:st.write(f"**{active['candidate_id'].replace('_',' ')}** · {active['config'].get('plan_arm','')} · seed {active['config'].get('seed','—')}")
+        elif agent and agent['kind']=='AGENT_STARTED':st.write('Codex '+json.loads(agent['payload_json']).get('role','research agent').replace('_',' ')+' is working.')
+        else:st.write('Controller is selecting or preparing the next research operation.')
+        if current.get('current_hypothesis'):st.caption('Current / last investigation: '+current['current_hypothesis'].replace('_',' '))
+    metric_columns([('Comparisons complete',s['complete']),('Incomplete',s['incomplete']),('New models trained',s['trained']),('Runs reviewed',s['reviewed'])])
+    st.caption(f"Selected campaign only · {s['jobs']} executed jobs · {s['failed']} failed jobs. Completion describes execution; confirmation requires separate scientific evidence.")
+    incumbent=active_incumbent(current)
+    if incumbent:
+        st.subheader('Active research incumbent')
+        st.write('**'+incumbent['candidate_id'].replace('_',' ')+'** · seed '+str(incumbent['configuration'].get('seed','Unavailable')))
+        metrics=incumbent['metrics'];state=incumbent['research_state']
+        metric_columns([('Logical AU-sPRO@5%',f'{metrics[SPRO]:.4f}'),('Logical pixel AP',f'{metrics[AP]:.4f}'),('Normal false positives',f"{metrics['dev_real/normal_false_positives']} / {metrics['dev_real/normal_images']}")])
+        st.caption('Exploratory research reference · '+LABEL+' Compatible scorer; original-code equivalence unverified.')
+        score=state.get('selection',{}).get('score')
+        st.caption(('Selection score '+f'{score:.4f}' if score is not None else 'Selection score unavailable')+' · 60% sPRO + 20% pixel AP + 10% normal performance + 10% efficiency')
+        delta=state.get('localization_delta',{})
+        if SPRO in delta and AP in delta:
+            st.caption(f"Change from previous incumbent: AU-sPRO {delta[SPRO]:+.4f} · pixel AP {delta[AP]:+.4f}. Selection gives localization 80% weight; this is not confirmed superiority.")
+        else:st.caption('Change from previous incumbent unavailable; no measured improvement is inferred.')
+    failed=[r for r in runs if r.get('error')]
+    if failed:
+        with st.expander(f"{len(failed)} recorded job failures"):
+            for r in failed:st.write(r['run_id'][:8]);st.code(r['error'][-4500:],language='text')
+    a,b=st.columns(2)
+    a.page_link('pages/02_Research.py',label='Explore comparisons →')
+    b.page_link('pages/03_Results.py',label='Compare model results →')
 
-
-@st.fragment(run_every="10s")
-def live_home():
-    runs = list_runs(500)
-    proposals = get_proposals()
-    events = get_events(200)
-    services = service_status()
-    gpu = gpu_status()
-    dataset = cached_dataset_summary()
-    summary = research_summary(runs)
-    state, reason = autonomy_state(os.environ, queue_paused())
-    autonomous = campaign_summary()
-    latest_agent = next((e for e in (autonomous or {}).get('events', [])
-                         if e['kind'] in {'AGENT_STARTED', 'AGENT_COMPLETED', 'AGENT_FAILED'}), None)
-    agent_role = json.loads(latest_agent['payload_json']).get('role') if latest_agent and latest_agent['kind'] == 'AGENT_STARTED' else None
-    if autonomous:
-        state = ('Interrupted' if autonomous['status'] == 'RUNNING' and not autonomous['worker_running']
-                 else autonomous['status'].replace('_', ' ').title())
-        reason = autonomous.get('reason') or ('Campaign worker active' if autonomous['worker_running'] else 'Campaign worker is not running')
-    lab_ok = all(services.values()) and tracking_health() == "Connected"
-    active = next((run for run in runs if run.get("status") == "RUNNING"), None)
-    queued = next((run for run in reversed(runs) if run.get("status") == "QUEUED"), None)
-    next_proposal = next((p for p in sorted(proposals, key=lambda item: item["proposal"].get("priority_rank", 999)) if p["status"] == "PROPOSED"), None)
-
-    left, right = st.columns(2, gap="large")
-    with left:
-        st.metric("Laboratory", "Running" if lab_ok else "Needs attention")
-        st.caption("MLflow, dashboard, and tracking worker" if lab_ok else "Open System to inspect service health.")
-    with right:
-        st.metric("Autonomous research", state)
-        st.caption(reason)
-
-    if state == "Authorized":
-        st.page_link("pages/02_Research.py", label="Review current research →", icon="🔬")
-    if autonomous:
-        limits = autonomous.get('config', {}).get('limits', {})
-        used = autonomous['usage']
-        elapsed = (autonomous.get('ended_at') or time.time())-autonomous['created_at']
-        actual_training = campaign_training_seconds(autonomous,runs)
-        st.caption(f"Campaign: {autonomous['name']} · Research elapsed {format_duration(elapsed)} · Training-loop elapsed {format_duration(actual_training)}")
-        if autonomous.get('current_hypothesis'):
-            label = 'Current hypothesis' if autonomous['status'] in {'RUNNING', 'PAUSED', 'STOPPING'} else 'Last hypothesis'
-            st.write(f"**{label}:** {autonomous['current_hypothesis'].replace('_', ' ')}")
-
-    campaign = os.getenv("LOCO_CAMPAIGN", "Unspecified campaign")
-    categories = ", ".join(dataset["categories"]) or "Dataset unavailable"
-    st.caption(f"{campaign}  ·  {categories}  ·  {dataset['images']} permitted good images")
-    a, b, c, d = st.columns(4)
-    a.metric("Research models evaluated", summary["evaluated"], help="Completed research pilots and full evaluations; infrastructure tests excluded.")
-    b.metric("Infrastructure tests", summary["infrastructure_completed"], help="Completed toy or fixture runs used to verify the laboratory.")
-    c.metric("GPU", gpu.get("name", "Unavailable").replace("NVIDIA GeForce ", "") if gpu.get("available") else "Unavailable",
-             help=f"{gpu.get('memory_used_mib', 0):,} / {gpu.get('memory_total_mib', 0):,} MiB in use" if gpu.get("available") else None)
-    if autonomous:
-        hours = autonomous.get('config',{}).get('limits',{}).get('research_hours', autonomous.get('config',{}).get('limits',{}).get('max_wall_hours',0))
-        elapsed = (autonomous.get('ended_at') or time.time())-autonomous['created_at']
-        d.metric("Research time remaining",format_duration(max(0,hours*3600-elapsed)))
-    else:
-        d.metric("Research time remaining", "No campaign")
-
-    progress_card(cumulative_progress())
-
-    current, direction = st.columns(2, gap="large")
-    with current:
-        st.subheader("Current activity")
-        if active:
-            elapsed = format_duration(time.time() - active["started_at"]) if active.get("started_at") else "—"
-            st.write(f"**{run_label(active)}** · {classify_run(active)}")
-            st.caption(f"Experiment running for {elapsed}. Codex activity is not separately tracked live.")
-        else:
-            st.write("**No experiment running**")
-            st.caption(f"Codex {agent_role.title()} is working." if agent_role and autonomous.get('worker_running')
-                       else "No active Codex task is reported by the controller.")
-        if queued:
-            st.caption(f"Next queued: {run_label(queued)} · {classify_run(queued)}")
-        elif autonomous and autonomous.get('next_hypothesis'):
-            st.caption(f"Next direction: {direction_label(autonomous['next_hypothesis'])}")
-        elif next_proposal:
-            st.caption(f"Next proposed: {next_proposal['proposal'].get('claim', next_proposal['hypothesis_id'])}")
-        else:
-            st.caption("No research experiment is scheduled.")
-    with direction:
-        st.subheader("Latest outcome")
-        if runs:
-            latest = runs[0]
-            st.write(f"**{run_label(latest)}** · {str(latest['status']).title()}")
-            st.caption(f"{classify_run(latest)} · {format_date(latest.get('finished_at') or latest.get('created_at'))}")
-            if latest.get("error"):
-                st.caption(f"Failure: {latest['error']}")
-        else:
-            st.write("**No experiments recorded**")
-            st.caption("Research results will appear here after an approved run completes.")
-        campaign_decision = next((e for e in (autonomous or {}).get('events', [])
-                                  if e['kind'] in {'NEXT_DECISION', 'NEXT_DECISION_CORRECTION'}), None)
-        decisions = [e for e in events if e["kind"] in {"CRITIC_REVIEW", "HYPOTHESIS_RANKING"}]
-        if campaign_decision:
-            payload = json.loads(campaign_decision['payload_json'])
-            st.caption(f"Latest research decision: {payload.get('reason') or payload.get('action', 'Recorded')}")
-        elif decisions:
-            payload = parse_event(decisions[0])
-            decision = payload.get("priority_rationale") or payload.get("recommended_next_action") or "A research decision was recorded."
-            st.caption(f"Latest research decision: {decision}")
-        else:
-            st.caption("No scientific decision has been recorded yet.")
-
-    with st.expander("Tracking and run details"):
-        st.write(f"MLflow: {tracking_health()} · Pending tracking events: {pending_outbox()}")
-        st.write(f"Research failures: {summary['research_failed']}")
-
-
-live_home()
+overview()

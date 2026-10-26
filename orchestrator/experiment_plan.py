@@ -739,9 +739,13 @@ def execute_plan(store, campaigns, campaign_id, runtime, plan):
             from orchestrator.experiment_runner import require_training_phases
             require_training_phases(module,target=True,loop=plan.get('schema_version')=='4.0') if plan.get('schema_version') in {'3.0','4.0'} else require_training_phases(module)
         source_hash = sha256(module) if module else ''
+        if train_arms:
+            from benchmark.synthetic_geometry import validate_candidate_geometry
+            from orchestrator.controller_errors import candidate_check
+            candidate_check(validate_candidate_geometry,module)
         trusted_files = ['orchestrator/autonomy.py','orchestrator/controller.py','orchestrator/experiment_plan.py',
                          'orchestrator/planning_contract.py','orchestrator/experiment_runner.py','orchestrator/sandbox.py','orchestrator/development_feedback.py',
-                         'scripts/run_candidate.py','scripts/training_phase.py','scripts/paired_controls.py','scripts/feedback_infer.py','scripts/candidate_smoke.py',
+                         'benchmark/synthetic_geometry.py','scripts/run_candidate.py','scripts/training_phase.py','scripts/paired_controls.py','scripts/feedback_infer.py','scripts/candidate_smoke.py',
                          'benchmark/train_adapter.py','benchmark/feedback_metrics.py','benchmark/feedback_data.py',
                          'benchmark/feedback_artifacts.py','orchestrator/storage_cleanup.py',
                          'schemas/experiment_plan.schema.json','configs/development_feedback.json']

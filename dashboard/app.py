@@ -9,8 +9,18 @@ from orchestrator.lab_cli import load_settings
 
 load_settings()
 st.set_page_config(page_title="LOCO Research Lab", page_icon="🔬", layout="wide", initial_sidebar_state="expanded")
+st.markdown('''<style>
+section.main > div {padding-top: 2rem;}
+[data-testid="stMainBlockContainer"] {padding-top: 2rem; padding-bottom: 2rem;}
+[data-testid="stMetricValue"] {font-size: clamp(1.25rem, 2vw, 2rem);}
+[data-testid="stMetric"] {min-width: 0;}
+@media (max-width: 1100px) {
+  [data-testid="stHorizontalBlock"]:has([data-testid="stMetric"]) {flex-wrap: wrap;}
+  [data-testid="stHorizontalBlock"]:has([data-testid="stMetric"]) > [data-testid="stColumn"] {flex: 1 1 160px; min-width: 160px;}
+}
+</style>''', unsafe_allow_html=True)
 st.sidebar.title("LOCO Research Lab")
-st.sidebar.caption("Good-only development")
+st.sidebar.caption("Normal-only learning · Localization-first research")
 st.sidebar.divider()
 
 page = st.navigation([

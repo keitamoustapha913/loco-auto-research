@@ -64,6 +64,7 @@ class TrainingClock:
         self.loop_mode=loop;self.loop_started=None;self.loop_finished=None;self.last_boundary=None
         self.paired_controls={}
         self.last_iteration_seconds=0.
+        self.last_publish=None
         self.publish()
 
     def duration(self):
@@ -73,6 +74,11 @@ class TrainingClock:
 
     def publish(self):
         started=time.perf_counter()
+        # Atomic live progress is useful once a second, not three times per
+        # optimizer update. Terminal audits always publish exact final counters.
+        if self.status in {'TRAINING','PREPARING'} and self.last_publish is not None and started-self.last_publish<1:
+            return
+        self.last_publish=started
         data={'protocol':VERSION,'status':self.status,'verified':self.verified,
               'duration_seconds':self.duration(),'budget_seconds':self.budget,
               'learning_seconds':self.elapsed,'loop_elapsed_seconds':self.duration() if self.loop_mode else None,
@@ -82,6 +88,7 @@ class TrainingClock:
               'source_exposures':self.exposures,'last_step_seconds':self.last_step_seconds,
               'overshoot_seconds':max(0,self.duration()-self.budget) if self.target else 0,
               'last_iteration_seconds':self.last_iteration_seconds,
+              'boundary_definition':'consecutive-completed-updates-v1' if self.loop_mode else None,
               'completed_steps':self.steps,'phase_started_monotonic':self.phase_started}
         if self.paired_controls:data['paired_controls']=self.paired_controls
         data['execution_profile']={'version':'training-throughput-v1','costs':dict(self.costs),
@@ -287,8 +294,11 @@ def run_training_phases(module, config, manifest, output, *, budget=None, prefli
                     closure();step.optimizer.step()
             paired.step(step)
             clock.measure(update);clock.steps+=1
-            boundary=time.perf_counter();clock.last_boundary=boundary
-            clock.last_iteration_seconds=boundary-iteration_started
+            boundary=time.perf_counter()
+            # Consecutive completed-update boundaries include the previous audit
+            # publication and bookkeeping. iteration_started excludes those costs.
+            clock.last_iteration_seconds=boundary-(clock.last_boundary if clock.last_boundary is not None else clock.loop_started if loop else iteration_started)
+            clock.last_boundary=boundary
             elapsed=boundary-clock.loop_started if loop else clock.elapsed
             reached=clock.steps>=preflight_steps if preflight_steps is not None else elapsed>=budget if budget is not None else False
             if loop and reached:clock.loop_finished=boundary

@@ -23,7 +23,7 @@ def source_version():
     root=Path(__file__).parent
     return hashlib.sha256(b''.join((root/name).read_bytes() for name in
         ('controller.py','controller_errors.py','experiment_runner.py','campaign_state.py','autonomy.py',
-         'planning_contract.py','experiment_plan.py','codex_runner.py','../benchmark/train_adapter.py'))).hexdigest()
+         'planning_contract.py','experiment_plan.py','codex_runner.py','../benchmark/train_adapter.py','../benchmark/synthetic_geometry.py'))).hexdigest()
 
 
 def trusted_failure(exc, operation, *, fatal=True):

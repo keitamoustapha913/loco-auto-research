@@ -1,183 +1,112 @@
-"""Experiment details, development preview artifacts and scientific trade-offs."""
-import pandas as pd
-import plotly.express as px
+"""Scientific model results and retained visual evidence; no campaign overview dump."""
 import streamlit as st
-from dashboard.campaign_timing import campaign_timing_card, training_seconds
-from dashboard.cumulative import progress_card
-from dashboard.data_access import cumulative_progress
+from dashboard.components import page_intro,candidate_research_panel
+from dashboard.view import campaign_picker,table,metric_columns
+from dashboard.research_data import model_results,active_incumbent,leaderboard_row,artifact_status,LABEL,SPRO,AP
+from dashboard.data_access import real_heatmap_sample
+from dashboard.campaign_timing import training_seconds
+from dashboard.presentation import format_duration
 
-
-from dashboard.components import page_intro, run_details, development_result_card, campaign_outcome_card, scientific_results_comparison, candidate_research_panel
-from dashboard.data_access import campaign_summary, pending_outbox, tracking_health, real_feedback_summaries, real_heatmap_sample, allowed_preview, heatmap_sample, latest_multiseed_comparison, list_runs
-from dashboard.presentation import (
-    INFRASTRUCTURE, METRICS, classify_run, comparable_research_runs,
-    experiment_rows, format_metric, metric_value, research_runs, research_summary, run_label,
-)
-from orchestrator.decision_engine import pareto_frontier
-
-page_intro("Results", "Measured runs and development previews. Synthetic proxies are never official LOCO scores.")
-progress_card(cumulative_progress())
-runs = list_runs(500)
-campaign_timing_card(None, runs)
-summary = research_summary(runs)
-models_tab, heatmaps_tab, compare_tab = st.tabs(["Models", "Heatmaps", "Compare"])
-
-with models_tab:
-    st.caption(f"{summary['evaluated']} research models evaluated. {summary['infrastructure_completed']} infrastructure tests completed.")
-    feedback = real_feedback_summaries()
-    if feedback:
-        st.subheader('Real-anomaly development feedback')
-        chosen_card = st.selectbox('Candidate result',range(len(feedback)),
-            format_func=lambda i: run_label(next((r for r in runs if r['run_id']==feedback[i]['run_id']),feedback[i]),include_date=True))
-        selected_feedback = feedback[chosen_card]
+page_intro('Model results','Compare logical localization, false positives and inference efficiency.')
+campaign=campaign_picker()
+st.caption(LABEL+' Compatible AU-sPRO@5%; original-scorer equivalence remains unverified. Missing scores are unavailable, never zero.')
+scope=st.radio('Result scope',['All recorded models','Selected campaign'],horizontal=True)
+feedback=model_results(campaign['id'] if campaign and scope=='Selected campaign' else None)
+incumbent=active_incumbent(campaign);incumbent_id=incumbent['run_id'] if incumbent else None
+with st.expander('Filter and sort models'):
+    query=st.text_input('Search models',placeholder='Candidate, arm, seed or run ID').strip().lower()
+    a,b,c=st.columns(3)
+    family=a.multiselect('Model family',sorted({f['candidate_id'] for f in feedback}))
+    comparisons=b.multiselect('Comparison',sorted({f['config'].get('plan_id','Legacy / unassigned') for f in feedback}))
+    seeds=c.multiselect('Training seed',sorted({str(f['config'].get('seed','Unavailable')) for f in feedback}))
+    a,b=st.columns(2)
+    statuses=a.multiselect('Run status',sorted({f['run']['status'] for f in feedback}))
+    order=b.selectbox('Sort models',['Execution order','Latest first','Logical AU-sPRO','Logical pixel AP'])
+filtered=[f for f in feedback if (not query or query in (f['candidate_id']+' '+str(f['config'].get('seed'))+' '+f['run_id']+' '+str(f['config'].get('plan_arm',''))).lower()) and (not family or f['candidate_id'] in family) and (not comparisons or f['config'].get('plan_id','Legacy / unassigned') in comparisons) and (not seeds or str(f['config'].get('seed','Unavailable')) in seeds) and (not statuses or f['run']['status'] in statuses)]
+if order=='Latest first':filtered=list(reversed(filtered))
+elif order in ['Logical AU-sPRO','Logical pixel AP']:filtered=sorted(filtered,key=lambda f:f['metrics'].get(SPRO if order=='Logical AU-sPRO' else AP,-1),reverse=True)
+if not filtered:
+    st.info('No evaluated models match this scope. Numerical records remain available after artifact retirement.')
+else:
+    st.subheader('Real-anomaly development results')
+    tabs=st.tabs(['Model details','Leaderboard','Compare selected models'])
+    with tabs[1]:
+        st.caption(f'{len(filtered)} evaluated model runs. Click a row to inspect its measurements. Frozen readouts retain their original training seed.')
+        page=st.number_input('Model page',1,max(1,(len(filtered)+24)//25),1)
+        visible=filtered[(page-1)*25:page*25]
+        grid=[]
+        for f in visible:
+            row=leaderboard_row(f);row['Research reference']='Active incumbent' if f['run_id']==incumbent_id else 'Alternative';grid.append(row)
+        event=table(grid,on_select='rerun',selection_mode='single-row',key='model_leaderboard:'+','.join(f['run_id'] for f in visible),
+            column_config={'Logical AU-sPRO':st.column_config.NumberColumn(format='%.4f'),'Logical pixel AP':st.column_config.NumberColumn(format='%.4f'),'Run':st.column_config.TextColumn(width='small')})
+    with tabs[0]:
+        ids=[f['run_id'] for f in filtered];by_id={f['run_id']:f for f in filtered}
+        default=incumbent_id if incumbent_id in ids else max(filtered,key=lambda f:f['run']['created_at'])['run_id']
+        if event.selection.rows:
+            chosen=visible[event.selection.rows[0]]['run_id']
+            st.session_state['selected_model']=chosen
+        remembered=st.session_state.get('selected_model',default)
+        selected=st.selectbox('Model details',ids,index=ids.index(remembered) if remembered in ids else ids.index(default),format_func=lambda rid:f"{by_id[rid]['candidate_id'].replace('_',' ')} · {by_id[rid]['config'].get('plan_arm','legacy')} · seed {by_id[rid]['config'].get('seed','?')} · {rid[:8]}")
+        f=by_id[selected];m=f['metrics'];cfg=f['config'];run=f['run']
         with st.container(border=True):
-            development_result_card(selected_feedback)
-            selected_run=next((r for r in runs if r['run_id']==selected_feedback['run_id']),{})
-            duration=training_seconds(selected_run)
-            st.metric('Training-loop duration', 'Unavailable' if duration is None else f'{duration:.1f} s')
-            st.write('**Localization preview**')
-            sample_index = st.number_input('Development sample',0,164,47,1,key='card_sample')
-            try:
-                preview = real_heatmap_sample(selected_feedback,int(sample_index))
-                for column,key,label in zip(st.columns(3),('original','heatmap','ground_truth'),
-                                             ('Original image','Predicted heatmap','Ground truth')):
-                    column.image(preview[key],caption=label,width='stretch')
-                st.caption(f"{preview['category'].replace('_',' ').title()} · {preview['mask_count']} annotation masks. Ground truth union is for display only; sPRO retains separate regions. Heatmap colors are per-image scaled.")
-            except (OSError,ValueError,KeyError):
-                st.info('Localization preview unavailable or failed integrity checks.')
-        st.caption('Codex’s next decision and supporting evidence are recorded separately on Research.')
-        with st.expander('Research and implementation details for this candidate'):
-            candidate_research_panel(selected_feedback['run_id'])
-    with st.expander('Experiment history and technical details',expanded=not bool(feedback)):
-        search, filter_col = st.columns([3, 1])
-        query = search.text_input("Search models or hypotheses", placeholder="Candidate or hypothesis", key="models_search").strip().lower()
-        show_tests = filter_col.toggle("Show infrastructure tests", value=False)
-        default_ids = {r["run_id"] for r in research_runs(runs)}
-        filtered = [r for r in runs if (show_tests or r["run_id"] in default_ids) and
-                    (not query or query in str(r.get("candidate_id", "")).lower() or query in str(r.get("hypothesis_id", "")).lower())]
-        if not filtered:
-            if not runs:
-                st.info("No experiments have been recorded yet.")
-            elif not show_tests and summary["evaluated"] == 0:
-                st.info("No research model has been evaluated yet. Turn on ‘Show infrastructure tests’ to inspect the verified toy runs.")
-            else:
-                st.info("No runs match this search.")
+            st.subheader(f['candidate_id'].replace('_',' ').capitalize())
+            st.caption(f"{cfg.get('plan_arm','Legacy arm')} · seed {cfg.get('seed','Unavailable')} · {selected[:8]} · {run['status'].title()}")
+            if selected==incumbent_id:
+                st.success('Active exploratory research incumbent · 80% localization-weighted selection. Scientific confirmation is separate.')
+            comparison=f.get('scientific_comparison',{})
+            st.caption('Scientific evidence: '+str(comparison.get('scientific_eligibility',{}).get('evidence_level','Exploratory; confirmed superiority not established')))
+            score=lambda key: f"{m[key]:.4f}" if m.get(key) is not None else 'Unavailable'
+            metric_columns([('Logical AU-sPRO@5%',score(SPRO)),('Logical pixel AP',score(AP)),('Logical image AUROC',score('dev_real/logical_image_auroc'))])
+            metric_columns([('Normal false positives',f"{m.get('dev_real/normal_false_positives','?')} / {m.get('dev_real/normal_images','?')}"),('Structural localization',score('dev_real/structural_au_spro_0_05_compatible')),('Inference p95 · '+f.get('inference_device','unknown').upper(),f"{m['dev_real/inference_e2e_ms_p95']:.1f} ms" if m.get('dev_real/inference_e2e_ms_p95') is not None else 'Unavailable')])
+            parameters=m.get('dev_real/parameters');size=m.get('dev_real/serialized_model_bytes');ram=m.get('dev_real/peak_cpu_rss_mib')
+            metric_columns([('Parameters',f'{int(parameters):,}' if parameters is not None else 'Unavailable'),('Serialized model',f'{size/2**20:.3f} MiB' if size is not None else 'Unavailable'),('Peak process RAM',f'{ram:.1f} MiB' if ram is not None else 'Unavailable')])
+            duration=training_seconds(run)
+            st.caption('Training-loop duration: '+(format_duration(duration) if duration is not None else 'Unavailable / historical timing definition'))
+            availability,message=artifact_status(f);st.write('**Artifacts: '+availability+'** · '+message)
+            if availability=='Available' and st.checkbox('Open localization viewer',key='open_localization'):
+                index=st.number_input('Development image index',0,164,0,1)
+                try:
+                    sample=real_heatmap_sample(f,int(index))
+                    for col,key,label in zip(st.columns(4),('original','heatmap','overlay','ground_truth'),('Original','Heatmap','Overlay','Ground truth')):col.image(sample[key],caption=label,width='stretch')
+                    st.caption('Original-resolution alignment and hashes verified. Display-only mask union; compatible sPRO retains individual regions and saturation rules.')
+                except FileNotFoundError:st.error('Artifact missing unexpectedly. No intentional archival marker was found.')
+                except PermissionError:st.warning('Artifact temporarily unavailable: permission or access failure.')
+                except (ValueError,KeyError,TypeError) as exc:st.error('Artifact integrity verification failed: '+str(exc))
+                except OSError as exc:st.warning('Artifact temporarily unavailable: '+str(exc))
+            with st.expander('Measurement protocol, efficiency and provenance'):
+                st.json({k:f.get(k) for k in ('split_id','evaluator_version','checkpoint_sha256','source_sha256','measurement_protocol','inference_device','threshold_source')})
+                st.json(m)
+            with st.expander('Candidate implementation and research references'):candidate_research_panel(selected)
+    with tabs[2]:
+        by_id={f['run_id']:f for f in filtered}
+        chosen=st.multiselect('Models to compare',list(by_id),format_func=lambda rid:by_id[rid]['candidate_id'].replace('_',' ')+f" · seed {by_id[rid]['config'].get('seed','?')} · {rid[:8]}",max_selections=12)
+        selected=[by_id[rid] for rid in chosen]
+        if len(selected)<2:st.info('Select at least two models. Comparisons require matching dataset and measurement protocols.')
         else:
-            table = experiment_rows(filtered)
-            visible = [{k: row[k] for k in ("Model", "Type", "Status", "Synthetic localization AUROC", "Latency (p95)", "Date")} for row in table]
-            st.dataframe(visible, hide_index=True, width="stretch", height=min(360, 38 * (len(visible) + 1)),
-                         column_config={"Synthetic localization AUROC": st.column_config.TextColumn(help=METRICS["dev_synthetic/pixel_auroc"][1]),
-                                        "Latency (p95)": st.column_config.TextColumn(help=METRICS["inference/e2e_ms_p95"][1])})
-            run_by_id = {r["run_id"]: r for r in filtered}
-            selected = st.selectbox("Experiment details", list(run_by_id), format_func=lambda rid: run_label(run_by_id[rid], include_date=True))
-            run_details(run_by_id[selected])
+            keys=('split_id','evaluator_version','training_manifest_sha256','inference_device','measurement_protocol','threshold_source')
+            compatible=all(all(f.get(k) is not None and f.get(k)==selected[0].get(k) for k in keys) for f in selected)
+            if not compatible:st.warning('Incompatible or unverified measurement protocols. Values are shown separately; no paired improvement is claimed.')
+            table([leaderboard_row(f) for f in selected])
+            if compatible and all(f['metrics'].get(SPRO) is not None and f['metrics'].get(AP) is not None for f in selected):
+                st.scatter_chart([{'Candidate':f['candidate_id'],'Seed':str(f['config'].get('seed','?')),'Logical AU-sPRO':f['metrics'][SPRO],'Logical pixel AP':f['metrics'][AP]} for f in selected],x='Logical AU-sPRO',y='Logical pixel AP',color='Candidate')
+            if compatible:
+                baseline=selected[0];deltas=[]
+                for f in selected[1:]:
+                    paired=(f['config'].get('plan_id') and f['config'].get('plan_id')==baseline['config'].get('plan_id') and f['config'].get('seed')==baseline['config'].get('seed'))
+                    deltas.append({'Model':f['candidate_id'],'Seed':f['config'].get('seed'),'Same plan / seed':bool(paired),
+                        'Δ logical sPRO':f['metrics'][SPRO]-baseline['metrics'][SPRO] if f['metrics'].get(SPRO) is not None and baseline['metrics'].get(SPRO) is not None else None,'Δ pixel AP':f['metrics'][AP]-baseline['metrics'][AP] if f['metrics'].get(AP) is not None and baseline['metrics'].get(AP) is not None else None})
+                table(deltas)
+                st.caption('Descriptive differences relative to the first selection. Matching seed labels alone does not establish causal control or seed uncertainty. Review trusted joins and critiques on Research.')
 
-with heatmaps_tab:
-    if feedback:
-        st.subheader('Real development heatmaps')
-        chosen = st.selectbox('Frozen evaluation', range(len(feedback)), format_func=lambda i: feedback[i]['candidate_id']+' · '+feedback[i]['evaluator_version'])
-        index = st.number_input('Development sample',0,164,47,1)
-        try:
-            sample = real_heatmap_sample(feedback[chosen],int(index))
-            left,right=st.columns(2)
-            left.image(sample['original'],caption='Approved development image',width='stretch')
-            right.image(sample['overlay'],caption='Anomaly overlay',width='stretch')
-            st.caption(f"Real development · {sample['category']} · score {sample['score']:.4f} · {sample['size'][0]} × {sample['size'][1]}. Display colors are per-image scaled; no calibration is fitted.")
-        except (OSError,ValueError,KeyError):
-            st.info('Real-development preview unavailable or failed artifact integrity checks.')
-    with st.expander('Optional synthetic development previews',expanded=not bool(feedback)):
-        previews = [r for r in runs if allowed_preview(r, "normal_preview.png") and allowed_preview(r, "synthetic_heatmap.png")]
-        if not previews:
-            st.info("No development heatmap preview has been recorded yet.")
-        else:
-            by_id = {r["run_id"]: r for r in previews}
-            picker, opacity_control = st.columns([3, 2], gap="large")
-            selected = picker.selectbox("Experiment", list(by_id), format_func=lambda rid: run_label(by_id[rid], include_date=True), key="heatmap_run")
-            opacity = opacity_control.slider("Heatmap opacity", 0, 100, 38, 5, format="%d%%") / 100
-            run = by_id[selected]
-            st.caption(f"{classify_run(run)} · Synthetic development sample 1 · {run.get('category', 'unknown')} good-image source")
-            sample = heatmap_sample(run, opacity)
-            if sample is None:
-                st.error("The preview is incomplete, unsafe, or its image dimensions do not align.")
-            else:
-                left, right = st.columns(2, gap="large")
-                with left:
-                    st.write("**Original good image**")
-                    st.image(sample["original"], width="stretch")
-                with right:
-                    st.write("**Synthetic anomaly overlay**")
-                    st.image(sample["overlay"], width="stretch")
-                score = metric_value(run, "dev_synthetic/preview_anomaly_score")
-                st.caption(f"Preview anomaly score: {format_metric(score, 'score')} · Original coordinates: {sample['size'][0]} × {sample['size'][1]} px. The color map is scaled for visual inspection, not a calibrated threshold.")
-                with st.expander("Inspect synthetic input, raw heatmap and generated mask"):
-                    c1, c2, c3 = st.columns(3)
-                    c1.image(sample["synthetic"], caption="Synthetic input", width="stretch")
-                    c2.image(sample["heatmap"], caption="Raw anomaly heatmap", width="stretch")
-                    if sample["mask"]:
-                        c3.image(sample["mask"], caption="Generated synthetic mask", width="stretch")
-                    else:
-                        c3.caption("No synthetic mask saved for this run.")
-
-with compare_tab:
-    campaign = campaign_summary()
-    scope = st.radio('Comparison scope', ['Latest campaign', 'All recorded evaluations'], horizontal=True) if campaign else 'All recorded evaluations'
-    scientific_results_comparison(feedback, campaign['run_ids'] if campaign and scope == 'Latest campaign' else None)
-    if feedback:
-        st.subheader('Efficiency and evaluator details')
-        st.caption('Same custom split; compare only matching evaluator versions and inference devices. AU-sPRO uses the compatible development implementation.')
-        st.dataframe([{'Candidate':f['candidate_id'],'Evaluator':f['evaluator_version'],
-                       'Logical AU-sPRO @5%':f['metrics'].get('dev_real/logical_au_spro_0_05_compatible'),
-                       'Structural AU-sPRO @5%':f['metrics'].get('dev_real/structural_au_spro_0_05_compatible'),
-                       'Inference device':f.get('inference_device','cpu'),
-                       'p50 (ms)':f['metrics'].get('dev_real/inference_e2e_ms_p50'),
-                       'p95 (ms)':f['metrics'].get('dev_real/inference_e2e_ms_p95'),
-                       'Parameters':f['metrics'].get('dev_real/parameters')} for f in feedback],hide_index=True,width='stretch')
-    with st.expander('Historical synthetic comparisons',expanded=not bool(feedback)):
-        study = latest_multiseed_comparison()
-        if study:
-            st.subheader("Three-seed comparison")
-            st.caption("Version 2 synthetic development evaluation · mean ± sample SD across training seeds. Image-pair intervals and seed variation are distinct; no official LOCO scores.")
-            table = []
-            for arm in study['arms']:
-                values = study['across_seed'][arm]
-                table.append({'Context': arm.replace('_', ' ').title(),
-                    'Primary AP': f"{values['primary_pixel_ap']['mean']:.3f} ± {values['primary_pixel_ap']['sample_sd']:.3f}",
-                    'Alternate AP': f"{values['alternate_pixel_ap']['mean']:.3f} ± {values['alternate_pixel_ap']['sample_sd']:.3f}",
-                    'Copy-insertion AP': f"{values['relocated_pixel_ap']['mean']:.3f} ± {values['relocated_pixel_ap']['sample_sd']:.3f}"})
-            st.dataframe(table, hide_index=True, width="stretch")
-            with st.expander("Paired differences and per-seed runs"):
-                differences = []
-                for arm, endpoints in study['paired_differences'].items():
-                    for endpoint, value in endpoints.items():
-                        differences.append({'Arm minus local': arm.title(), 'Proxy': endpoint.replace('_', ' '),
-                            'Mean paired difference': f"{value['arm_minus_local_mean']:+.3f}",
-                            'Between-seed SD': f"{value['between_seed_sample_sd']:.3f}"})
-                st.dataframe(differences, hide_index=True, width="stretch")
-                st.caption("Per-seed image-cluster intervals and run IDs are recorded in the campaign comparison and MLflow artifact.")
-        comparable = comparable_research_runs(runs)
-        if not comparable:
-            st.info("Pareto comparison will appear after at least two different research candidates have complete, comparable development measurements on the same good-image manifest. Infrastructure tests are excluded.")
-        else:
-            st.caption("Research candidates only · same dataset fingerprint · synthetic localization proxy, not official LOCO performance")
-            measurement = st.selectbox("Trade-off", [
-                "Localization proxy vs latency", "Localization proxy vs model size",
-                "Latency vs model size", "Peak GPU memory vs localization proxy",
-            ])
-            axes = {
-                "Localization proxy vs latency": ("inference/e2e_ms_p95", "dev_synthetic/pixel_auroc"),
-                "Localization proxy vs model size": ("inference/checkpoint_mib", "dev_synthetic/pixel_auroc"),
-                "Latency vs model size": ("inference/checkpoint_mib", "inference/e2e_ms_p95"),
-                "Peak GPU memory vs localization proxy": ("inference/peak_vram_mib", "dev_synthetic/pixel_auroc"),
-            }
-            x_key, y_key = axes[measurement]
-            frontier = set(pareto_frontier(comparable, include_resources=True))
-            points = [{"Candidate": run_label(r), "Frontier": "Nondominated" if r["run_id"] in frontier else "Other",
-                       "Run": r["run_id"][:8], x_key: metric_value(r, x_key), y_key: metric_value(r, y_key)} for r in comparable]
-            labels = {key: METRICS[key][0] + (" (ms)" if METRICS[key][2] == "ms" else " (MiB)" if METRICS[key][2] == "MiB" else "") for key in (x_key, y_key)}
-            chart = px.scatter(pd.DataFrame(points), x=x_key, y=y_key, color="Frontier", hover_name="Candidate",
-                               hover_data=["Run"], labels=labels, color_discrete_map={"Nondominated": "#1D6B66", "Other": "#8A94A3"})
-            chart.update_traces(marker={"size": 13})
-            chart.update_layout(legend_title_text="", margin=dict(l=10, r=10, t=15, b=10))
-            st.plotly_chart(chart, width="stretch")
-            with st.expander("How this comparison is selected"):
-                st.write("Only completed research runs with localization proxy, latency, checkpoint size and peak GPU memory measurements are eligible. The frontier uses those measured axes and model parameter count. Synthetic proxies cannot establish official LOCO performance.")
+# Historical synthetic studies remain inspectable, clearly separated from real
+# development results; they never become the primary model ranking.
+from dashboard.data_access import latest_multiseed_comparison
+study=latest_multiseed_comparison()
+if study:
+    with st.expander('Historical synthetic comparison'):
+        st.subheader('Three-seed comparison')
+        st.caption('Synthetic development proxy only; independent of real-anomaly results above.')
+        table([{'Arm':arm,'Primary AP mean':study['across_seed'][arm]['primary_pixel_ap']['mean'],
+            'Between-seed SD':study['across_seed'][arm]['primary_pixel_ap']['sample_sd'],
+            'Alternate AP mean':study['across_seed'][arm]['alternate_pixel_ap']['mean']} for arm in study['arms']])
+        st.json(study['paired_differences'])

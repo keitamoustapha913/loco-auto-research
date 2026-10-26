@@ -83,9 +83,9 @@ def get_proposals():
     return result
 
 
-def campaign_summary():
+def campaign_summary(campaign_id=None):
     """Latest durable campaign, with no inferred or simulated agent activity."""
-    records = rows("SELECT * FROM campaigns ORDER BY created_at DESC LIMIT 1")
+    records = rows("SELECT * FROM campaigns WHERE id=?", (campaign_id,)) if campaign_id else rows("SELECT * FROM campaigns ORDER BY (status='RUNNING') DESC, created_at DESC LIMIT 1")
     if not records:
         return None
     campaign = records[0]
@@ -265,10 +265,15 @@ def tracking_health():
         return "Offline"
 
 
-def real_feedback_summaries():
+def real_feedback_summaries(campaign_id=None):
     # Select the latest feedback per run, then present candidates in execution
     # order, independent of when tracking/evaluation events were delivered.
-    result = rows("SELECT e.run_id,e.payload_json,r.candidate_id FROM events e JOIN runs r ON r.run_id=e.run_id WHERE e.kind='REAL_DEVELOPMENT_FEEDBACK' AND e.id=(SELECT MAX(latest.id) FROM events latest WHERE latest.run_id=e.run_id AND latest.kind='REAL_DEVELOPMENT_FEEDBACK') ORDER BY r.created_at, r.rowid LIMIT 100")
+    result = rows("SELECT e.run_id,e.payload_json,r.candidate_id FROM events e JOIN runs r ON r.run_id=e.run_id WHERE e.kind='REAL_DEVELOPMENT_FEEDBACK' AND e.id=(SELECT MAX(latest.id) FROM events latest WHERE latest.run_id=e.run_id AND latest.kind='REAL_DEVELOPMENT_FEEDBACK') ORDER BY r.created_at, r.rowid")
+    if campaign_id is not None:
+        members={r['run_id'] for r in rows('SELECT run_id FROM campaign_runs WHERE campaign_id=?',(campaign_id,))}
+        result=[r for r in result if r['run_id'] in members]
+    states={r['name'][len('artifact_retention:'):]:json.loads(r['value']) for r in rows("SELECT name,value FROM settings WHERE name LIKE 'artifact_retention:%'")}
+    comparisons={r['run_id']:json.loads(r['payload_json']) for r in rows("SELECT run_id,payload_json FROM events WHERE kind='SCIENTIFIC_COMPARISON' ORDER BY id")}
     summaries = []
     seen = set()
     for row in result:
@@ -277,11 +282,8 @@ def real_feedback_summaries():
         try:
             summary = json.loads(row['payload_json'])
             summary.update(run_id=row['run_id'],candidate_id=row['candidate_id'])
-            state=rows('SELECT value FROM settings WHERE name=?',('artifact_retention:'+row['run_id'],))
-            if state:summary['artifact_availability']=json.loads(state[0]['value'])
-            comparison = rows("SELECT payload_json FROM events WHERE run_id=? AND kind='SCIENTIFIC_COMPARISON' ORDER BY id DESC LIMIT 1", (row['run_id'],))
-            if comparison:
-                summary['scientific_comparison'] = json.loads(comparison[0]['payload_json'])
+            if row['run_id'] in states:summary['artifact_availability']=states[row['run_id']]
+            if row['run_id'] in comparisons:summary['scientific_comparison']=comparisons[row['run_id']]
             summaries.append(summary)
         except (ValueError,TypeError):
             continue

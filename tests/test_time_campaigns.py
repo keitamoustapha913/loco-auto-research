@@ -261,11 +261,11 @@ def test_results_page_shows_training_and_research_duration(tmp_path,monkeypatch)
     store.set_run_result(rid,{'training/loop_elapsed_seconds':12.5,'training/duration_seconds':12.5},gpu_seconds=99,artifact_dir=tmp_path/'artifact')
     store.transition(rid,'COMPLETED');c.attach_run(cid,rid)
     monkeypatch.setenv('LOCO_RUNTIME',str(tmp_path));monkeypatch.setenv('LOCO_LEDGER',str(store.path))
-    page=Path(__file__).parents[1]/'dashboard/pages/03_Results.py'
+    page=Path(__file__).parents[1]/'dashboard/app.py'
     rendered=AppTest.from_file(str(page),default_timeout=10).run()
     assert not rendered.exception
     metrics={item.label:item.value for item in rendered.metric}
-    assert 'Research duration' in metrics and 'Training-loop duration' in metrics
+    assert 'Research elapsed' in metrics and 'Training-loop duration' in metrics
     assert 'GPU-slot time' not in metrics and 'Codex calls' not in metrics
 
 

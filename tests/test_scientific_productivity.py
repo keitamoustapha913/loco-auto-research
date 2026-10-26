@@ -172,6 +172,7 @@ print('diagnostic input contract OK')
 
 
 def test_probe_preserves_full_logs_and_decisive_exception_tail(tmp_path,monkeypatch):
+    (tmp_path/'model.py').write_text('def diagnose(*args): return {}\n')
     from orchestrator import experiment_runner,sandbox
     monkeypatch.setattr(sandbox,'command',lambda *a,**kw:['fixture'])
     stderr='old context\n'*3000+'Traceback: diagnostic.py:143\nValueError: DECISIVE calibration contract\n'

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import ast
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -13,6 +14,36 @@ from orchestrator.budgets import max_job_seconds
 from orchestrator.state_store import StateStore
 from orchestrator.controller_errors import CandidateValidationError
 from orchestrator.mlflow_tracker import enqueue_run_tracking
+
+
+def validate_training_timing(config, metrics, timing):
+    """Completed boundary audit, with a bounded 100-us legacy bookkeeping allowance.
+
+    Historical loop audits omitted publication between adjacent updates from
+    last_iteration_seconds. New clocks measure consecutive update boundaries.
+    This tolerance never permits finishing below the configured target.
+    """
+    if timing.get('protocol')!='prepared-training-step-v1' or timing.get('verified') is not True or timing.get('status')!='COMPLETED':
+        raise ValueError('training-only budget cannot be verified from completed phase audit')
+    duration=timing.get('duration_seconds');target=config['training_budget_seconds']
+    policy=config.get('training_completion_policy','required-training-target-v1')
+    if not isinstance(duration,(float,int)) or isinstance(duration,bool) or not math.isfinite(duration) or duration<0:
+        raise ValueError('invalid training duration')
+    if metrics.get('training/duration_seconds')!=duration:
+        raise ValueError('training-only timing metric or deadline mismatch')
+    if policy in {'required-training-target-v1','elapsed-training-loop-v1'}:
+        last=timing.get('last_iteration_seconds' if policy=='elapsed-training-loop-v1' else 'last_step_seconds',0)
+        steps=timing.get('completed_steps')
+        if (isinstance(last,bool) or not isinstance(last,(float,int)) or not math.isfinite(last) or last<=0
+                or type(steps) is not int or steps<1):
+            raise ValueError('unverifiable final optimizer update')
+        if metrics.get('protocol/optimizer_updates',steps)!=steps:
+            raise ValueError('training audit and optimizer-update count disagree')
+        tolerance=1e-4 if policy=='elapsed-training-loop-v1' and timing.get('boundary_definition') is None else 1e-6
+        if duration<target or timing.get('completion_policy')!=policy or duration-target>last+tolerance:
+            raise ValueError('training-only timing metric or deadline mismatch')
+    elif duration>target:
+        raise ValueError('training-only timing metric or deadline mismatch')
 
 
 def safe_candidate_id(candidate_id):
@@ -100,6 +131,9 @@ def require_training_phases(path, target=False, loop=False):
 
 def probe_candidate_interface(repo_root, module_file, good_root, runtime, candidate_id, timeout=20, cancel=None, *, diagnostic_only=False):
     """Import untrusted code only inside the no-network CPU sandbox before GPU queueing."""
+    from benchmark.synthetic_geometry import validate_candidate_geometry
+    from orchestrator.controller_errors import candidate_check
+    candidate_check(validate_candidate_geometry,module_file)
     from orchestrator.sandbox import command as sandbox_command
     safe_candidate_id(candidate_id)
     probe_root = Path(runtime).resolve() / 'probes'
@@ -424,10 +458,7 @@ def execute_run(run: dict, store: StateStore, repo_root: Path, manifest_path: Pa
                 metrics = measured['metrics']
                 if config.get('training_budget_seconds') is not None and config.get('execution_kind')!='frozen':
                     timing=read_training_timing(job_dir/'training_timing.json')
-                    if timing.get('protocol')!='prepared-training-step-v1' or timing.get('verified') is not True or timing.get('status')!='COMPLETED':
-                        raise ValueError('training-only budget cannot be verified from completed phase audit')
-                    if metrics.get('training/duration_seconds')!=timing['duration_seconds'] or ((timing['duration_seconds']<config['training_budget_seconds'] or timing.get('completion_policy')!=config.get('training_completion_policy','required-training-target-v1') or timing['duration_seconds']-config['training_budget_seconds']>timing.get('last_iteration_seconds' if config.get('training_completion_policy')=='elapsed-training-loop-v1' else 'last_step_seconds',0)+1e-6) if config.get('training_completion_policy') in {'required-training-target-v1','elapsed-training-loop-v1'} else timing['duration_seconds']>config['training_budget_seconds']):
-                        raise ValueError('training-only timing metric or deadline mismatch')
+                    validate_training_timing(config, metrics, timing)
                 if not isinstance(metrics, dict):
                     raise ValueError('measurement metrics must be an object')
                 if config.get('plan_sha256') and measured.get('provenance',{}).get('effective_configuration') != config:
